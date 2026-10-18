@@ -73,3 +73,10 @@
 - [x] `child_size_hint` setting in every planner round's environment
 - [x] Optional triage of new top-level tickets by a System One model (`triage_model`); score ≥ 3 splits, errors run directly
 - [x] UI: "Escalated to" / "Split from" links, epic gate and triage in transcripts, settings; demo provider `SPLIT-ME`, `SPLIT-CHILD`, `EPIC-GATE-FAIL`
+
+## M10: project wiki
+- [x] Per-workspace wiki git repo (`SCHEMA.md`, `index.md`, `log.md`, overview/modules/howto/gotchas pages with sources + verified frontmatter); `wiki` setting (default on)
+- [x] Every run (worker, planner, reviewer) gets a read-only `.harness/wiki` snapshot and a `# Project wiki` index with mechanical staleness flags; a write there fails the gate
+- [x] Approve queues a serialized wiki ingest (role `wiki`: read-only code checkout + wiki clone, `edit_file` only in the wiki); mechanical lint with fix rounds before the commit
+- [x] Build wiki (bootstrap), Refresh stale pages (LLM lint), Lint button; human page edits as commits
+- [x] Wiki page: index with stale flags, viewer/editor, history with diffs, maintainer runs; `## Wiki notes` asked of workers; demo maintainer

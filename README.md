@@ -74,6 +74,15 @@ The **Improvement** page has the three loops (details in [SPEC.md](SPEC.md)):
   its eval on the current cases beats the active version's (more passed, or the same with ≥ 10% fewer mean tokens).
   Nothing is promoted automatically.
 
+## Project wiki (M10)
+
+Each workspace has a wiki (a git repo under the data dir) that an LLM maintains from approved work and every agent reads first:
+the **Wiki** page shows the index (pages whose source files changed since they were verified are flagged), lets you read and edit
+pages, and lists the history with diffs. After you **Approve** a ticket a maintainer agent updates the pages the change affects;
+its edit only lands if the mechanical lint passes. **Build wiki** writes a first version from the code, **Refresh stale pages**
+re-verifies flagged ones, **Lint** checks the structure. Runs see the pages read-only at `.harness/wiki/`. Off per workspace in
+Settings. Details: [SPEC.md](SPEC.md#project-wiki-m10).
+
 ## Planner (M7)
 
 New ticket → **Epic**, describe the goal, **Run planner**. A planner agent (read-only checkout, no code changes) creates
