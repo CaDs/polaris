@@ -31,8 +31,8 @@ updated: YYYY-MM-DD
 ---
 ```
 
-- `sources`: repo-relative files or directories the page describes. The harness flags the page as possibly stale when
-  any of them changed since `verified`. List the files that matter, not the whole tree.
+- `sources`: repo-relative files or directories the page describes; each must exist at `verified`. The harness flags the
+  page as possibly stale when any of them changed since `verified`. List the files that matter, not the whole tree.
 - `verified`: the project commit at which you checked the page against the code. Set it to the commit named in your
   task whenever you write or re-check a page.
 - A page is at most 3500 characters. A longer page is split into several linked pages.

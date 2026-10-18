@@ -66,7 +66,7 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   await page.getByRole("region", { name: "Transcript" }).getByText("First message").first().click();
   const first = page.getByRole("region", { name: "Transcript" }).locator("pre").first();
   await expect(first).toContainText("# Project wiki");
-  await expect(first).toContainText("- [Demo module](modules/demo.md) — written by the demo maintainer");
+  await expect(first).toContainText("- [Demo module](.polaris/wiki/modules/demo.md) — written by the demo maintainer");
   await expect(first).toContainText("Read the pages relevant to your task (.polaris/wiki/<path>)");
   await expect(first).toContainText("Read-only paths (changes there fail the run): tests, evals, .polaris/wiki");
 });

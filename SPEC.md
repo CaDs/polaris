@@ -312,18 +312,19 @@ bootstrap (existing pages stay readable in the UI).
   `.polaris/wiki/` (git-excluded like `.polaris/outputs`; added to the run's protected paths: the sandbox mounts it read-only, and
   because git cannot see an excluded dir the gate also compares it with the exported snapshot, so a write there fails the gate
   as a protected-path change). The first user message gets `# Project wiki`: an instruction line ("Read the pages relevant to your
-  task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.") and the index, with a
+  task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.") and the index (links rewritten to `.polaris/wiki/<path>`, so a page is not
+  mistaken for a code file), with a
   ` ⚠ may be stale: <files>` flag on each page whose `sources` changed in the project repo between its `verified` sha and the run's
-  base sha (`git diff --name-only <verified> <base> -- <sources>`; a verified sha the repo does not have = stale; no sources =
+  base sha (`git diff --name-only <verified> <base> -- <sources>`; a verified sha the repo does not have, or a source missing at it, = stale; no sources =
   fresh). Absent when the wiki has no pages. Per-run text only in the first user message (the cache prefix rule). A wiki that
   cannot be read does not stop the run (an `error` event, no section).
 - **Writing: one serialized maintainer, only from approved work.** Approve (button or auto-approve of children; not an epic's)
   queues a **wiki ingest**: a run with `role = 'wiki'`, `wiki_op = 'ingest'`, `base_sha` = the merge commit, on the ticket
   (listed in its run list as "wiki", never the default transcript, not counted in its status or totals), with the approved
-  run's provider and model (else the workspace default). It goes through the normal FIFO queue and concurrency slots, and
-  `wikiSerial` makes runs of one workspace (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the
-  previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
-  the wiki repo). Tools: `read_file`, `search`, `edit_file` only; `code/` and `wiki/.git` (its config could run commands on the host) are protected paths, so `edit_file` there fails. **No
+  run's provider and model (else the workspace default). It goes through the normal FIFO queue and concurrency slots (but stays queued
+  while another wiki run of its workspace runs, so it never holds a slot just to wait), and `wikiSerial` makes runs of one
+  workspace (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
+  the wiki repo). Tools: `read_file`, `search`, `edit_file`, `delete_file` only; `code/` and `wiki/.git` (its config could run commands on the host) are protected paths, so `edit_file` and `delete_file` there fail. **No
   shell**: a host shell could write anywhere, and the planner works the same way. System prompt `prompts/wiki.md` (static).
   First message: environment, ticket title and spec, the files changed, the merged diff (15,000 chars), the worker's final reply
   (which may contain a `## Wiki notes` section; worker.md asks for one when it learned something non-obvious) and the current
@@ -336,14 +337,17 @@ bootstrap (existing pages stay readable in the UI).
 - **Mechanical lint** (`lintDir`, on every commit and the **Lint** button): every content page has valid frontmatter (title, a
   `sources: [...]` list of repo-relative paths, hex `verified`); every content page is linked from `index.md` and every index link is
   a content page; page and index size caps; only root `.md` files, `modules/*.md` and `howto/*.md` exist (no other files, no
-  symlinks).
+  symlinks). On commit (maintainer and human edit) also: each page's `verified` is a commit of the project repo and each of its
+  `sources` exists at that commit.
 - **Bootstrap** (**Build wiki**, `POST /api/wiki/bootstrap`): the same flow on the base branch head, task: overview, a page per main
   part, howto pages (from README/AGENTS.md/CLAUDE.md and the code), gotchas. Commit `bootstrap: <repo> at <branch> <sha8>`.
   **Refresh stale pages** (`POST /api/wiki/lint`, 409 when nothing is stale): the task lists the pages stale against the base head;
-  the maintainer re-verifies each against the code and fixes or deletes it. Commit `lint: re-verify N stale pages at <sha8>`.
+  the maintainer re-verifies each against the code and fixes or deletes it. Commit `lint: re-verify N stale pages at <sha8>`. A
+  lint run that finds nothing stale when it starts (an earlier run or an edit fixed it) passes with `wiki {unchanged}`.
   Bootstrap and lint runs have no ticket: they hang off one hidden ticket per workspace (`tickets.hidden`, number -1).
 - **UI.** The **Wiki** nav entry (`web/Wiki.tsx`): the index with stale flags, a page viewer (small markdown subset, internal links)
-  and editor (`PUT` → mechanical lint → commit `edit <path> by <email>` + log entry), history with a per-commit diff, the maintainer
+  and editor (`PUT` with the page as opened as `base`, refused if the page changed since → mechanical lint → commit
+  `edit <path> by <email>` + log entry), history with a per-commit diff, the maintainer
   runs with their transcripts, the buttons above. Transcripts show a "First message" disclosure for each conversation.
 - **API** (workspace-scoped; page paths are checked against the allowed layout and resolved with `resolveIn`): `GET /api/wiki`
   (index, pages with stale flags, log, lint problems of HEAD, recent maintainer runs), `GET|PUT /api/wiki/page`,

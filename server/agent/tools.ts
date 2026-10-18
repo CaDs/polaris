@@ -244,6 +244,22 @@ const editFile: Tool = {
   },
 };
 
+// The wiki maintainer's only way to remove a page (it has no shell).
+const deleteFile: Tool = {
+  def: {
+    name: "delete_file",
+    description: "Delete a file.",
+    input_schema: { type: "object", properties: { path: { type: "string", description: "Path relative to the workspace root" } }, required: ["path"] },
+  },
+  async run(input, { root, protectedPaths = [] }) {
+    const p = str(input, "path")!;
+    const file = writable(root, p, protectedPaths);
+    if (!existsSync(file)) throw new AgentError("InvalidArguments", `file not found: ${p}`);
+    unlinkSync(file);
+    return `deleted ${p}`;
+  },
+};
+
 // V4A patch format (what GPT models are trained on). Checked in full before anything is written.
 const PATCH_HELP = "Patch format: '*** Begin Patch', then '*** Add File: p' (+lines) | '*** Delete File: p' | '*** Update File: p' (hunks: optional '@@ header', then ' context', '-old', '+new' lines), then '*** End Patch'.";
 
@@ -403,7 +419,7 @@ export const readOnlyTools: Tool[] = [readFile, search];
 // Model review (M8): reads and runs commands (git diff, tests), never edits.
 export const reviewTools: Tool[] = [readFile, search, shell];
 // Wiki maintainer (M10): reads the code, edits only the wiki copy (the caller protects the code checkout).
-export const wikiTools: Tool[] = [readFile, editFile, search];
+export const wikiTools: Tool[] = [readFile, editFile, deleteFile, search];
 // Edit tool per model family: GPT models are trained on apply_patch, everything else gets str_replace.
 export const toolsFor = (kind?: string): Tool[] => (kind === "openai" ? [readFile, applyPatch, shell, search] : tools);
 
