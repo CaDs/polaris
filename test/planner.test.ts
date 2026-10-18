@@ -5,11 +5,11 @@ import { existsSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. HARNESS_SANDBOX=host (no docker), demo provider.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "planner-data-"));
+// M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. POLARIS_SANDBOX=host (no docker), demo provider.
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "planner-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { createRun } = await import("../server/agent/events.ts");
@@ -202,13 +202,13 @@ test("rounds are batched: children that settle while a round is queued are seen 
   const d = await w.childIs(e.id, "Create b.txt", "review");
   assert.deepEqual(d.children.map((c: any) => c.depends_keys), [[], []]);
   await until("round 1 finished", async () => (await w.get(e.id)).runs[0].status === "passed");
-  process.env.HARNESS_CONCURRENCY = "0"; // hold the queue
+  process.env.POLARIS_CONCURRENCY = "0"; // hold the queue
   try {
     for (const c of d.children) assert.equal((await call("POST", `/api/tickets/${c.id}/approve`, w.cookie)).status, 200);
     const held = (await w.get(e.id)).runs;
     assert.deepEqual(held.map((r: any) => r.status), ["passed", "queued"]); // the second settle found round 2 queued
   } finally {
-    process.env.HARNESS_CONCURRENCY = "2";
+    process.env.POLARIS_CONCURRENCY = "2";
   }
   pump();
   const done = await w.is(e.id, "review");
@@ -301,7 +301,7 @@ test("every worktree and branch is cleaned up", async () => {
   await until("no run in flight", async () => !db.prepare("SELECT 1 FROM runs WHERE status IN ('queued', 'running')").get());
   for (const repo of repos) {
     assert.equal(sh(repo, "git worktree list").split("\n").length, 1, repo);
-    assert.equal(sh(repo, "git for-each-ref refs/heads/harness"), "", repo);
+    assert.equal(sh(repo, "git for-each-ref refs/heads/polaris"), "", repo);
   }
-  assert.deepEqual(readdirSync(join(process.env.HARNESS_DATA_DIR!, "worktrees")), []);
+  assert.deepEqual(readdirSync(join(process.env.POLARIS_DATA_DIR!, "worktrees")), []);
 });

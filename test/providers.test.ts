@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M4: encrypted provider secrets, provider API, provider/model choice per ticket and per retry.
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_RETRY_BASE_MS = "1"; // a dead provider is retried 4 times: don't wait seconds
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "prov-data-"));
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_RETRY_BASE_MS = "1"; // a dead provider is retried 4 times: don't wait seconds
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "prov-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { encrypt, decrypt, SecretKeyError } = await import("../server/secrets.ts");
@@ -76,12 +76,12 @@ test("encryption round-trips and detects tampering, wrong keys and a missing key
     bad[at] ^= 1;
     assert.throws(() => decrypt("v1:" + bad.toString("base64")), `byte ${at}`);
   }
-  const key = process.env.HARNESS_SECRET_KEY;
-  process.env.HARNESS_SECRET_KEY = "ff".repeat(32);
+  const key = process.env.POLARIS_SECRET_KEY;
+  process.env.POLARIS_SECRET_KEY = "ff".repeat(32);
   assert.throws(() => decrypt(c));
-  delete process.env.HARNESS_SECRET_KEY;
+  delete process.env.POLARIS_SECRET_KEY;
   assert.throws(() => encrypt("x"), SecretKeyError);
-  process.env.HARNESS_SECRET_KEY = key;
+  process.env.POLARIS_SECRET_KEY = key;
 });
 
 test("provider API never returns secrets, validates input, and is isolated per workspace", async () => {
@@ -103,14 +103,14 @@ test("provider API never returns secrets, validates input, and is isolated per w
   for (const bad of [{}, { name: "x", kind: "bogus" }, { name: "x", kind: "ollama", auth_type: "api_key" }, { name: "x", kind: "anthropic", base_url: "ftp://x" }, { name: "", kind: "ollama" }, { name: "x", kind: "ollama", api_key: "k" }])
     assert.equal((await call("POST", "/api/providers", alice, bad)).status, 400, JSON.stringify(bad));
 
-  // No HARNESS_SECRET_KEY: saving a secret is refused with a clear message; providers without secrets still work.
-  const k = process.env.HARNESS_SECRET_KEY;
-  delete process.env.HARNESS_SECRET_KEY;
+  // No POLARIS_SECRET_KEY: saving a secret is refused with a clear message; providers without secrets still work.
+  const k = process.env.POLARIS_SECRET_KEY;
+  delete process.env.POLARIS_SECRET_KEY;
   const refused = await call("POST", "/api/providers", alice, { name: "NoKey", kind: "openai", api_key: "sk-x" });
   assert.equal(refused.status, 400);
-  assert.match(refused.body.error, /HARNESS_SECRET_KEY/);
+  assert.match(refused.body.error, /POLARIS_SECRET_KEY/);
   assert.equal((await call("POST", "/api/providers", alice, { name: "Local", kind: "ollama", base_url: mock })).status, 201);
-  process.env.HARNESS_SECRET_KEY = k;
+  process.env.POLARIS_SECRET_KEY = k;
 
   // Isolation: bob sees none of alice's providers and gets 404 on all of them.
   assert.deepEqual((await call("GET", "/api/providers", bob)).body, []);

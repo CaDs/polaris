@@ -42,7 +42,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   const ctx = { root: o.root, exec: o.exec ?? hostExec, signal: o.signal, protectedPaths: o.protectedPaths };
   let reads = new Map<string, { out: string; turn: number }>(); // read_file dedupe; belongs to the current conversation (see compact)
   const system = [{ type: "text" as const, text: o.system }];
-  const histories: string[] = []; // .harness/history/<n>.md, one per compaction
+  const histories: string[] = []; // .polaris/history/<n>.md, one per compaction
   let contextTokens = 0;
   let continues = 0;
   let turns = 0;
@@ -73,8 +73,8 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   // Full history to a file, one summary-only turn, then a fresh conversation: task + summary + pointer to the history.
   async function compact() {
     const n = histories.length + 1;
-    const path = `.harness/history/${n}.md`;
-    mkdirSync(join(o.root, ".harness/history"), { recursive: true });
+    const path = `.polaris/history/${n}.md`;
+    mkdirSync(join(o.root, ".polaris/history"), { recursive: true });
     writeFileSync(join(o.root, path), historyMarkdown(messages, n));
     const before = contextTokens;
     messages.push(user(SUMMARY_REQUEST));

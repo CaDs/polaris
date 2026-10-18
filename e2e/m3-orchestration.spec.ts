@@ -45,7 +45,7 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await expect(page.getByLabel("Base branch")).toHaveValue("main");
   await expect(page.getByLabel("Test command")).toHaveValue("test -f ok.txt");
 
-  // Queue: a slow run holds the only slot (HARNESS_CONCURRENCY=1), so the next run waits as queued.
+  // Queue: a slow run holds the only slot (POLARIS_CONCURRENCY=1), so the next run waits as queued.
   await newTicket(page, "Blocker", "this one is slow");
   await openTicket(page, "Blocker");
   await page.getByRole("button", { name: "Run agent" }).click();
@@ -67,8 +67,8 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await openTicket(page, "Make ok file");
   await expect(page.getByRole("button", { name: "Show run #2" })).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Show run #1" }).click();
-  await expect(transcript).toContainText("Worktree on branch harness/ORC-1-1-");
-  await expect(transcript).toContainText("Sandbox harness-");
+  await expect(transcript).toContainText("Worktree on branch polaris/ORC-1-1-");
+  await expect(transcript).toContainText("Sandbox polaris-");
   await expect(transcript).toContainText("Tests failed: `test -f ok.txt` exited with code 1");
   await page.getByRole("button", { name: "Show run #2" }).click();
   await expect(transcript).toContainText("the previous attempt failed", { timeout: 60_000 });
@@ -87,7 +87,7 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   expect(git(repo, "log", "--format=%s", "main")).toContain("ORC-1: Make ok file");
   expect(git(repo, "show", "main:ok.txt")).toBe("ok");
   expect(existsSync(join(repo, "ok.txt"))).toBe(true);
-  expect(git(repo, "for-each-ref", "refs/heads/harness")).toBe("");
+  expect(git(repo, "for-each-ref", "refs/heads/polaris")).toBe("");
 
   // Reject: main now has ok.txt (gate passes on attempt 1) and notes.txt (the demo agent changes nothing, empty diff).
   // Rejecting returns the ticket to todo and deletes the branch.
@@ -101,7 +101,7 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await page.getByRole("dialog").getByRole("button", { name: "Reject" }).click();
   await expect(status).toHaveValue("todo");
   await expect(page.getByRole("region", { name: "Review" })).toBeHidden();
-  expect(git(repo, "for-each-ref", "refs/heads/harness")).toBe("");
+  expect(git(repo, "for-each-ref", "refs/heads/polaris")).toBe("");
   expect(git(repo, "log", "--format=%s", "main")).not.toContain("Reject me");
 });
 

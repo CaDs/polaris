@@ -1,6 +1,6 @@
-# Agent Harness — Spec
+# Polaris — Spec
 
-A self-hosted coding-agent harness with a web dashboard. You file tickets; agents work them in
+Polaris is a self-hosted coding-agent harness with a web dashboard. You file tickets; agents work them in
 sandboxed git worktrees; tests gate the result; you approve merges. From M3 on, the harness
 builds its own remaining milestones (`tasks.md`).
 
@@ -59,23 +59,23 @@ never changed mid-conversation either (cache prefix, model behaviour).
   so retries of a ticket share a cache). Cache hit rate = `cache_read / (input + cache_read + cache_write)`, shown per run
   and on the Usage page (`GET /api/usage`: totals, last 14 days, per model, top 10 tickets by tokens).
 - **Long tool output → file.** `shell` and `search` results over 8,000 chars are written in full to
-  `.harness/outputs/<turn>-<tool>-<id>.txt` in the run root (`/work/.harness/...` in the sandbox); the model gets the path,
+  `.polaris/outputs/<turn>-<tool>-<id>.txt` in the run root (`/work/.polaris/...` in the sandbox); the model gets the path,
   size, line count and the last ~2,000 chars, and reads the rest with `read_file` offset/limit or `rg`/`tail`. Capture is
   capped at 20 MB per stream. (`read_file` keeps its own 30k-char cap; it has offset/limit already, and spilling its output
-  would make reading a spilled file spill again.) `.harness/outputs/` and `.harness/history/` are added to the repo's
+  would make reading a spilled file spill again.) `.polaris/outputs/` and `.polaris/history/` are added to the repo's
   shared `info/exclude` when a worktree is created, and are also left out of `git add`, the diff and the protected-path
-  check. `.harness/skills/` is *not* excluded: skills are committed by humans.
+  check. `.polaris/skills/` is *not* excluded: skills are committed by humans.
 - **Compaction = summarize, then start a new conversation.** When the latest request's context size
   (`input + cache_read + cache_write`) exceeds `min(70% of the provider's context_window, workspace compact_at_tokens)`
-  (defaults: anthropic 1M, openai 400k, ollama 32,768; cap 150,000; an Ollama provider still at 32,768 is "auto": the run asks Ollama for the served context at start (`/api/ps` `context_length` of the loaded model, else `/api/show` `*.context_length`), any other stored value wins, detection failure falls back to the stored value; a `setup {step: "context", window, source, compact_at}` event records it; `HARNESS_COMPACT_AT` overrides both, for tests):
-  (a) the whole conversation is written as markdown to `.harness/history/<n>.md` (every message, tool call with input,
+  (defaults: anthropic 1M, openai 400k, ollama 32,768; cap 150,000; an Ollama provider still at 32,768 is "auto": the run asks Ollama for the served context at start (`/api/ps` `context_length` of the loaded model, else `/api/show` `*.context_length`), any other stored value wins, detection failure falls back to the stored value; a `setup {step: "context", window, source, compact_at}` event records it; `POLARIS_COMPACT_AT` overrides both, for tests):
+  (a) the whole conversation is written as markdown to `.polaris/history/<n>.md` (every message, tool call with input,
   tool result as the model saw it); (b) a user message asks for a progress summary with fixed headings (Goal, Done, Decisions, Key facts as file:line → fact, Left, Next step), appended at the end with the same tools and system, "no tool calls" instructed, calls made anyway are ignored;
   (c) a fresh `messages` array starts with original task + `Context was compacted. Summary: …` + the harness's own `git status --short` / `git diff` (cut at 12,000 chars; omitted outside a git repo) + the paths the old conversation read + `Full history:
-  .harness/history/1.md, … (search it with rg/read_file if a detail is missing)`. Event
+  .polaris/history/1.md, … (search it with rg/read_file if a detail is missing)`. Event
   `compaction {n, tokens_before, summary_chars, history_path}`; the transcript renders a divider. Turn and token budgets
   span compactions (the summary turn counts).
 - **read_file dedupe.** A `read_file` whose output is byte-identical to an earlier one (same path and range) in the *current* conversation returns a one-line stub naming that turn; any edit changes the bytes, so the content comes back. The memory is dropped on compaction and is empty on `resume`.
-- **Skills = our lazy loading.** Skills are `.harness/skills/*.md` with `name`/`description` frontmatter (plus optional
+- **Skills = our lazy loading.** Skills are `.polaris/skills/*.md` with `name`/`description` frontmatter (plus optional
   scripts beside them). Only `name — description — path` goes into the first user message; the model reads the file with
   `read_file` when relevant. Tool definitions are *not* loaded on demand: changing the tool list mid-conversation busts the
   cache prefix, so tools stay static per run and only the (cheap, append-only) text of skills is lazy. Same idea as
@@ -127,7 +127,7 @@ can read or write it, and every change is a new version you can see in full on t
    runs setup and the test command, and rejects the case if the tests already pass. A case that passes without the change
    can't tell an agent that solved it from one that did nothing, so it would only add noise to every score. An **eval
    run** scores one prompt version on every case (or a chosen subset): one queued run per case through the normal FIFO
-   queue and `HARNESS_CONCURRENCY` slots, each with a fresh detached worktree at base_sha + sandbox, the same pipeline
+   queue and `POLARIS_CONCURRENCY` slots, each with a fresh detached worktree at base_sha + sandbox, the same pipeline
    (setup → agent → test gate incl. protected-path check) with that prompt version and the lessons version active when
    the eval started; but no retries, no commit, no review, no reflection, the source ticket's status and run list never
    change, and the worktree is always removed (there is no branch). Results per case: passed, turns, tokens, cost, duration,
@@ -230,7 +230,7 @@ provider and model review the change before a human sees it (not for eval case r
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
   [{file, line?, problem, fix}]}` (request_changes needs a finding; `InvalidArguments` otherwise), which ends its loop.
   Budget: `clamp(6 + ceil(lines / 8), 8, 25)` turns for `lines` changed lines (git numstat against base plus new
-  files, minus `.harness/` scratch), same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
+  files, minus `.polaris/` scratch), same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
   `git diff` (new files are untracked: it reads them). Its first message: ticket, base sha, the test command that passed.
   It hunts correctness bugs against the spec and neighbouring code paths, not style.
 - **Fix rounds.** `request_changes`: the findings are appended to the worker's own conversation (`RunOptions.resume`, still
@@ -306,10 +306,10 @@ bootstrap (existing pages stay readable in the UI).
   Each content page has frontmatter `title`, `sources: [repo-relative paths]`, `verified: <sha of the project repo>`, `updated`;
   ≤ 3,500 chars (the maintainer splits longer pages). Reads always use the repo's HEAD (`git show`), never the working tree.
 - **Reading (worker, planner, reviewer; not frozen eval cases).** At run start the HEAD is exported into the run's worktree at
-  `.harness/wiki/` (git-excluded like `.harness/outputs`; added to the run's protected paths: the sandbox mounts it read-only, and
+  `.polaris/wiki/` (git-excluded like `.polaris/outputs`; added to the run's protected paths: the sandbox mounts it read-only, and
   because git cannot see an excluded dir the gate also compares it with the exported snapshot, so a write there fails the gate
   as a protected-path change). The first user message gets `# Project wiki`: an instruction line ("Read the pages relevant to your
-  task (.harness/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.") and the index, with a
+  task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.") and the index, with a
   ` ⚠ may be stale: <files>` flag on each page whose `sources` changed in the project repo between its `verified` sha and the run's
   base sha (`git diff --name-only <verified> <base> -- <sources>`; a verified sha the repo does not have = stale; no sources =
   fresh). Absent when the wiki has no pages. Per-run text only in the first user message (the cache prefix rule). A wiki that
@@ -349,7 +349,7 @@ bootstrap (existing pages stay readable in the UI).
 - **Demo provider.** The maintainer is recognized by its system prompt. Ingest writes `modules/demo.md` (sources = the files the
   merged diff touched, verified = the merge sha) and lists it in the index; bootstrap writes `overview.md`; lint re-verifies the first
   stale page; an existing page is updated line by line. `WIKI-NOTES` in a ticket adds a `## Wiki notes` section to the worker's reply,
-  `WIKI-WRITE` makes the worker write `.harness/wiki/x` with the shell (the gate must fail it), `WIKI-BAD` / `WIKI-FIXME` make the
+  `WIKI-WRITE` makes the worker write `.polaris/wiki/x` with the shell (the gate must fail it), `WIKI-BAD` / `WIKI-FIXME` make the
   maintainer of its ingest produce an invalid wiki that it never fixes / fixes in the first fix round.
 - **Not built, on purpose:** embeddings or search over the wiki (the index plus `read_file`/`rg` is enough at this size); the
   worker writing the wiki directly (only approved, linted, serialized changes land); LLM lint on a schedule (a button);
@@ -418,7 +418,7 @@ is a 400 in a body and matches nothing in a filter).
 
 ## Guardrails
 
-- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.harness/wiki` (M10).
+- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10).
 - The harness never edits its running code; changes land through the review queue.
 - Every run has a token budget; every passing run is a commit on its own branch.
 

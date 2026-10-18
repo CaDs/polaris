@@ -10,10 +10,10 @@ const env = {
   ...process.env,
   GIT_TERMINAL_PROMPT: "0",
   // Harness commits (passing runs, merges) never depend on the user's git identity.
-  GIT_AUTHOR_NAME: "agent-harness",
-  GIT_AUTHOR_EMAIL: "harness@localhost",
-  GIT_COMMITTER_NAME: "agent-harness",
-  GIT_COMMITTER_EMAIL: "harness@localhost",
+  GIT_AUTHOR_NAME: "polaris",
+  GIT_AUTHOR_EMAIL: "polaris@localhost",
+  GIT_COMMITTER_NAME: "polaris",
+  GIT_COMMITTER_EMAIL: "polaris@localhost",
 };
 
 export async function git(cwd: string, args: string[]) {
@@ -45,15 +45,15 @@ export async function inspectRepo(repoPath: string, baseBranch: string): Promise
 }
 
 // The agent's scratch dirs (spilled tool outputs, compaction history, the read-only wiki snapshot) are never part of a
-// change. .harness/skills/ is not listed: skills are committed by humans.
-export const HARNESS_SCRATCH = [".harness/outputs", ".harness/history", ".harness/wiki"];
-export const scratchPathspec = HARNESS_SCRATCH.map((p) => `:(exclude)${p}`);
+// change. .polaris/skills/ is not listed: skills are committed by humans.
+export const POLARIS_SCRATCH = [".polaris/outputs", ".polaris/history", ".polaris/wiki"];
+export const scratchPathspec = POLARIS_SCRATCH.map((p) => `:(exclude)${p}`);
 
 // Adds them to the repo's shared info/exclude (read by every worktree), so status/add/ls-files skip them.
 export async function excludeScratch(repo: string) {
   const file = await git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]);
   const cur = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const missing = HARNESS_SCRATCH.map((p) => `/${p}/`).filter((l) => !cur.split("\n").includes(l));
+  const missing = POLARIS_SCRATCH.map((p) => `/${p}/`).filter((l) => !cur.split("\n").includes(l));
   if (!missing.length) return;
   mkdirSync(dirname(file), { recursive: true });
   appendFileSync(file, `${cur && !cur.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`);
@@ -87,13 +87,13 @@ export async function removeWorktree(repo: string, path: string | null, branch: 
 export async function changedPaths(worktree: string, baseSha: string) {
   const tracked = await git(worktree, ["diff", "--name-only", "--no-renames", "-z", baseSha]);
   const untracked = await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  return [...tracked.split("\0"), ...untracked.split("\0")].filter((f) => f && !isProtected(f, HARNESS_SCRATCH));
+  return [...tracked.split("\0"), ...untracked.split("\0")].filter((f) => f && !isProtected(f, POLARIS_SCRATCH));
 }
 
 // Lines added + removed against base: tracked files by numstat (binary counts 0), new files by their line count.
 export async function changedLines(worktree: string, baseSha: string) {
   const sum = (await git(worktree, ["diff", "--numstat", baseSha, "--", ".", ...scratchPathspec])).split("\n").reduce((n, l) => n + (Number(l.split("\t")[0]) || 0) + (Number(l.split("\t")[1]) || 0), 0);
-  const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, HARNESS_SCRATCH));
+  const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, POLARIS_SCRATCH));
   const count = (f: string) => {
     try {
       return readFileSync(join(worktree, f), "utf8").match(/\n/g)?.length ?? 0;
@@ -109,7 +109,7 @@ export const protectedChanges = async (worktree: string, baseSha: string, protec
 
 export async function commitAll(worktree: string, message: string) {
   await git(worktree, ["add", "-A"]);
-  await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...HARNESS_SCRATCH]); // in case exclude is missing
+  await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...POLARIS_SCRATCH]); // in case exclude is missing
   await git(worktree, ["commit", "-q", "--allow-empty", "-m", message]);
   return git(worktree, ["rev-parse", "HEAD"]);
 }
@@ -118,7 +118,7 @@ export async function commitAll(worktree: string, message: string) {
 // snapshots before the reviewer runs and undoes anything it wrote, since its changes must never reach the commit.
 export async function snapshot(worktree: string) {
   await git(worktree, ["add", "-A"]);
-  await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...HARNESS_SCRATCH]);
+  await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...POLARIS_SCRATCH]);
   return git(worktree, ["write-tree"]);
 }
 export const restore = (worktree: string, tree: string) => git(worktree, ["read-tree", "--reset", "-u", tree]);

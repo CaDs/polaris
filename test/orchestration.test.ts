@@ -5,11 +5,11 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// M3 pipeline without docker: HARNESS_SANDBOX=host runs setup/test/shell commands in the worktree on the host.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "orch-data-"));
+// M3 pipeline without docker: POLARIS_SANDBOX=host runs setup/test/shell commands in the worktree on the host.
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "orch-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { addWorktree, protectedChanges, removeWorktree } = await import("../server/git.ts");
@@ -48,17 +48,17 @@ async function waitFor(cookie: string, ticketId: string, status: string, ms = 20
 const ticket = async (cookie: string, title: string, spec = "") => (await call("POST", "/api/tickets", cookie, { title, spec })).body;
 const events = (runId: string) =>
   (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const branches = (repo: string) => sh(repo, "git for-each-ref --format='%(refname:short)' refs/heads/harness");
+const branches = (repo: string) => sh(repo, "git for-each-ref --format='%(refname:short)' refs/heads/polaris");
 
 const alice = await user("alice");
 const bob = await user("bob");
 
 test("worktree + branch per run, protected-path detection, cleanup", async () => {
   const repo = tempRepo({ "README.md": "hi\n", "tests/a.test.js": "x\n", "src/x.js": "1\n" });
-  const wt = join(process.env.HARNESS_DATA_DIR!, "wt-unit");
-  const base = await addWorktree(repo, "main", wt, "harness/T-1-abc");
+  const wt = join(process.env.POLARIS_DATA_DIR!, "wt-unit");
+  const base = await addWorktree(repo, "main", wt, "polaris/T-1-abc");
   assert.equal(base, sh(repo, "git rev-parse main"));
-  assert.equal(sh(wt, "git branch --show-current"), "harness/T-1-abc");
+  assert.equal(sh(wt, "git branch --show-current"), "polaris/T-1-abc");
 
   const prot = parseProtected(" tests/, ./evals ,");
   assert.deepEqual(prot, ["tests", "evals"]);
@@ -76,7 +76,7 @@ test("worktree + branch per run, protected-path detection, cleanup", async () =>
   sh(wt, "git checkout -q -- tests && mkdir testsuite && touch testsuite/x");
   assert.deepEqual(await protectedChanges(wt, base, prot), []);
 
-  await removeWorktree(repo, wt, "harness/T-1-abc", process.env.HARNESS_DATA_DIR!);
+  await removeWorktree(repo, wt, "polaris/T-1-abc", process.env.POLARIS_DATA_DIR!);
   assert.equal(existsSync(wt), false);
   assert.equal(branches(repo), "");
   assert.doesNotMatch(sh(repo, "git worktree list"), /wt-unit/);
@@ -91,7 +91,7 @@ test("settings: validation, defaults, per-workspace; runs need a valid repo", as
   const defaults = (await call("GET", "/api/settings", alice)).body;
   assert.deepEqual(
     [defaults.configured, defaults.setup_command, defaults.test_command, defaults.protected_paths, defaults.image],
-    [false, "npm ci", "npm test", "tests/,evals/", "agent-harness-sandbox:1"],
+    [false, "npm ci", "npm test", "tests/,evals/", "polaris-sandbox:1"],
   );
 
   const empty = realpathSync(mkdtempSync(join(tmpdir(), "empty-")));
@@ -128,7 +128,7 @@ test("settings: validation, defaults, per-workspace; runs need a valid repo", as
   await call("DELETE", `/api/tickets/${t.id}`, alice);
 });
 
-test("queue: FIFO, at most HARNESS_CONCURRENCY running, queued runs can be cancelled", async () => {
+test("queue: FIFO, at most POLARIS_CONCURRENCY running, queued runs can be cancelled", async () => {
   const carol = await user("carol");
   const repo = tempRepo();
   await call("PUT", "/api/settings", carol, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" });
@@ -180,7 +180,7 @@ test("gate failure retries with the failure fed back; pass commits on the run br
   // Failed attempt: worktree and branch gone. Passed: commit with the harness identity on its branch.
   assert.equal(existsSync(r1.worktree), false);
   assert.equal(branches(repo), r2.branch);
-  assert.equal(sh(repo, `git log -1 --format='%s|%an <%ae>' ${r2.branch}`), `${t.key}: make ok|agent-harness <harness@localhost>`);
+  assert.equal(sh(repo, `git log -1 --format='%s|%an <%ae>' ${r2.branch}`), `${t.key}: make ok|polaris <polaris@localhost>`);
   assert.equal(sh(repo, `git rev-parse ${r2.branch}~1`), r2.base_sha);
   assert.deepEqual(sh(repo, `git diff --name-only ${r2.base_sha} ${r2.branch}`).split("\n").sort(), ["notes.txt", "ok.txt"]);
   const commit = events(r2.id).find((e) => e.type === "commit")!.p;

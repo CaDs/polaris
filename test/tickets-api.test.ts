@@ -5,9 +5,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host"; // docker is covered by docker.test.ts
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "runs-"));
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host"; // docker is covered by docker.test.ts
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "runs-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { recoverOrphans } = await import("../server/runs.ts");

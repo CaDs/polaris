@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Per-ticket test command: a ticket may override the workspace test command for its own test gate.
-process.env.HARNESS_PROVIDER = "fake"; // the demo worker writes notes.txt on attempt 1
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "ttc-data-"));
+process.env.POLARIS_PROVIDER = "fake"; // the demo worker writes notes.txt on attempt 1
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "ttc-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 

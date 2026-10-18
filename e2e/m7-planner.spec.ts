@@ -90,7 +90,7 @@ test("M7: epic → planner round → children with a dependency → approvals dr
   await expect(status).toHaveValue("done");
   expect(git(repo, "show", "main:a.txt")).toBe("a");
   expect(git(repo, "show", "main:b.txt")).toBe("b");
-  expect(git(repo, "for-each-ref", "refs/heads/harness")).toBe("");
+  expect(git(repo, "for-each-ref", "refs/heads/polaris")).toBe("");
   // The last approval's wiki ingest (M10) holds a checkout of its own until it finishes.
   await expect.poll(() => git(repo, "worktree", "list").split("\n").length, { timeout: 30_000 }).toBe(1);
 });

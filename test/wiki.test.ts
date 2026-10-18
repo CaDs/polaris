@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M10: the per-project wiki: lint, snapshot + staleness in every run, serialized ingest after approve, bootstrap/lint runs,
-// human edits, the wiki setting. HARNESS_SANDBOX=host (no docker), demo provider as the maintainer.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "3";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "wiki-data-"));
+// human edits, the wiki setting. POLARIS_SANDBOX=host (no docker), demo provider as the maintainer.
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "3";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "wiki-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { runTool, wikiTools } = await import("../server/agent/tools.ts");
@@ -185,14 +185,14 @@ test("approve → one ingest run: demo page, index, log line and commit message 
   assert.equal((await call("GET", "/api/tickets", w.cookie)).body.length, 1);
 });
 
-test("the next run sees the wiki: snapshot in .harness/wiki, index in the first message, read-only, git-excluded", async () => {
+test("the next run sees the wiki: snapshot in .polaris/wiki, index in the first message, read-only, git-excluded", async () => {
   const { t, run } = await w.ticket("Second change");
   const first = task(run.id);
-  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.harness\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(modules\/demo\.md\) — written by the demo maintainer\n\n# Task/);
+  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(modules\/demo\.md\) — written by the demo maintainer\n\n# Task/);
   assert.doesNotMatch(first, /may be stale/);
-  assert.match(first, /Read-only paths \(changes there fail the run\): tests, evals, \.harness\/wiki/);
+  assert.match(first, /Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki/);
   const wt = (await w.get(t.id)).runs[0].worktree;
-  assert.match(readFileSync(join(wt, ".harness/wiki/modules/demo.md"), "utf8"), /^---\ntitle: Demo module/);
+  assert.match(readFileSync(join(wt, ".polaris/wiki/modules/demo.md"), "utf8"), /^---\ntitle: Demo module/);
   assert.equal(sh(wt, "git status --porcelain"), ""); // the snapshot is invisible to git (the run's change is committed)
   assert.equal(sh(wt, "git ls-files"), "README.md\nnotes.txt");
   // The system prompt (worker.md) never carries it.
@@ -323,9 +323,9 @@ test("wiki off: no snapshot, no section, no ingest, no bootstrap", async () => {
   assert.equal((await call("GET", "/api/settings", x.cookie)).body.wiki, 0);
   const { t, run } = await x.ticket("Without wiki");
   const first = task(run.id);
-  assert.doesNotMatch(first, /Project wiki|\.harness\/wiki/);
+  assert.doesNotMatch(first, /Project wiki|\.polaris\/wiki/);
   const wt = (await x.get(t.id)).runs[0].worktree;
-  assert.equal(existsSync(join(wt, ".harness/wiki")), false);
+  assert.equal(existsSync(join(wt, ".polaris/wiki")), false);
   await x.approve(t.id);
   await x.idle();
   assert.equal((await x.get(t.id)).runs.length, 1);
@@ -392,17 +392,17 @@ test("a wiki that fails the mechanical lint is not committed: fix rounds first, 
   assert.deepEqual((await call("GET", "/api/wiki", x.cookie)).body.problems, []);
 });
 
-test("a worker that writes .harness/wiki fails the gate (protected path); edit_file refuses it too", async () => {
+test("a worker that writes .polaris/wiki fails the gate (protected path); edit_file refuses it too", async () => {
   const x = await workspace("wiki6");
   const t = (await call("POST", "/api/tickets", x.cookie, { title: "Tamper", spec: "WIKI-WRITE" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, x.cookie);
   const failed = await until("failed", async () => (await x.get(t.id)).status === "failed" && (await x.get(t.id)));
   const gate = events(failed.runs[0].id).find((e) => e.type === "test_result")!.p;
-  assert.deepEqual([gate.passed, gate.protected], [false, [".harness/wiki/x"]]);
+  assert.deepEqual([gate.passed, gate.protected], [false, [".polaris/wiki/x"]]);
   assert.match(failed.runs[0].status, /failed/);
   const root = mkdtempSync(join(tmpdir(), "wiki-ro-"));
-  mkdirSync(join(root, ".harness/wiki"), { recursive: true });
-  const r = await runTool(wikiTools, { type: "tool_use", id: "1", name: "edit_file", input: { path: ".harness/wiki/x", old_string: "", new_string: "x" } }, { root, exec: async () => ({ stdout: "", stderr: "", code: 0, timedOut: false }), protectedPaths: [".harness/wiki"] });
+  mkdirSync(join(root, ".polaris/wiki"), { recursive: true });
+  const r = await runTool(wikiTools, { type: "tool_use", id: "1", name: "edit_file", input: { path: ".polaris/wiki/x", old_string: "", new_string: "x" } }, { root, exec: async () => ({ stdout: "", stderr: "", code: 0, timedOut: false }), protectedPaths: [".polaris/wiki"] });
   assert.match(r.content, /read-only \(protected path\)/);
 });
 

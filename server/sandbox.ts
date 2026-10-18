@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 import { capture, hostExec, type Exec } from "./agent/tools.ts";
 
 // One Docker container per run: the worktree is bind-mounted at /work, protected paths are re-mounted read-only on
-// top, and every shell command (tool calls, setup, tests) is a `docker exec`. HARNESS_SANDBOX=host runs commands on
+// top, and every shell command (tool calls, setup, tests) is a `docker exec`. POLARIS_SANDBOX=host runs commands on
 // the host instead (unit tests only: no isolation at all).
 const execFileP = promisify(execFile);
-export const SANDBOX_IMAGE = "agent-harness-sandbox:1";
-export const dataDir = () => resolve(process.env.HARNESS_DATA_DIR ?? "data");
+export const SANDBOX_IMAGE = "polaris-sandbox:1";
+export const dataDir = () => resolve(process.env.POLARIS_DATA_DIR ?? "data");
 const dockerDir = fileURLToPath(new URL("../docker/", import.meta.url));
 
 export type Sandbox = { name: string; exec: Exec; close: () => Promise<void> };
@@ -33,7 +33,7 @@ export function ensureImage(image: string) {
 // `setsid` (new process group) and records the group leader's pid; timeout/abort kills that whole group in there.
 export function dockerExec(name: string): Exec {
   return (command, { timeoutMs, signal }) => {
-    const pidFile = `/tmp/.harness-exec-${randomUUID()}`;
+    const pidFile = `/tmp/.polaris-exec-${randomUUID()}`;
     const wrapped = `echo $$ > ${pidFile}; exec sh -c "$1"`;
     const child = spawn("docker", ["exec", "-w", "/work", name, "setsid", "-w", "sh", "-c", wrapped, "sh", command], { stdio: ["ignore", "pipe", "pipe"] });
     const kill = () => {
@@ -46,9 +46,9 @@ export function dockerExec(name: string): Exec {
 }
 
 export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string): Promise<Sandbox> {
-  if (process.env.HARNESS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
+  if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
   await ensureImage(image);
-  const name = `harness-${runId}`;
+  const name = `polaris-${runId}`;
   const ro = protectedPaths.filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
   // A worktree's .git file points at the repo's git dir by its host path: mount that read-only at the same path so
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
@@ -56,8 +56,8 @@ export async function openSandbox(runId: string, worktree: string, protectedPath
   if (gitDir) ro.push("-v", `${gitDir}:${gitDir}:ro`);
   // ponytail: runs as root; on Linux hosts files it creates in the worktree are root-owned. Add --user when that bites.
   await execFileP("docker", [
-    "run", "-d", "--name", name, "--label", "agent-harness=1", "--label", `agent-harness.data=${dataDir()}`,
-    "-v", `${worktree}:/work`, ...ro, "-v", "agent-harness-npm-cache:/root/.npm",
+    "run", "-d", "--name", name, "--label", "polaris=1", "--label", `polaris.data=${dataDir()}`,
+    "-v", `${worktree}:/work`, ...ro, "-v", "polaris-npm-cache:/root/.npm",
     "-w", "/work", "--cpus", "2", "--memory", "2g", image, "sleep", "infinity",
   ]);
   return { name, exec: dockerExec(name), close: () => removeContainer(name) };
@@ -67,9 +67,9 @@ export const removeContainer = (name: string) => execFileP("docker", ["rm", "-f"
 
 // Startup: containers left by a dead process of this harness (same data dir). Other instances' containers are untouched.
 export async function removeStaleContainers() {
-  if (process.env.HARNESS_SANDBOX === "host") return;
+  if (process.env.POLARIS_SANDBOX === "host") return;
   try {
-    const { stdout } = await execFileP("docker", ["ps", "-aq", "--filter", "label=agent-harness=1", "--filter", `label=agent-harness.data=${dataDir()}`]);
+    const { stdout } = await execFileP("docker", ["ps", "-aq", "--filter", "label=polaris=1", "--filter", `label=polaris.data=${dataDir()}`]);
     const ids = stdout.split(/\s+/).filter(Boolean);
     if (ids.length) await execFileP("docker", ["rm", "-f", ...ids]);
   } catch {} // docker not running: nothing to clean

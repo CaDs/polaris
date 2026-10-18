@@ -3,18 +3,18 @@ import { join } from "node:path";
 import type { Exec } from "./tools.ts";
 import type { Msg } from "./types.ts";
 
-// Skills: markdown files with `name`/`description` frontmatter in <root>/.harness/skills/ (committed by humans, with
+// Skills: markdown files with `name`/`description` frontmatter in <root>/.polaris/skills/ (committed by humans, with
 // optional scripts next to them). Only name, description and path are offered, in the first user message; the model
 // reads the full file with read_file when it is relevant. Sorted by file name so the message is stable.
 export type Skill = { name: string; description: string; path: string };
 
 export function listSkills(root: string): Skill[] {
-  const dir = join(root, ".harness/skills");
+  const dir = join(root, ".polaris/skills");
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().map((f) => {
     const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(join(dir, f), "utf8"))?.[1] ?? "";
     const get = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(fm)?.[1].trim().replace(/^(["'])(.*)\1$/, "$2") ?? "";
-    return { name: get("name") || f.slice(0, -3), description: get("description"), path: `.harness/skills/${f}` };
+    return { name: get("name") || f.slice(0, -3), description: get("description"), path: `.polaris/skills/${f}` };
   });
 }
 
@@ -34,7 +34,7 @@ const MAX_DIFF = 12_000;
 export async function workState(exec: Exec, root: string, signal?: AbortSignal) {
   try {
     const git = (cmd: string) => exec(cmd, { cwd: root, timeoutMs: 30_000, signal });
-    const status = await git("git status --short -- . ':!.harness/history' ':!.harness/outputs'");
+    const status = await git("git status --short -- . ':!.polaris/history' ':!.polaris/outputs'");
     if (status.code !== 0 || !status.stdout.trim()) return "";
     const diff = await git("git diff");
     const d = diff.code === 0 ? diff.stdout : "";

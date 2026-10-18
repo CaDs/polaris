@@ -35,8 +35,8 @@ export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: Ab
       return await once((e) => ((started = true), onEvent(e)));
     } catch (e) {
       if (started || !(e instanceof AgentError && e.retryable) || attempt >= RETRIES || signal?.aborted) throw e;
-      // HARNESS_RETRY_BASE_MS: tests shrink the backoff.
-      const base = Number(process.env.HARNESS_RETRY_BASE_MS ?? 1000);
+      // POLARIS_RETRY_BASE_MS: tests shrink the backoff.
+      const base = Number(process.env.POLARIS_RETRY_BASE_MS ?? 1000);
       const delay = e.retryAfterMs ?? Math.min(base * 2 ** attempt, 30_000) * (1 + Math.random() * 0.25);
       onEvent({ type: "retry", attempt: attempt + 1, max: RETRIES, message: e.message, delay_ms: Math.round(delay) });
       await new Promise((resolve) => {

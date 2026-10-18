@@ -1,7 +1,7 @@
 import type { Provider, ProviderRequest, ProviderResponse, TextBlock, ToolUseBlock } from "../types.ts";
 import { fakeProvider } from "./fake.ts";
 
-// HARNESS_PROVIDER=fake: deterministic demo run with a delay per turn so streaming is visible.
+// POLARIS_PROVIDER=fake: deterministic demo run with a delay per turn so streaming is visible.
 // Tasks containing "slow" run `sleep 30` instead, so cancel can be tested. 4 turns, usage 100/20/10/0 each.
 // Tasks containing "compact" run a long session instead: a 4000-line shell output (spilled to a file), an edit, then usage
 // that grows with the conversation (400 tokens per message, 75% cached) so a small compaction threshold triggers a
@@ -25,7 +25,7 @@ import { fakeProvider } from "./fake.ts";
 // M10: a system prompt starting "You maintain a project wiki" is the wiki maintainer (wikiScript). An ingest writes
 // modules/demo.md (sources: the files the merged diff touched), a bootstrap overview.md, a lint re-verifies its first stale
 // page; each also lists the page in index.md. A page that exists is updated line by line (sources, verified, updated).
-// WIKI-WRITE in a ticket makes a worker write .harness/wiki/x with the shell (the gate must fail it); WIKI-NOTES adds a
+// WIKI-WRITE in a ticket makes a worker write .polaris/wiki/x with the shell (the gate must fail it); WIKI-NOTES adds a
 // "## Wiki notes" section to its final reply; WIKI-BAD / WIKI-FIXME make the maintainer of its ingest produce an invalid wiki.
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
 const say = (text: string): TextBlock => ({ type: "text", text });
@@ -218,7 +218,7 @@ function script(task: string, ok: boolean, why: string) {
             use("1", "edit_file", { path: "notes.txt", old_string: "", new_string: "hello from the demo agent\n" }),
             ...(ok ? [use("1b", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })] : []),
             ...(ticket.includes("SPLIT-ME") ? [use("1c", "shell", { command: "mkdir -p tests && echo broken > tests/broken.txt" })] : []),
-            ...(ticket.includes("WIKI-WRITE") ? [use("1d", "shell", { command: "echo tampered > .harness/wiki/x" })] : []),
+            ...(ticket.includes("WIKI-WRITE") ? [use("1d", "shell", { command: "echo tampered > .polaris/wiki/x" })] : []),
           ],
           [use("2", "shell", { command: "ls" })],
           [use("3", "read_file", { path: "notes.txt" })],

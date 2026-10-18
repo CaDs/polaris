@@ -22,12 +22,12 @@ export function truncate(s: string, max = MAX_OUTPUT) {
   return `${s.slice(0, half)}\n[... ${s.length - max} chars truncated ...]\n${s.slice(-half)}`;
 }
 
-// A result longer than SPILL_AT is written in full to .harness/outputs/<turn>-<tool>-<id>.txt in the run root (visible as
-// /work/.harness/outputs in the sandbox; git-excluded) and the model gets the path, the size and the last ~2000 chars.
+// A result longer than SPILL_AT is written in full to .polaris/outputs/<turn>-<tool>-<id>.txt in the run root (visible as
+// /work/.polaris/outputs in the sandbox; git-excluded) and the model gets the path, the size and the last ~2000 chars.
 export function spill(ctx: ToolContext, text: string) {
   if (text.length <= SPILL_AT) return text;
-  const rel = `.harness/outputs/${ctx.turn ?? 0}-${ctx.tool ?? "tool"}-${(ctx.callId ?? "x").replace(/[^\w.-]/g, "_")}.txt`;
-  mkdirSync(join(ctx.root, ".harness/outputs"), { recursive: true });
+  const rel = `.polaris/outputs/${ctx.turn ?? 0}-${ctx.tool ?? "tool"}-${(ctx.callId ?? "x").replace(/[^\w.-]/g, "_")}.txt`;
+  mkdirSync(join(ctx.root, ".polaris/outputs"), { recursive: true });
   writeFileSync(join(ctx.root, rel), text);
   const lines = text.split("\n").length;
   return `[Output too long: saved to ${rel}]\nTotal: ${text.length} chars, ${lines} lines. Last ${SPILL_TAIL} chars:\n${text.slice(-SPILL_TAIL)}\n[Use read_file with offset/limit on ${rel}, or rg/tail via shell, to see the rest.]`;

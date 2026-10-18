@@ -7,9 +7,9 @@ import type { AddressInfo } from "node:net";
 // backend the same way (see also github.com/numman-ali/opencode-openai-codex-auth). It can break any time.
 // All URLs are read at call time so tests can point them at local mock servers.
 export const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-export const authBase = () => (process.env.HARNESS_OPENAI_AUTH_URL ?? "https://auth.openai.com").replace(/\/$/, "");
-export const chatgptBase = () => (process.env.HARNESS_CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "");
-const loginPort = () => Number(process.env.HARNESS_OAUTH_PORT ?? 1455);
+export const authBase = () => (process.env.POLARIS_OPENAI_AUTH_URL ?? "https://auth.openai.com").replace(/\/$/, "");
+export const chatgptBase = () => (process.env.POLARIS_CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "");
+const loginPort = () => Number(process.env.POLARIS_OAUTH_PORT ?? 1455);
 
 export type Tokens = { access: string; refresh: string; expires: number; account_id: string };
 
@@ -64,7 +64,7 @@ export const logins = new Map<string, { status: "pending" | "error"; error?: str
 const pending = new Map<string, { providerId: string; verifier: string; redirectUri: string; save: (t: Tokens) => void; timer: NodeJS.Timeout }>();
 let listener: Server | undefined;
 
-const page = (msg: string) => `<!doctype html><meta charset=utf-8><title>Agent harness</title><body style="font:16px system-ui;margin:3rem">${msg}`;
+const page = (msg: string) => `<!doctype html><meta charset=utf-8><title>Polaris</title><body style="font:16px system-ui;margin:3rem">${msg}`;
 
 function stop(state: string) {
   clearTimeout(pending.get(state)?.timer);

@@ -37,9 +37,9 @@ const backend = await listen(async (req, res) => {
   res.end(`data: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 }, output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }] } })}\n\n`);
 });
 
-process.env.HARNESS_OPENAI_AUTH_URL = auth.url;
-process.env.HARNESS_CHATGPT_BASE_URL = backend.url;
-process.env.HARNESS_OAUTH_PORT = "0"; // any free port instead of 1455
+process.env.POLARIS_OPENAI_AUTH_URL = auth.url;
+process.env.POLARIS_CHATGPT_BASE_URL = backend.url;
+process.env.POLARIS_OAUTH_PORT = "0"; // any free port instead of 1455
 const oauth = await import("../server/oauth.ts");
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");

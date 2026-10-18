@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { anthropic, requestBody } from "../server/agent/providers/anthropic.ts";
 import { AgentError, type Msg, type StreamEvent, type ToolDef } from "../server/agent/types.ts";
 
-process.env.HARNESS_RETRY_BASE_MS = "1"; // retry backoff base: tests don't wait seconds
+process.env.POLARIS_RETRY_BASE_MS = "1"; // retry backoff base: tests don't wait seconds
 const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
 
 // Recorded-style stream: thinking (with signature), text, tool_use with chunked input_json_delta.

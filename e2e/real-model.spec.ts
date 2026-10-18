@@ -66,7 +66,7 @@ test("slugify", () => {
   await page.getByRole("button", { name: "Run agent" }).click();
 
   const transcript = page.getByRole("region", { name: "Transcript" });
-  await expect(transcript).toContainText("Sandbox harness-", { timeout: 60_000 });
+  await expect(transcript).toContainText("Sandbox polaris-", { timeout: 60_000 });
   await expect(page.getByLabel("Status")).toHaveValue(/review|failed/, { timeout: 18 * 60_000 });
   await expect(page.getByLabel("Status")).toHaveValue("review");
 

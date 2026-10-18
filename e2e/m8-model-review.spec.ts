@@ -32,5 +32,5 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
   await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 15_000 });
   await expect(page.getByRole("button", { name: "Show run #2" })).toHaveCount(0); // fixed within run #1
   await expect(page.getByLabel("Diff")).toContainText("fixed.txt");
-  expect(git(repo, "for-each-ref", "refs/heads/harness")).toContain("harness/");
+  expect(git(repo, "for-each-ref", "refs/heads/polaris")).toContain("polaris/");
 });

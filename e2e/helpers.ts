@@ -8,7 +8,7 @@ export const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C
 
 // A one-commit repo on branch main for the harness to work in.
 export function tempRepo() {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "harness-e2e-repo-")));
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "polaris-e2e-repo-")));
   writeFileSync(join(repo, "README.md"), "# e2e repo\n");
   git(repo, "init", "-q", "-b", "main");
   git(repo, "add", "-A");

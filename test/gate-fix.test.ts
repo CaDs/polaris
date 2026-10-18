@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Gate fix round, flaky re-run and the reviewer's budget, with the demo provider as worker and reviewer.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "gf-data-"));
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "gf-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 

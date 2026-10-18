@@ -67,11 +67,11 @@ function setTicket(id: string, status: string, quiet = false) {
 
 // Provider from env. Throws a user-facing message when none is configured.
 function providerConfig(opts: { model?: string; baseUrl?: string }) {
-  const fake = process.env.HARNESS_PROVIDER === "fake";
+  const fake = process.env.POLARIS_PROVIDER === "fake";
   const baseUrl = opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY ?? (baseUrl ? "ollama" : undefined);
-  if (!fake && !apiKey) throw new Error("set ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL for Ollama), or HARNESS_PROVIDER=fake");
-  const model = opts.model ?? process.env.HARNESS_MODEL ?? (fake ? "demo" : DEFAULT_MODEL);
+  if (!fake && !apiKey) throw new Error("set ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL for Ollama), or POLARIS_PROVIDER=fake");
+  const model = opts.model ?? process.env.POLARIS_MODEL ?? (fake ? "demo" : DEFAULT_MODEL);
   return { model, provider: (task: string) => (fake ? demoProvider(task) : anthropic({ apiKey: apiKey!, baseUrl })) };
 }
 
@@ -96,9 +96,9 @@ async function rerunFlaky(first: ExecResult, again: () => Promise<ExecResult>) {
 }
 
 // A run compacts its conversation once the context passes min(70% of the provider's window, the workspace cap).
-// HARNESS_COMPACT_AT overrides it (tests).
+// POLARIS_COMPACT_AT overrides it (tests).
 export function compactThreshold(capTokens: number | undefined, window: number) {
-  const env = Number(process.env.HARNESS_COMPACT_AT);
+  const env = Number(process.env.POLARIS_COMPACT_AT);
   return env > 0 ? env : Math.min(Math.floor(window * 0.7), capTokens ?? 150_000);
 }
 const envWindow = () => (process.env.ANTHROPIC_BASE_URL ? CONTEXT_WINDOW.ollama : CONTEXT_WINDOW.anthropic); // no stored provider: env fallback
@@ -333,7 +333,7 @@ async function epicGate(s: Settings, command: string, log: ReturnType<typeof eve
 }
 
 // An eval run: one queued run per case (all, or the chosen ones) with prompt version p, through the same FIFO queue and
-// HARNESS_CONCURRENCY slots as ticket runs. The lessons version active now is frozen for every case. Errors are user-facing.
+// POLARIS_CONCURRENCY slots as ticket runs. The lessons version active now is frozen for every case. Errors are user-facing.
 export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: string } | { id: string } {
   const all = db.prepare("SELECT * FROM eval_cases WHERE workspace_id = ? ORDER BY id").all(ws) as EvalCase[];
   const cases = caseIds ? all.filter((c) => caseIds.includes(c.id)) : all;
@@ -358,10 +358,10 @@ export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: s
   return { id };
 }
 
-// FIFO over the whole process: start queued runs until HARNESS_CONCURRENCY (default 2) are in flight.
+// FIFO over the whole process: start queued runs until POLARIS_CONCURRENCY (default 2) are in flight.
 // M11: ticket work (not eval cases or wiki runs) goes by ticket priority first, urgent (1) to low (4), then none (0).
 export function pump() {
-  const limit = Number(process.env.HARNESS_CONCURRENCY ?? 2);
+  const limit = Number(process.env.POLARIS_CONCURRENCY ?? 2);
   while (controllers.size < limit) {
     const next = db.prepare(`SELECT r.id FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.status = 'queued'
       ORDER BY CASE WHEN r.eval_run_id IS NULL AND r.role <> 'wiki' AND t.priority > 0 THEN t.priority ELSE 5 END, r.rowid LIMIT 1`).get() as { id: string } | undefined;
@@ -432,7 +432,7 @@ async function execute(runId: string) {
     let base_sha: string;
     if (ev) await addDetached(cfg.repo_path, (base_sha = ev.base_sha), worktree);
     else {
-      branch = `harness/${t.key}-${run.attempt}-${runId.slice(0, 8)}`;
+      branch = `polaris/${t.key}-${run.attempt}-${runId.slice(0, 8)}`;
       base_sha = await addWorktree(cfg.repo_path, s!.base_branch, worktree, branch);
     }
     db.prepare("UPDATE runs SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?").run(worktree, branch ?? null, base_sha, runId);
@@ -444,7 +444,7 @@ async function execute(runId: string) {
       try {
         wikiTree = await materialize(t.workspace_id, worktree);
         wiki = await wikiSection(t.workspace_id, cfg.repo_path, base_sha);
-        protectedPaths = [...protectedPaths, ".harness/wiki"];
+        protectedPaths = [...protectedPaths, ".polaris/wiki"];
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
       }
@@ -499,7 +499,7 @@ async function execute(runId: string) {
       const run = () => (testCommand.trim() ? sh(testCommand) : Promise.resolve({ stdout: "", stderr: "", code: 0, timedOut: false }));
       const first = await run();
       abortCheck();
-      // git can't see .harness/wiki (excluded), so its snapshot is compared directly.
+      // git can't see .polaris/wiki (excluded), so its snapshot is compared directly.
       const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
       const { r: test, ...flake } = touched.length ? { r: first } : await rerunFlaky(first, run);
       abortCheck();

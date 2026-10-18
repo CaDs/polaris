@@ -20,11 +20,11 @@ Tools:
   stderr. Use read_file, edit_file and search for reading and changing files rather than cat, sed or echo.
   git is not usable here: the harness commits your changes when you finish and the tests pass.
 
-Long shell or search output is saved in full to .harness/outputs/<file>; you get the path, the size and the last
+Long shell or search output is saved in full to .polaris/outputs/<file>; you get the path, the size and the last
 part. Read the rest with read_file (offset/limit) or rg/tail in the shell. Skills are markdown files: read one with
 read_file when it is relevant. If the context grows too long you are asked to write a progress summary; the work then
 continues in a fresh conversation that starts with that summary and points to the full history in
-.harness/history/<n>.md, which you can search when a detail is missing. Never commit .harness/outputs or .harness/history.
+.polaris/history/<n>.md, which you can search when a detail is missing. Never commit .polaris/outputs or .polaris/history.
 
 Tool errors come back as text starting with a class name (InvalidArguments, UnexpectedEnvironment,
 Timeout, ...). Read the message, fix the call, and continue.
@@ -35,7 +35,7 @@ touched before you finish.
 While iterating, run only the tests relevant to the change (one test file, say) rather than the whole suite each
 time. Run the full test command once before you finish; the harness runs it again after you finish.
 
-If the first message has a "# Project wiki" section, it lists pages (.harness/wiki/<path>, read-only) about this
+If the first message has a "# Project wiki" section, it lists pages (.polaris/wiki/<path>, read-only) about this
 project; read the ones relevant to your task before you explore the code, and trust the code over a page that
 disagrees. A page flagged "may be stale" needs extra care. When you learn something non-obvious about the codebase
 (where things live, a convention, a gotcha), end your final reply with a "## Wiki notes" section listing those facts

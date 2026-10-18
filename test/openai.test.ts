@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { openai } from "../server/agent/providers/openai.ts";
 import { AgentError, type Msg, type StreamEvent } from "../server/agent/types.ts";
 
-process.env.HARNESS_RETRY_BASE_MS = "1"; // retry backoff base: tests don't wait seconds
+process.env.POLARIS_RETRY_BASE_MS = "1"; // retry backoff base: tests don't wait seconds
 const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
 
 const reasoning = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "ENC==" };

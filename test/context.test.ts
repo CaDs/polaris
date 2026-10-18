@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M5: spilled tool output, compaction, skills, cache-friendly prefix, usage API, reliability fixes.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "ctx-data-"));
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "ctx-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { runAgent } = await import("../server/agent/loop.ts");
@@ -67,16 +67,16 @@ function loop(script: Parameters<typeof fakeProvider>[0], o: Partial<Parameters<
   return { root, fake, evs, done };
 }
 
-test("long shell output is saved in full to .harness/outputs; the model gets the path, size and tail", async () => {
+test("long shell output is saved in full to .polaris/outputs; the model gets the path, size and tail", async () => {
   const root = mkdtempSync(join(tmpdir(), "spill-"));
   const run = (command: string) => runTool(tools, use("toolu/1", "shell", { command }), { root, exec: hostExec, turn: 7 });
   const short = await run("seq 1 100");
   assert.ok(short.content.length < SPILL_AT && !short.content.includes("Output too long"));
-  assert.equal(existsSync(join(root, ".harness")), false);
+  assert.equal(existsSync(join(root, ".polaris")), false);
 
   const big = await run("seq 1 5000; echo done-marker >&2");
   assert.equal(big.is_error, false);
-  const file = ".harness/outputs/7-shell-toolu_1.txt"; // id sanitized for the file name
+  const file = ".polaris/outputs/7-shell-toolu_1.txt"; // id sanitized for the file name
   const full = readFileSync(join(root, file), "utf8");
   assert.match(full, /^exit code: 0\nstdout:\n1\n2\n3\n/);
   assert.match(full, /4999\n5000\n\nstderr:\ndone-marker\n$/);
@@ -91,30 +91,30 @@ test("long shell output is saved in full to .harness/outputs; the model gets the
   assert.match(found.content, /8-search-s1\.txt/);
 });
 
-test(".harness/outputs and history never reach the commit, the diff or the protected-path check; skills do", async () => {
-  const repo = tempRepo({ "README.md": "hi\n", "tests/a.js": "1\n", ".harness/skills/s.md": "---\nname: s\ndescription: d\n---\n" });
-  const wt = join(process.env.HARNESS_DATA_DIR!, "wt-scratch");
-  const base = await addWorktree(repo, "main", wt, "harness/S-1-abc");
-  assert.match(readFileSync(join(repo, ".git/info/exclude"), "utf8"), /\/\.harness\/outputs\/\n\/\.harness\/history\//);
-  await addWorktree(repo, "main", join(process.env.HARNESS_DATA_DIR!, "wt-scratch2"), "harness/S-2-abc"); // idempotent
+test(".polaris/outputs and history never reach the commit, the diff or the protected-path check; skills do", async () => {
+  const repo = tempRepo({ "README.md": "hi\n", "tests/a.js": "1\n", ".polaris/skills/s.md": "---\nname: s\ndescription: d\n---\n" });
+  const wt = join(process.env.POLARIS_DATA_DIR!, "wt-scratch");
+  const base = await addWorktree(repo, "main", wt, "polaris/S-1-abc");
+  assert.match(readFileSync(join(repo, ".git/info/exclude"), "utf8"), /\/\.polaris\/outputs\/\n\/\.polaris\/history\//);
+  await addWorktree(repo, "main", join(process.env.POLARIS_DATA_DIR!, "wt-scratch2"), "polaris/S-2-abc"); // idempotent
   assert.equal(readFileSync(join(repo, ".git/info/exclude"), "utf8").match(/outputs/g)!.length, 1);
 
-  mkdirSync(join(wt, ".harness/outputs"), { recursive: true });
-  mkdirSync(join(wt, ".harness/history"), { recursive: true });
-  writeFileSync(join(wt, ".harness/outputs/1-shell-a.txt"), "big\n");
-  writeFileSync(join(wt, ".harness/history/1.md"), "h\n");
+  mkdirSync(join(wt, ".polaris/outputs"), { recursive: true });
+  mkdirSync(join(wt, ".polaris/history"), { recursive: true });
+  writeFileSync(join(wt, ".polaris/outputs/1-shell-a.txt"), "big\n");
+  writeFileSync(join(wt, ".polaris/history/1.md"), "h\n");
   writeFileSync(join(wt, "new.txt"), "n\n");
   assert.equal(sh(wt, "git status --porcelain"), "?? new.txt");
-  // Even protecting all of .harness only flags edits to committed files (skills), not the harness's own scratch files.
-  assert.deepEqual(await protectedChanges(wt, base, [".harness"]), []);
-  writeFileSync(join(wt, ".harness/skills/s.md"), "changed\n");
-  assert.deepEqual(await protectedChanges(wt, base, [".harness"]), [".harness/skills/s.md"]);
-  sh(wt, "git checkout -q -- .harness/skills");
+  // Even protecting all of .polaris only flags edits to committed files (skills), not the harness's own scratch files.
+  assert.deepEqual(await protectedChanges(wt, base, [".polaris"]), []);
+  writeFileSync(join(wt, ".polaris/skills/s.md"), "changed\n");
+  assert.deepEqual(await protectedChanges(wt, base, [".polaris"]), [".polaris/skills/s.md"]);
+  sh(wt, "git checkout -q -- .polaris/skills");
 
   await commitAll(wt, "x");
-  assert.equal(sh(wt, "git ls-tree -r --name-only HEAD"), ".harness/skills/s.md\nREADME.md\nnew.txt\ntests/a.js");
+  assert.equal(sh(wt, "git ls-tree -r --name-only HEAD"), ".polaris/skills/s.md\nREADME.md\nnew.txt\ntests/a.js");
   // Force-add (e.g. an exclude file that is missing): commitAll's pathspec still leaves them out.
-  writeFileSync(join(wt, ".harness/outputs/2.txt"), "x");
+  writeFileSync(join(wt, ".polaris/outputs/2.txt"), "x");
   sh(repo, "rm .git/info/exclude");
   await commitAll(wt, "y");
   assert.doesNotMatch(sh(wt, "git ls-tree -r --name-only HEAD"), /outputs|history/);
@@ -124,20 +124,20 @@ test("skills: frontmatter parsed, sorted, listed by name, description and path o
   const root = mkdtempSync(join(tmpdir(), "skills-"));
   assert.deepEqual(listSkills(root), []);
   assert.equal(skillsText([]), "");
-  mkdirSync(join(root, ".harness/skills"), { recursive: true });
-  const w = (f: string, body: string) => writeFileSync(join(root, ".harness/skills", f), body);
+  mkdirSync(join(root, ".polaris/skills"), { recursive: true });
+  const w = (f: string, body: string) => writeFileSync(join(root, ".polaris/skills", f), body);
   w("b-release.md", '---\nname: "release"\ndescription: Cut a release\n---\n# Release\nSECRET-BODY\n');
   w("a-lint.md", "---\ndescription: Run the linter\n---\nbody\n");
   w("c-plain.md", "no frontmatter\n");
   w("deploy.sh", "#!/bin/sh\n");
   const skills = listSkills(root);
   assert.deepEqual(skills, [
-    { name: "a-lint", description: "Run the linter", path: ".harness/skills/a-lint.md" },
-    { name: "release", description: "Cut a release", path: ".harness/skills/b-release.md" },
-    { name: "c-plain", description: "", path: ".harness/skills/c-plain.md" },
+    { name: "a-lint", description: "Run the linter", path: ".polaris/skills/a-lint.md" },
+    { name: "release", description: "Cut a release", path: ".polaris/skills/b-release.md" },
+    { name: "c-plain", description: "", path: ".polaris/skills/c-plain.md" },
   ]);
   const t = skillsText(skills);
-  assert.match(t, /- release — Cut a release — \.harness\/skills\/b-release\.md/);
+  assert.match(t, /- release — Cut a release — \.polaris\/skills\/b-release\.md/);
   assert.doesNotMatch(t, /SECRET-BODY/);
 });
 
@@ -181,17 +181,17 @@ test("compaction: history file, fresh conversation, append-only requests, budget
 
   // New conversation: task + summary + pointer.
   const first = reqs[3].messages[0].content[0];
-  assert.equal(first.type === "text" && first.text, "TASK\n\nContext was compacted. Summary:\nSummary S1: did A, left B.\n\nFull history: .harness/history/1.md (search it with rg/read_file if a detail is missing)");
+  assert.equal(first.type === "text" && first.text, "TASK\n\nContext was compacted. Summary:\nSummary S1: did A, left B.\n\nFull history: .polaris/history/1.md (search it with rg/read_file if a detail is missing)");
 
   // History: every tool call with input, every result, the spill notice.
-  const history = readFileSync(join(t.root, ".harness/history/1.md"), "utf8");
-  for (const needle of ["Tool call shell (c1)", '"command": "seq 1 3000"', "Tool call shell (c2)", '"command": "echo second"', "Tool result (c2)", "Output too long: saved to .harness/outputs/1-shell-c1.txt", "TASK"])
+  const history = readFileSync(join(t.root, ".polaris/history/1.md"), "utf8");
+  for (const needle of ["Tool call shell (c1)", '"command": "seq 1 3000"', "Tool call shell (c2)", '"command": "echo second"', "Tool result (c2)", "Output too long: saved to .polaris/outputs/1-shell-c1.txt", "TASK"])
     assert.ok(history.includes(needle), needle);
   assert.ok(!history.includes("echo after"), "only the compacted conversation");
-  assert.equal(readFileSync(join(t.root, ".harness/outputs/1-shell-c1.txt"), "utf8").split("\n").length, 3000 + 5);
+  assert.equal(readFileSync(join(t.root, ".polaris/outputs/1-shell-c1.txt"), "utf8").split("\n").length, 3000 + 5);
 
   const c = t.evs.filter((e) => e.type === "compaction");
-  assert.deepEqual(c.map((e) => e.payload), [{ n: 1, tokens_before: 1200, summary_chars: "Summary S1: did A, left B.".length, history_path: ".harness/history/1.md" }]);
+  assert.deepEqual(c.map((e) => e.payload), [{ n: 1, tokens_before: 1200, summary_chars: "Summary S1: did A, left B.".length, history_path: ".polaris/history/1.md" }]);
   // Order: summary turn's message + usage, then the compaction event; its tool call produced no tool_call event.
   assert.deepEqual(t.evs.map((e) => e.type).slice(8, 14), ["tool_result", "assistant_message", "usage", "compaction", "assistant_message", "usage"]);
   assert.equal(t.evs.filter((e) => e.type === "tool_call").length, 3);
@@ -212,10 +212,10 @@ test("compaction repeats with numbered history files and the token budget spans 
   );
   const r = await t.done;
   assert.equal(r.status, "passed");
-  assert.deepEqual(t.evs.filter((e) => e.type === "compaction").map((e) => (e.payload as any).history_path), [".harness/history/1.md", ".harness/history/2.md"]);
+  assert.deepEqual(t.evs.filter((e) => e.type === "compaction").map((e) => (e.payload as any).history_path), [".polaris/history/1.md", ".polaris/history/2.md"]);
   const third = t.fake.requests[6].messages[0].content[0];
-  assert.match(third.type === "text" ? third.text : "", /^TASK\n\nContext was compacted\. Summary:\nS2\n\nFull history: \.harness\/history\/1\.md, \.harness\/history\/2\.md/);
-  assert.match(readFileSync(join(t.root, ".harness/history/2.md"), "utf8"), /Context was compacted\. Summary:\nS1/); // chain
+  assert.match(third.type === "text" ? third.text : "", /^TASK\n\nContext was compacted\. Summary:\nS2\n\nFull history: \.polaris\/history\/1\.md, \.polaris\/history\/2\.md/);
+  assert.match(readFileSync(join(t.root, ".polaris/history/2.md"), "utf8"), /Context was compacted\. Summary:\nS1/); // chain
 
   // A budget that the first conversation did not exhaust is exhausted by the next one: spent counts everything.
   const b = await loop(
@@ -289,13 +289,13 @@ test("provider/workspace context settings: defaults per kind, editable, validate
   assert.equal((await call("PUT", "/api/settings", pam, { repo_path: repo, compact_at_tokens: 5 })).status, 400);
   assert.equal((await call("GET", "/api/settings", pam)).body.compact_at_tokens, 20_000);
 
-  delete process.env.HARNESS_COMPACT_AT;
+  delete process.env.POLARIS_COMPACT_AT;
   assert.equal(compactThreshold(150_000, 1_000_000), 150_000); // workspace cap
   assert.equal(compactThreshold(150_000, 32_768), 22_937); // 70% of a small window
   assert.equal(compactThreshold(undefined, 400_000), 150_000);
-  process.env.HARNESS_COMPACT_AT = "1000";
+  process.env.POLARIS_COMPACT_AT = "1000";
   assert.equal(compactThreshold(150_000, 1_000_000), 1000);
-  delete process.env.HARNESS_COMPACT_AT;
+  delete process.env.POLARIS_COMPACT_AT;
 });
 
 test("system prompt and tools are byte-identical across repos and runs; per-run context is in the first user message", async () => {
@@ -335,7 +335,7 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
     const done = await waitFor(cookie, t.id, "review");
     return { repo, run: done.runs[0], first: bodies.find((b) => b.messages[0].content[0].text.includes(`ticket of ${name}`)) };
   };
-  const a = await setup("zed", { "README.md": "hi\n", ".harness/skills/deploy.md": skill });
+  const a = await setup("zed", { "README.md": "hi\n", ".polaris/skills/deploy.md": skill });
   const b = await setup("yan", { "README.md": "hi\n" });
   srv.close();
 
@@ -346,11 +346,11 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
   assert.doesNotMatch(JSON.stringify(a.first.system) + JSON.stringify(a.first.tools), /deploy|zed|Sandbox:/);
 
   const m0 = a.first.messages[0].content[0].text as string;
-  assert.match(m0, /^# Environment\n- Sandbox: .+\n- Repository: repo-.+, branched from main\. It is at \/work in the sandbox.*\n- Read-only paths \(changes there fail the run\): tests, evals, \.harness\/wiki\n\nSkills /);
-  assert.match(m0, /- deploy — Deploy the thing — \.harness\/skills\/deploy\.md\n\n# Task\n\n# ticket of zed\n\ndo it$/);
+  assert.match(m0, /^# Environment\n- Sandbox: .+\n- Repository: repo-.+, branched from main\. It is at \/work in the sandbox.*\n- Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki\n\nSkills /);
+  assert.match(m0, /- deploy — Deploy the thing — \.polaris\/skills\/deploy\.md\n\n# Task\n\n# ticket of zed\n\ndo it$/);
   assert.doesNotMatch(m0, /STEP-ONE/); // description only; the body is read on demand
   assert.doesNotMatch(b.first.messages[0].content[0].text, /Skills/);
-  assert.deepEqual(events(a.run.id).find((e) => e.type === "setup" && e.p.step === "skills")!.p.skills, [{ name: "deploy", description: "Deploy the thing", path: ".harness/skills/deploy.md" }]);
+  assert.deepEqual(events(a.run.id).find((e) => e.type === "setup" && e.p.step === "skills")!.p.skills, [{ name: "deploy", description: "Deploy the thing", path: ".polaris/skills/deploy.md" }]);
   assert.equal(events(b.run.id).some((e) => e.type === "setup" && e.p.step === "skills"), false);
 
   // Breakpoints: tools, system, last block of the last message of every request; the earlier request is a prefix of the next.
@@ -364,30 +364,30 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
 });
 
 test("a compacting run through the pipeline: spill + history stay out of commit and diff; usage is booked", async () => {
-  process.env.HARNESS_COMPACT_AT = "1000";
+  process.env.POLARIS_COMPACT_AT = "1000";
   const cookie = await user("frank");
-  const repo = tempRepo({ "README.md": "hi\n", ".harness/skills/deploy.md": "---\nname: deploy\ndescription: Deploy\n---\n" });
+  const repo = tempRepo({ "README.md": "hi\n", ".polaris/skills/deploy.md": "---\nname: deploy\ndescription: Deploy\n---\n" });
   await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false });
   const t = (await call("POST", "/api/tickets", cookie, { title: "long session", spec: "please compact along the way" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, cookie);
   const done = await waitFor(cookie, t.id, "review", 30_000);
-  delete process.env.HARNESS_COMPACT_AT;
+  delete process.env.POLARIS_COMPACT_AT;
   const run = done.runs[0];
   assert.equal(run.status, "passed");
 
   const ev = events(run.id);
   const spilled = ev.find((e) => e.type === "tool_result" && /Output too long/.test(e.p.content))!;
-  assert.match(spilled.p.content, /saved to \.harness\/outputs\/1-shell-1\.txt/);
-  assert.deepEqual(ev.filter((e) => e.type === "compaction").map((e) => e.p), [{ n: 1, tokens_before: 1200, summary_chars: 121, history_path: ".harness/history/1.md" }]);
-  assert.match(ev.find((e) => e.type === "run_started")!.p.task, /deploy — Deploy — \.harness\/skills\/deploy\.md/);
+  assert.match(spilled.p.content, /saved to \.polaris\/outputs\/1-shell-1\.txt/);
+  assert.deepEqual(ev.filter((e) => e.type === "compaction").map((e) => e.p), [{ n: 1, tokens_before: 1200, summary_chars: 121, history_path: ".polaris/history/1.md" }]);
+  assert.match(ev.find((e) => e.type === "run_started")!.p.task, /deploy — Deploy — \.polaris\/skills\/deploy\.md/);
 
   // On disk in the worktree, but not in the branch, the diff or the status.
-  assert.equal(readFileSync(join(run.worktree, ".harness/outputs/1-shell-1.txt"), "utf8").split("\n").length, 4000 + 5);
-  assert.match(readFileSync(join(run.worktree, ".harness/history/1.md"), "utf8"), /seq 1 4000/);
-  assert.equal(sh(repo, `git ls-tree -r --name-only ${run.branch}`), ".harness/skills/deploy.md\nREADME.md\nnotes.txt");
+  assert.equal(readFileSync(join(run.worktree, ".polaris/outputs/1-shell-1.txt"), "utf8").split("\n").length, 4000 + 5);
+  assert.match(readFileSync(join(run.worktree, ".polaris/history/1.md"), "utf8"), /seq 1 4000/);
+  assert.equal(sh(repo, `git ls-tree -r --name-only ${run.branch}`), ".polaris/skills/deploy.md\nREADME.md\nnotes.txt");
   const diff = (await call("GET", `/api/tickets/${t.id}/diff`, cookie)).body.diff;
   assert.match(diff, /notes\.txt/);
-  assert.doesNotMatch(diff, /\.harness/);
+  assert.doesNotMatch(diff, /\.polaris/);
   assert.equal(sh(run.worktree, "git status --porcelain"), "");
 
   // 5 turns of (100, 300) per message: 14 messages → 1400 uncached, 4200 cached.

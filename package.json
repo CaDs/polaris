@@ -1,8 +1,8 @@
 {
-  "name": "agent-harness",
+  "name": "polaris",
   "version": "1.0.0",
   "scripts": {
-    "test": "DB_PATH=:memory: HARNESS_SECRET_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff BETTER_AUTH_URL=http://localhost:3000 BETTER_AUTH_SECRET=d0500a2aa6bb924fbbfb228df914405beae74eefbff9b507 node --test 'test/**/*.test.ts'",
+    "test": "DB_PATH=:memory: POLARIS_SECRET_KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff BETTER_AUTH_URL=http://localhost:3000 BETTER_AUTH_SECRET=d0500a2aa6bb924fbbfb228df914405beae74eefbff9b507 node --test 'test/**/*.test.ts'",
     "dev": "concurrently -k -n api,web \"node --watch --env-file-if-exists=.env server/index.ts\" \"vite\"",
     "build": "vite build",
     "start": "node --env-file-if-exists=.env server/index.ts",

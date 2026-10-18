@@ -7,11 +7,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// M6: reflection → lessons, eval cases + eval runs, prompt versions with eval-gated promotion. HARNESS_SANDBOX=host (no docker).
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "improve-data-"));
+// M6: reflection → lessons, eval cases + eval runs, prompt versions with eval-gated promotion. POLARIS_SANDBOX=host (no docker).
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "improve-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { activePrompt, addPrompt, promote, promotion, REFLECT_SYSTEM, seriesDigest, LESSONS_MAX } = await import("../server/improve.ts");
@@ -250,7 +250,7 @@ test("eval run: every case in a fresh worktree at base_sha; the ticket is untouc
   const after = (await call("GET", `/api/tickets/${ticket.id}`, alice)).body;
   assert.deepEqual([after.status, after.runs.length, after.tokens_in, after.run_status], [before.status, before.runs.length, before.tokens_in, before.run_status]);
   assert.equal(sh(repo, "git worktree list").split("\n").length, 1);
-  assert.equal(sh(repo, "git for-each-ref refs/heads/harness"), "");
+  assert.equal(sh(repo, "git for-each-ref refs/heads/polaris"), "");
   assert.equal(existsSync(res.worktree), false);
   // Viewable like any run of the workspace.
   assert.equal((await call("GET", `/api/runs/${res.id}`, alice)).status, 200);

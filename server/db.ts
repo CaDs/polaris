@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readdirSync, readFileSync } from "node:fs";
 
-export const db = new DatabaseSync(process.env.DB_PATH ?? "harness.db");
+export const db = new DatabaseSync(process.env.DB_PATH ?? "polaris.db");
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 
 // Our own tables. Better Auth migrates its tables (user, session, organization, member, ...) first.

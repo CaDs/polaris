@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// Real Docker sandbox. Skipped when `docker info` fails (no daemon). The first run builds agent-harness-sandbox:1.
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "docker-data-"));
-delete process.env.HARNESS_SANDBOX;
+// Real Docker sandbox. Skipped when `docker info` fails (no daemon). The first run builds polaris-sandbox:1.
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "docker-data-"));
+delete process.env.POLARIS_SANDBOX;
 const { openSandbox, removeStaleContainers, SANDBOX_IMAGE } = await import("../server/sandbox.ts");
 
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8" }).trim();
@@ -27,7 +27,7 @@ test("container per run: /work mount, read-only protected dirs, in-container kil
   const sb = await openSandbox(randomUUID(), wt, ["tests", "evals"], SANDBOX_IMAGE);
   const run = (command: string, timeoutMs = 30_000, signal?: AbortSignal) => sb.exec(command, { cwd: wt, timeoutMs, signal });
   try {
-    assert.match(docker("inspect", "-f", "{{index .Config.Labels \"agent-harness\"}}", sb.name), /^1$/);
+    assert.match(docker("inspect", "-f", "{{index .Config.Labels \"polaris\"}}", sb.name), /^1$/);
     const r = await run("pwd; cat a.txt; echo made > b.txt; which git rg");
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /^\/work\nfrom host\n/);
@@ -65,8 +65,8 @@ test("container per run: /work mount, read-only protected dirs, in-container kil
 test("startup sweep removes stale containers of this data dir only", { skip, timeout: 600_000 }, async () => {
   const wt = realpathSync(mkdtempSync(join(tmpdir(), "docker-wt-")));
   const mine = await openSandbox(randomUUID(), wt, [], SANDBOX_IMAGE);
-  const other = `harness-other-${randomUUID()}`;
-  docker("run", "-d", "--name", other, "--label", "agent-harness=1", "--label", "agent-harness.data=/elsewhere", SANDBOX_IMAGE, "sleep", "infinity");
+  const other = `polaris-other-${randomUUID()}`;
+  docker("run", "-d", "--name", other, "--label", "polaris=1", "--label", "polaris.data=/elsewhere", SANDBOX_IMAGE, "sleep", "infinity");
   try {
     await removeStaleContainers();
     assert.equal(docker("ps", "-aq", "--filter", `name=${mine.name}`), "");
@@ -81,8 +81,8 @@ test("git works read-only inside the sandbox of a worktree", { skip, timeout: 60
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "docker-repo-")));
   writeFileSync(join(repo, "a.txt"), "a\n");
   execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
-  const wt = join(process.env.HARNESS_DATA_DIR!, "wt-git");
-  await addWorktree(repo, "main", wt, "harness/git-test");
+  const wt = join(process.env.POLARIS_DATA_DIR!, "wt-git");
+  await addWorktree(repo, "main", wt, "polaris/git-test");
   const sb = await openSandbox(randomUUID(), wt, [], SANDBOX_IMAGE);
   const run = (command: string) => sb.exec(command, { cwd: wt, timeoutMs: 30_000 });
   try {

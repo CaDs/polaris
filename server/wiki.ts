@@ -9,7 +9,7 @@ import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
 
 // M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per workspace at <dataDir>/wikis/<workspace_id>/,
-// owned by the harness. Agents only read a snapshot of its HEAD (.harness/wiki/); the only writers are the wiki
+// owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the only writers are the wiki
 // maintainer run (in a clone, committed here only if the mechanical lint passes) and human edits. Everything is
 // serialized per workspace (wikiSerial). The orchestration of maintainer runs lives in runs.ts.
 
@@ -172,7 +172,7 @@ export async function wikiSection(ws: string, repo: string, base: string) {
   if (!pages.length) return "";
   const flagged = new Map(pages.filter((p) => p.stale).map((p) => [p.line, ` ⚠ may be stale: ${p.stale}`]));
   const lines = index.split("\n").filter((l) => l.trim() && !l.startsWith("# ")).map((l) => l + (flagged.get(l.trim()) ?? ""));
-  return `# Project wiki\n\nRead the pages relevant to your task (.harness/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`;
+  return `# Project wiki\n\nRead the pages relevant to your task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`;
 }
 
 export async function wikiView(ws: string, stale?: { repo: string; base: string }) {
@@ -223,16 +223,16 @@ async function snapshotTo(ws: string, dest: string) {
   await execFileP("sh", ["-c", 'git -C "$1" archive HEAD | tar -x -C "$2"', "sh", dir, dest]);
 }
 
-// Exports the wiki's HEAD to <worktree>/.harness/wiki and returns its content: wikiTampered compares against it at the gate
+// Exports the wiki's HEAD to <worktree>/.polaris/wiki and returns its content: wikiTampered compares against it at the gate
 // (the dir is git-excluded, so git can't see a write there; the sandbox mounts it read-only, the host sandbox does not).
 export async function materialize(ws: string, worktree: string) {
-  const dest = join(worktree, ".harness/wiki");
+  const dest = join(worktree, ".polaris/wiki");
   await snapshotTo(ws, dest);
   return readTree(dest);
 }
 export function wikiTampered(worktree: string, original: Tree) {
-  const now = existsSync(join(worktree, ".harness/wiki")) ? readTree(join(worktree, ".harness/wiki")) : {};
-  return [...new Set([...Object.keys(original), ...Object.keys(now)])].filter((p) => original[p] !== now[p]).sort().map((p) => `.harness/wiki/${p}`);
+  const now = existsSync(join(worktree, ".polaris/wiki")) ? readTree(join(worktree, ".polaris/wiki")) : {};
+  return [...new Set([...Object.keys(original), ...Object.keys(now)])].filter((p) => original[p] !== now[p]).sort().map((p) => `.polaris/wiki/${p}`);
 }
 
 // --- writing: a clone, validated, then fast-forwarded into the wiki repo ---

@@ -7,11 +7,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Worker budget settings (max_turns, max_minutes) and what uses them. HARNESS_SANDBOX=host (no docker), demo provider.
-process.env.HARNESS_PROVIDER = "fake";
-process.env.HARNESS_SANDBOX = "host";
-process.env.HARNESS_CONCURRENCY = "2";
-process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "budget-data-"));
+// Worker budget settings (max_turns, max_minutes) and what uses them. POLARIS_SANDBOX=host (no docker), demo provider.
+process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_SANDBOX = "host";
+process.env.POLARIS_CONCURRENCY = "2";
+process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "budget-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");

@@ -1,6 +1,6 @@
-# agent-harness
+# Polaris
 
-Coding-agent harness with a web dashboard. Design: [SPEC.md](SPEC.md). Roadmap: [tasks.md](tasks.md).
+Polaris is a self-hosted coding-agent harness with a web dashboard. Design: [SPEC.md](SPEC.md). Roadmap: [tasks.md](tasks.md).
 
 ```sh
 cp .env.example .env   # set BETTER_AUTH_SECRET: openssl rand -hex 32
@@ -23,8 +23,8 @@ Set the workspace's repository in **Settings** (absolute path to a repo root wit
 defaults to its checked-out branch). Run agent then:
 
 ```
-queued ──(slot free: HARNESS_CONCURRENCY, default 2, FIFO)──▶ running
-  setup: git worktree + branch harness/<KEY>-<attempt>-<run8> from base → container → setup_command
+queued ──(slot free: POLARIS_CONCURRENCY, default 2, FIFO)──▶ running
+  setup: git worktree + branch polaris/<KEY>-<attempt>-<run8> from base → container → setup_command
   agent loop (shell = docker exec; file tools on the host worktree)
   gate: test_command (10 min) + no changes under protected paths
     pass → commit on the branch → run passed, ticket review → Approve (merge, done) | Reject (todo, note → next task)
@@ -32,14 +32,14 @@ queued ──(slot free: HARNESS_CONCURRENCY, default 2, FIFO)──▶ running
 cancel (queued or running) → run cancelled, ticket todo, no retry
 ```
 
-- **Sandbox**: one container per run (`agent-harness-sandbox:1`, built from `docker/sandbox.Dockerfile` on first use),
-  worktree at `/work`, protected paths re-mounted read-only, 2 CPUs / 2 GB, shared `agent-harness-npm-cache` volume.
-  Removed when the run ends; stale ones (label `agent-harness=1`, same data dir) are removed at startup.
+- **Sandbox**: one container per run (`polaris-sandbox:1`, built from `docker/sandbox.Dockerfile` on first use),
+  worktree at `/work`, protected paths re-mounted read-only, 2 CPUs / 2 GB, shared `polaris-npm-cache` volume.
+  Removed when the run ends; stale ones (label `polaris=1`, same data dir) are removed at startup.
   Commands run under `setsid` with their pid recorded, because killing the local `docker exec` client leaves the command
   running in the container; timeout/cancel kills the whole process group inside the container.
 - **Git stays on the host.** A worktree's `.git` is a file pointing into the repo's `.git` on the host, so git does not
   work inside the container; we don't mount the repo's `.git` either (that would let the agent rewrite any branch).
-  The harness creates the worktree, checks the diff, commits (author `agent-harness <harness@localhost>`, hooks off)
+  The harness creates the worktree, checks the diff, commits (author `polaris <polaris@localhost>`, hooks off)
   and merges. `read_file`/`edit_file`/`search` work on the host worktree path.
 - **Worktrees/branches**: a passed run keeps both until the ticket is approved, rejected or deleted; failed and cancelled
   runs are cleaned up when they finish (their output stays in the event log).
@@ -52,12 +52,12 @@ cancel (queued or running) → run cancelled, ticket todo, no retry
 
 ## Context management (M5)
 
-Runs are append-only conversations (see [SPEC.md](SPEC.md)). In the worktree the harness keeps `.harness/outputs/`
-(full text of long shell/search output) and `.harness/history/` (full transcript of a compacted conversation); both are
-git-excluded and never committed. Put skills in your repo as `.harness/skills/<name>.md` with `name` and `description`
+Runs are append-only conversations (see [SPEC.md](SPEC.md)). In the worktree the harness keeps `.polaris/outputs/`
+(full text of long shell/search output) and `.polaris/history/` (full transcript of a compacted conversation); both are
+git-excluded and never committed. Put skills in your repo as `.polaris/skills/<name>.md` with `name` and `description`
 frontmatter; agents see the list and read the ones they need. Context windows are set per provider (Settings → Providers),
 the compaction cap in Settings → Context. The **Usage** page shows tokens, cost and cache hit rate.
-`HARNESS_COMPACT_AT=<tokens>` forces the compaction threshold; `HARNESS_RETRY_BASE_MS` sets the provider retry backoff.
+`POLARIS_COMPACT_AT=<tokens>` forces the compaction threshold; `POLARIS_RETRY_BASE_MS` sets the provider retry backoff.
 
 ## Self-improvement (M6)
 
@@ -80,7 +80,7 @@ Each workspace has a wiki (a git repo under the data dir) that an LLM maintains 
 the **Wiki** page shows the index (pages whose source files changed since they were verified are flagged), lets you read and edit
 pages, and lists the history with diffs. After you **Approve** a ticket a maintainer agent updates the pages the change affects;
 its edit only lands if the mechanical lint passes. **Build wiki** writes a first version from the code, **Refresh stale pages**
-re-verifies flagged ones, **Lint** checks the structure. Runs see the pages read-only at `.harness/wiki/`. Off per workspace in
+re-verifies flagged ones, **Lint** checks the structure. Runs see the pages read-only at `.polaris/wiki/`. Off per workspace in
 Settings. Details: [SPEC.md](SPEC.md#project-wiki-m10).
 
 ## Planner (M7)
@@ -100,9 +100,9 @@ epic: todo ─Run planner─▶ running (round 1 … finish_round) ─▶ waitin
 child: todo (waiting on deps) ─▶ queued ─▶ … review ─Approve (or auto)─▶ done | Reject ─▶ failed | retries used ─▶ failed
 ```
 
-With `HARNESS_PROVIDER=fake` the demo planner creates "Create a.txt" and "Create b.txt" (after a.txt) and completes the epic
+With `POLARIS_PROVIDER=fake` the demo planner creates "Create a.txt" and "Create b.txt" (after a.txt) and completes the epic
 once both are done; the demo worker creates the file its child ticket names. `PARALLEL` in the epic drops the dependency;
 `FAIL-GATE` makes b.txt's worker also write under `tests/`, so it fails every attempt and the planner creates a follow-up.
 
-With `HARNESS_PROVIDER=fake` the demo agent creates `ok.txt` on a first attempt only if the system prompt contains
+With `POLARIS_PROVIDER=fake` the demo agent creates `ok.txt` on a first attempt only if the system prompt contains
 `ALWAYS-CREATE-OK`, and a proposal appends exactly that, so a `test -f ok.txt` eval scores 0/1 for v1 and 1/1 for v2.

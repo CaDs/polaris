@@ -7,8 +7,8 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   test.setTimeout(180_000);
   const repo = tempRepo();
   // A committed skill the run should be offered.
-  mkdirSync(join(repo, ".harness/skills"), { recursive: true });
-  writeFileSync(join(repo, ".harness/skills/lint.md"), "---\nname: lint\ndescription: How to run the linter\n---\nRun npm run lint.\n");
+  mkdirSync(join(repo, ".polaris/skills"), { recursive: true });
+  writeFileSync(join(repo, ".polaris/skills/lint.md"), "---\nname: lint\ndescription: How to run the linter\n---\nRun npm run lint.\n");
   git(repo, "add", "-A");
   git(repo, "-c", "user.name=e2e", "-c", "user.email=e2e@x.dev", "commit", "-q", "-m", "add skill");
   await signUp(page, "Context");
@@ -46,10 +46,10 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
 
   const transcript = page.getByRole("region", { name: "Transcript" });
   await expect(transcript.getByLabel("Skills offered")).toContainText("lint");
-  await expect(transcript).toContainText("Output too long: saved to .harness/outputs/1-shell-1.txt");
+  await expect(transcript).toContainText("Output too long: saved to .polaris/outputs/1-shell-1.txt");
   const divider = transcript.getByRole("separator");
   await expect(divider).toContainText("Context compacted (#1)");
-  await expect(divider).toContainText(".harness/history/1.md");
+  await expect(divider).toContainText(".polaris/history/1.md");
   await expect(transcript).toContainText("Summary: printed the numbers");
   await expect(transcript).toContainText("Tests passed", { timeout: 60_000 });
   await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 15_000 });
@@ -61,10 +61,10 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   // The diff has the real change and none of the harness's scratch files; skills stay in the repo.
   const diff = page.getByLabel("Diff");
   await expect(diff).toContainText("notes.txt");
-  await expect(diff).not.toContainText(".harness");
+  await expect(diff).not.toContainText(".polaris");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("done");
-  expect(git(repo, "ls-tree", "-r", "--name-only", "main")).toBe(".harness/skills/lint.md\nREADME.md\nnotes.txt");
+  expect(git(repo, "ls-tree", "-r", "--name-only", "main")).toBe(".polaris/skills/lint.md\nREADME.md\nnotes.txt");
 
   // Usage page.
   await page.getByRole("link", { name: "Usage" }).click();

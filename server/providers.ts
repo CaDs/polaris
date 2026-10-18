@@ -129,7 +129,7 @@ providerRoutes.get("/", (c) =>
   c.json((db.prepare("SELECT * FROM providers WHERE workspace_id = ? ORDER BY created_at, rowid").all(c.get("workspaceId")) as ProviderRow[]).map(view)),
 );
 
-// Validated create/patch body. Secrets only with a configured HARNESS_SECRET_KEY.
+// Validated create/patch body. Secrets only with a configured POLARIS_SECRET_KEY.
 async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow) {
   const b = await c.req.json().catch(() => null);
   if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };

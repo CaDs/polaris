@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // e2e runs the production build against a fresh SQLite file on :3200, with the real Docker sandbox and the fake provider.
-// One run at a time (HARNESS_CONCURRENCY=1) so the M3 spec can see a run wait in the queue.
+// One run at a time (POLARIS_CONCURRENCY=1) so the M3 spec can see a run wait in the queue.
 // HEADED=1 opens a visible browser in slow motion so you can watch each step.
 // REAL_MODEL=<ollama model> runs only e2e/real-model.spec.ts against local Ollama (http://localhost:11434) instead of the fake provider.
 const headed = !!process.env.HEADED;
@@ -31,12 +31,12 @@ export default defineConfig({
     reuseExistingServer: false,
     env: {
       PORT: String(port),
-      DB_PATH: join(tmpdir(), `harness-e2e-${Date.now()}.db`),
+      DB_PATH: join(tmpdir(), `polaris-e2e-${Date.now()}.db`),
       BETTER_AUTH_URL: `http://localhost:${port}`,
-      ...(realModel ? {} : { HARNESS_PROVIDER: "fake" }), // the real-model spec adds an Ollama provider through the UI
-      HARNESS_CONCURRENCY: "1",
-      HARNESS_SECRET_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", // test key only
-      HARNESS_DATA_DIR: join(tmpdir(), `harness-e2e-runs-${Date.now()}`),
+      ...(realModel ? {} : { POLARIS_PROVIDER: "fake" }), // the real-model spec adds an Ollama provider through the UI
+      POLARIS_CONCURRENCY: "1",
+      POLARIS_SECRET_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", // test key only
+      POLARIS_DATA_DIR: join(tmpdir(), `polaris-e2e-runs-${Date.now()}`),
       BETTER_AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",
     },
   },
