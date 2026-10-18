@@ -116,7 +116,7 @@ function wikiScript(task: string) {
   const sha = /Commit for `verified`: (\w+)/.exec(task)![1];
   const day = /today is (\S+)/.exec(task)![1];
   const op = /# Task: (ingest|build|re-verify)/.exec(task)![1];
-  const files = op === "ingest" ? (/# Files changed\n\n([\s\S]*?)\n\n# Merged diff/.exec(task)?.[1] ?? "").split("\n").filter((f) => f && f !== "(none)") : ["README.md"];
+  const files = op === "ingest" ? (/# Files changed\n\n([\s\S]*?)\n\n# Merged diff/.exec(task)?.[1] ?? "").split("\n").filter((f) => f && f !== "(none)") : op === "build" ? ["README.md"] : [];
   const page = op === "ingest" ? "modules/demo.md" : op === "build" ? "overview.md" : /^- (\S+) — changed/m.exec(task)![1];
   const title = op === "build" ? "Overview" : "Demo module";
   const usage = { input: 80, output: 15, cache_read: 5, cache_write: 0 };
