@@ -239,12 +239,14 @@ export function recordEvalResult(runId: string, passed: boolean, turns: number) 
     WHERE id = ? AND (SELECT COUNT(*) ${of}) >= json_array_length(case_ids)`).run(Date.now(), r.eval_run_id);
 }
 
-const latestEval = (promptId: string, set: string) =>
-  db.prepare("SELECT * FROM eval_runs WHERE prompt_id = ? AND case_ids = ? AND status = 'done' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(promptId, set) as EvalRun | undefined;
+// A cancelled case run is booked as failed, so an eval with one says nothing about its prompt: it never counts.
+const latestEval = (promptId: string, set: string, model?: string) =>
+  db.prepare(`SELECT * FROM eval_runs e WHERE prompt_id = ? AND case_ids = ? AND status = 'done' AND (? IS NULL OR model = ?)
+    AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.eval_run_id = e.id AND r.status = 'cancelled') ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(promptId, set, model ?? null, model ?? null) as EvalRun | undefined;
 
 // Promotion rule: the candidate's latest completed eval on the CURRENT case set must beat the active version's latest on
-// the same set: strictly more cases passed, or as many with at least 10% fewer mean tokens. Always a human click; there
-// is deliberately no auto-promotion (see SPEC).
+// the same set with the same model: strictly more cases passed, or as many with at least 10% fewer mean tokens. Always a
+// human click; there is deliberately no auto-promotion (see SPEC).
 export function promotion(ws: string, p: Prompt): { ok: boolean; reason: string } {
   const set = caseSet(ws);
   const n = (JSON.parse(set) as string[]).length;
@@ -253,8 +255,8 @@ export function promotion(ws: string, p: Prompt): { ok: boolean; reason: string 
   if (!n) return { ok: false, reason: "No eval cases yet: add an approved ticket to evals first." };
   const c = latestEval(p.id, set);
   if (!c) return { ok: false, reason: `Run an eval of v${p.version} on the current ${n} case${n === 1 ? "" : "s"} first.` };
-  const a = latestEval(active.id, set);
-  if (!a) return { ok: false, reason: `The active v${active.version} has no eval on the current case set: run one to compare against.` };
+  const a = latestEval(active.id, set, c.model);
+  if (!a) return { ok: false, reason: `The active v${active.version} has no eval with ${c.model} on the current case set: run one to compare against.` };
   const score = (e: EvalRun, v: number) => `v${v} passed ${e.passed}/${n} with ${Math.round(e.mean_tokens ?? 0)} mean tokens`;
   const vs = `${score(c, p.version)}; active ${score(a, active.version)}.`;
   if (c.passed! > a.passed!) return { ok: true, reason: `Higher pass rate: ${vs}` };

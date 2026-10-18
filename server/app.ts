@@ -7,7 +7,7 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval } from "./runs.ts";
 import { withStates } from "./planner.ts";
 import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -234,16 +234,12 @@ app.post("/api/tickets/:id/reject", async (c) => {
   return c.json(ticketIn(c));
 });
 
-const SETTINGS_DEFAULTS = {
-  repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
-  child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
-};
-const SETTINGS_BUDGET = { max_turns: 120, max_minutes: 60 };
-const SETTINGS_FIELDS = Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS_DEFAULTS)[];
+const TOGGLES = new Set(["auto_approve_children", "model_review", "auto_split", "wiki"]);
+const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1000, 100_000_000, "Compact at (tokens)"], max_turns: [10, 500, "Max turns per attempt"], max_minutes: [5, 600, "Max minutes per attempt"] };
 
 app.get("/api/settings", (c) => {
   const s = settingsFor(c.get("workspaceId"));
-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60, ...s, configured: !!s });
+  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, ...s, configured: !!s });
 });
 
 // Workspace default provider/model (null = env fallback). Lives on the settings row, so the repository must be saved first.
@@ -258,41 +254,28 @@ app.put("/api/settings/default-provider", async (c) => {
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });
 
-// Upsert. Missing fields fall back to defaults; the repo is checked (root of a repo with commits, base branch exists).
+// Upsert that merges: an omitted field keeps its value (the default for a new workspace), null resets it to the default.
+// Toggles take true/1/"on" (form posts) as on; the repo is checked (root of a repo with commits, base branch exists).
 app.put("/api/settings", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (!b || typeof b !== "object" || Array.isArray(b)) return c.json({ error: "body must be a JSON object" }, 400);
-  const v = { ...SETTINGS_DEFAULTS };
-  for (const k of SETTINGS_FIELDS) {
-    if (b[k] === undefined) continue;
-    if (typeof b[k] !== "string" || b[k].length > 2000) return c.json({ error: `${k} must be a string of at most 2000 chars` }, 400);
-    v[k] = b[k].trim();
+  const v: Record<string, any> = { ...SETTINGS_DEFAULTS, ...settingsFor(c.get("workspaceId")) };
+  for (const k of Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS_DEFAULTS)[]) {
+    const x = b[k];
+    if (x === undefined) continue;
+    if (x === null) v[k] = SETTINGS_DEFAULTS[k];
+    else if (TOGGLES.has(k)) v[k] = x === true || x === 1 || x === "1" || x === "on" ? 1 : 0;
+    else if (LIMITS[k]) {
+      const [lo, hi, label] = LIMITS[k];
+      v[k] = typeof x === "number" || (typeof x === "string" && x.trim()) ? Number(x) : NaN; // form posts send strings
+      if (!Number.isInteger(v[k]) || v[k] < lo || v[k] > hi) return c.json({ error: `${label} must be a whole number from ${lo} to ${hi}` }, 400);
+    } else if (typeof x !== "string" || x.length > 2000) return c.json({ error: `${k} must be a string of at most 2000 chars` }, 400);
+    else v[k] = x.trim();
   }
   if (!v.image) v.image = SANDBOX_IMAGE;
   if (!IMAGE_REF.test(v.image)) return c.json({ error: "Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag" }, 400);
-  // Cap on the context size at which a run compacts (also limited to 70% of the provider's window). Form posts send a string.
-  const compact = b.compact_at_tokens === undefined || b.compact_at_tokens === "" ? 150000 : Number(b.compact_at_tokens);
-  if (!Number.isInteger(compact) || compact < 1000 || compact > 100_000_000) return c.json({ error: "Compact at must be a whole number of tokens (1000 to 100000000)" }, 400);
-  // Worker budget (runs.ts): whole numbers in range; omitted = unchanged (default for a new workspace). Form posts send strings.
-  const cur = settingsFor(c.get("workspaceId"));
-  const limit = (k: "max_turns" | "max_minutes", lo: number, hi: number, label: string) => {
-    const x = b[k] === undefined ? (cur?.[k] ?? SETTINGS_BUDGET[k]) : typeof b[k] === "number" || typeof b[k] === "string" ? Number(b[k]) : NaN;
-    return Number.isInteger(x) && x >= lo && x <= hi ? x : { error: `${label} must be a whole number from ${lo} to ${hi}` };
-  };
-  const turns = limit("max_turns", 10, 500, "Max turns per attempt");
-  const minutes = limit("max_minutes", 5, 600, "Max minutes per attempt");
-  if (typeof turns === "object") return c.json(turns, 400);
-  if (typeof minutes === "object") return c.json(minutes, 400);
-  if (v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
+  if (v.protected_paths.split(",").some((p: string) => p.trim().startsWith("/") || p.split("/").includes("..")))
     return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);
-  // M7: merge children that pass the gate without a click. Form posts send "on" for a checked box and omit it otherwise.
-  const autoApprove = b.auto_approve_children === true || b.auto_approve_children === "on" ? 1 : 0;
-  // M8: omitted = unchanged (on for a new workspace); the web form always sends it.
-  const review = b.model_review === undefined ? (settingsFor(c.get("workspaceId"))?.model_review ?? 1) : b.model_review === true || b.model_review === "on" ? 1 : 0;
-  // M9: likewise.
-  const split = b.auto_split === undefined ? (settingsFor(c.get("workspaceId"))?.auto_split ?? 1) : b.auto_split === true || b.auto_split === "on" ? 1 : 0;
-  // M10: likewise.
-  const wiki = b.wiki === undefined ? (settingsFor(c.get("workspaceId"))?.wiki ?? 1) : b.wiki === true || b.wiki === "on" ? 1 : 0;
   const repo = await inspectRepo(v.repo_path, v.base_branch);
   if ("error" in repo) return c.json(repo, 400);
   db.prepare(
@@ -304,8 +287,8 @@ app.put("/api/settings", async (c) => {
        auto_approve_children = excluded.auto_approve_children, model_review = excluded.model_review, auto_split = excluded.auto_split,
        child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, max_turns = excluded.max_turns, max_minutes = excluded.max_minutes, updated_at = excluded.updated_at`,
   ).run(
-    c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, compact, autoApprove, review,
-    split, v.child_size_hint, v.triage_model, wiki, turns, minutes, Date.now(),
+    c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, v.compact_at_tokens, v.auto_approve_children,
+    v.model_review, v.auto_split, v.child_size_hint, v.triage_model, v.wiki, v.max_turns, v.max_minutes, Date.now(),
   );
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });

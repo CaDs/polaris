@@ -12,7 +12,7 @@ import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type U
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
-import { dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
+import { dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { trackerHeader } from "./tracker.ts";
@@ -45,6 +45,12 @@ export type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
+};
+// The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
+export const SETTINGS_DEFAULTS = {
+  repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
+  child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
+  compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
 };
 export const settingsFor = (workspaceId: string) =>
   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
@@ -99,7 +105,7 @@ async function rerunFlaky(first: ExecResult, again: () => Promise<ExecResult>) {
 // POLARIS_COMPACT_AT overrides it (tests).
 export function compactThreshold(capTokens: number | undefined, window: number) {
   const env = Number(process.env.POLARIS_COMPACT_AT);
-  return env > 0 ? env : Math.min(Math.floor(window * 0.7), capTokens ?? 150_000);
+  return env > 0 ? env : Math.min(Math.floor(window * 0.7), capTokens ?? SETTINGS_DEFAULTS.compact_at_tokens);
 }
 const envWindow = () => (process.env.ANTHROPIC_BASE_URL ? CONTEXT_WINDOW.ollama : CONTEXT_WINDOW.anthropic); // no stored provider: env fallback
 

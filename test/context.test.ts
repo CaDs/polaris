@@ -237,6 +237,19 @@ test("a threshold below the fresh conversation's size still allows two turns bet
   assert.equal(t.evs.filter((e) => e.type === "tool_call").length, 4);
 });
 
+test("compacting a resumed conversation (a fix round) keeps the earlier history file and the fix-round message", async () => {
+  const sh = (id: string) => [use(id, "shell", { command: "true" })];
+  const first = loop([sh("a"), sh("b"), [text("S1")], [text("done")]], { compactAt: 1000 });
+  const a = await first.done;
+  const h1 = readFileSync(join(first.root, ".polaris/history/1.md"), "utf8");
+  const second = loop([sh("c"), [text("S2")], [text("fixed")]], { root: first.root, compactAt: 1000, resume: { messages: a.messages, message: "FIX THE TESTS" } });
+  assert.equal((await second.done).status, "passed");
+  assert.equal(readFileSync(join(first.root, ".polaris/history/1.md"), "utf8"), h1);
+  assert.deepEqual(second.evs.filter((e) => e.type === "compaction").map((e) => (e.payload as any).history_path), [".polaris/history/2.md"]);
+  const fresh = second.fake.requests[2].messages[0].content[0];
+  assert.match(fresh.type === "text" ? fresh.text : "", /^TASK\n\nFIX THE TESTS\n\nContext was compacted\. Summary:\nS2\n/);
+});
+
 test("a reply cut off by max_tokens is continued (twice at most), never counted as success", async () => {
   const ok = loop([{ blocks: [text("part one")], stopReason: "max_tokens" }, { blocks: [text("part two")], stopReason: "end_turn" }]);
   assert.equal((await ok.done).status, "passed");

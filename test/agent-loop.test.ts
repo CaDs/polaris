@@ -105,6 +105,11 @@ test("unexpected errors fail the run and are classified Unknown", async () => {
   assert.equal(JSON.parse(err.payload).kind, "Unknown");
 });
 
+test("a refusal is not a finished answer", async () => {
+  const r = await run([{ blocks: [{ type: "text", text: "I can't help with that." }], stopReason: "refusal" }]).done;
+  assert.deepEqual([r.status, r.reason], ["failed", "ProviderError: the model refused (stop_reason refusal)"]);
+});
+
 test("resume continues a conversation with a new user message; the earlier messages are untouched", async () => {
   const first = run([[{ type: "text", text: "done" }]]);
   const a = await first.done;

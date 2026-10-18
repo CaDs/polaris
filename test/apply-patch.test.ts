@@ -55,3 +55,13 @@ test("paths outside the root and protected paths are rejected", async () => {
     assert.match((await patch(op)).content, /protected path/, op);
   assert.equal(read("tests/t.js"), "keep\n");
 });
+
+test("a trailing blank line in a hunk is ignored; a whitespace-fuzzy match keeps the file's context lines", async () => {
+  writeFileSync(join(root, "p.txt"), "one\ntwo\nthree\n");
+  const r = await patch("*** Update File: p.txt\n@@\n one\n-two\n+TWO\n");
+  assert.equal(r.is_error, false, r.content);
+  assert.equal(read("p.txt"), "one\nTWO\nthree\n");
+  writeFileSync(join(root, "ind.ts"), "function f() {\n    const a = 1;\n    return a;\n}\n");
+  assert.equal((await patch("*** Update File: ind.ts\n@@\n  const a = 1;\n-  return a;\n+    return a + 1;")).is_error, false);
+  assert.equal(read("ind.ts"), "function f() {\n    const a = 1;\n    return a + 1;\n}\n");
+});

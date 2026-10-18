@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { compactedTask, CONTINUE_REQUEST, historyMarkdown, readPaths, SUMMARY_REQUEST, workState } from "./context.ts";
 import { runTool, hostExec, writeScratch, type Exec, type Tool } from "./tools.ts";
 import { AgentError, type AgentEvent, type Block, type Msg, type Provider, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
@@ -69,8 +71,11 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   }
 
   // Full history to a file, one summary-only turn, then a fresh conversation: task + summary + pointer to the history.
+  // A resumed run (fix round) shares the worktree with the call before it: take the next free history file, and keep the
+  // new user message in the fresh conversation's task.
   async function compact() {
-    const n = histories.length + 1;
+    let n = 1;
+    while (existsSync(join(o.root, `.polaris/history/${n}.md`))) n++;
     const path = `.polaris/history/${n}.md`;
     writeScratch(o.root, path, historyMarkdown(messages, n));
     const before = contextTokens;
@@ -80,7 +85,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     writeScratch(o.root, path, `\n## Summary written at compaction\n\n${summary}\n`, true);
     histories.push(path);
     const state = await workState(ctx.exec, o.root, o.signal);
-    messages = [user(compactedTask(o.task, summary, histories, state, readPaths(messages)))];
+    messages = [user(compactedTask(o.resume ? `${o.task}\n\n${o.resume.message}` : o.task, summary, histories, state, readPaths(messages)))];
     reads = new Map(); // the earlier outputs are no longer in the conversation
     contextTokens = 0;
     o.onEvent({ type: "compaction", payload: { n, tokens_before: before, summary_chars: summary.length, history_path: path } });
@@ -114,6 +119,10 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
       const res = await turn();
       const calls = res.message.content.filter((b) => b.type === "tool_use");
       if (!calls.length) {
+        if (res.stopReason === "refusal") {
+          reason = "ProviderError: the model refused (stop_reason refusal)";
+          break;
+        }
         // Cut off by the output limit is not a finished answer: ask it to continue (a couple of times).
         if (res.stopReason === "max_tokens" || res.stopReason === "max_output_tokens") {
           if (continues++ >= MAX_CONTINUES) {
