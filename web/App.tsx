@@ -211,7 +211,7 @@ function NewTicket({ close, created }: { close: () => void; created: () => void 
   async function submit(e: FormEvent<HTMLFormElement>) {
     const f = fields(e);
     try {
-      await api("/api/tickets", "POST", { title: f.title, spec: f.spec, kind: f.kind });
+      await api("/api/tickets", "POST", { title: f.title, spec: f.spec, kind: f.kind, test_command: f.test_command?.trim() || null });
       created();
     } catch (e) {
       setError((e as Error).message);
@@ -230,6 +230,10 @@ function NewTicket({ close, created }: { close: () => void; created: () => void 
         <label>
           Spec <textarea name="spec" rows={6} />
           <span className="hint">For an epic: the goal. A planner agent splits it into child tickets and follows their handoffs.</span>
+        </label>
+        <label>
+          Test command (optional) <input name="test_command" className="mono" spellCheck={false} maxLength={2000} />
+          <span className="hint">Overrides the workspace's for this ticket; empty = workspace default.</span>
         </label>
         {error && <p className="error" role="alert">{error}</p>}
         <div className="row end">

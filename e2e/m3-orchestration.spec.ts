@@ -104,3 +104,42 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   expect(git(repo, "for-each-ref", "refs/heads/harness")).toBe("");
   expect(git(repo, "log", "--format=%s", "main")).not.toContain("Reject me");
 });
+
+test("M3: a failed gate is fixed in the same run; the ticket's own test command round-trips", async ({ page }) => {
+  test.setTimeout(120_000);
+  const repo = tempRepo();
+  await signUp(page, "Gatefix");
+  const saved = await page.request.put("/api/settings", { data: { repo_path: repo, setup_command: "", test_command: "test -f never.txt", model_review: false } });
+  expect(saved.ok()).toBe(true);
+  const transcript = page.getByRole("region", { name: "Transcript" });
+
+  // The New ticket dialog takes an optional test command; the ticket view shows it and saves changes like the spec.
+  await page.getByRole("button", { name: "New ticket" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Title").fill("Fix in run");
+  await dialog.getByLabel("Spec").fill("GATE-FIX-ONCE");
+  await dialog.getByLabel("Test command (optional)").fill("test -f ok.txt");
+  await dialog.getByRole("button", { name: "Create ticket" }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await openTicket(page, "Fix in run");
+  const command = page.getByLabel("Test command", { exact: true });
+  await expect(command).toHaveValue("test -f ok.txt");
+  await command.fill("");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator(".hint .mono", { hasText: "test -f never.txt" })).toBeVisible();
+  await page.reload();
+  await expect(command).toHaveValue("");
+  await expect(command).toHaveAttribute("placeholder", "test -f never.txt");
+  await command.fill("test -f ok.txt");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.reload();
+  await expect(command).toHaveValue("test -f ok.txt");
+
+  // The first finish leaves the gate failing; the worker is resumed with the failure and the second gate passes: one run.
+  await page.getByRole("button", { name: "Run agent" }).click();
+  await expect(transcript.getByRole("separator").filter({ hasText: "Tests failed — fixing in the same run" })).toBeVisible({ timeout: 60_000 });
+  await expect(transcript.locator("details.gate.ok")).toContainText("Tests passed", { timeout: 60_000 });
+  await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Show run #2" })).toHaveCount(0);
+  await expect(transcript.locator("details.gate.err")).toContainText("Tests failed: `test -f ok.txt` exited with code 1");
+});

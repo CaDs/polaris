@@ -8,6 +8,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const [detail, setDetail] = useState<Detail | null>(null);
   const [title, setTitle] = useState(ticket.title);
   const [spec, setSpec] = useState(ticket.spec);
+  const [testCommand, setTestCommand] = useState(ticket.test_command ?? "");
+  const [workspaceTest, setWorkspaceTest] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
@@ -19,8 +21,10 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   useEffect(() => {
     setTitle(ticket.title);
     setSpec(ticket.spec);
+    setTestCommand(ticket.test_command ?? "");
     setSelected(null);
   }, [ticket.id]);
+  useEffect(() => void api<{ test_command: string }>("/api/settings").then((s) => setWorkspaceTest(s.test_command), () => {}), []);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
   // An epic's children change while the epic itself does not.
   useEffect(() => {
@@ -38,8 +42,9 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       setError((e as Error).message);
     }
   }
+  const dirty = testCommand.trim() !== (ticket.test_command ?? "");
   const save = () => {
-    if (title.trim() && (title.trim() !== ticket.title || spec !== ticket.spec)) patch({ title, spec });
+    if (title.trim() && (title.trim() !== ticket.title || spec !== ticket.spec || dirty)) patch({ title, spec, test_command: testCommand.trim() || null });
     else setTitle(ticket.title);
   };
 
@@ -115,8 +120,12 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       </div>
       {error && <p className="error" role="alert">{error}</p>}
       <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
+      <label>
+        Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={workspaceTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
+        <span className="hint">Overrides the workspace's for this ticket; empty = workspace default. Runs: <span className="mono">{testCommand.trim() || workspaceTest || "(no test command)"}</span></span>
+      </label>
       <div className="row">
-        <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec}>Save</button>
+        <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
       </div>
       {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
       {epic && detail?.children && <Epic ticket={ticket} items={detail.children} open={open} />}
@@ -278,10 +287,12 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         if (e.type === "test_result")
           return (
             <details key={e.seq} className={`gate ${p.passed ? "ok" : "err"}`} open={!p.passed}>
-              <summary>{p.passed ? "Tests passed" : `Tests failed: ${gateFailure(p)}`}</summary>
+              <summary>{p.passed ? (p.flaky ? "Tests passed on a re-run (flaky)" : "Tests passed") : `Tests failed: ${gateFailure(p)}`}</summary>
+              {p.flaky && <pre>First run failed (exit {p.first_failure.timed_out ? "timeout" : p.first_failure.code}):{"\n"}{p.first_failure.output || "(no output)"}</pre>}
               <pre>{p.output || "(no output)"}</pre>
             </details>
           );
+        if (e.type === "gate_fix") return <div key={e.seq} className="divider" role="separator">Tests failed — fixing in the same run</div>;
         if (e.type === "epic_gate")
           return (
             <details key={e.seq} className={`gate ${p.passed ? "ok" : "err"}`} open={!p.passed}>
@@ -323,7 +334,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
               <p className="msg">{p.notes}</p>
             </div>
           );
-        if (e.type === "model_review_started") return <div key={e.seq} className="divider" role="separator">Model review round {p.round}</div>;
+        if (e.type === "model_review_started") return <div key={e.seq} className="divider" role="separator">Model review round {p.round} {p.budget && <span className="muted">(budget {p.budget} turns for {p.lines} changed lines)</span>}</div>;
         if (e.type === "model_review")
           return (
             <div key={e.seq} className="note">

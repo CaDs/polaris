@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 export type Status = "todo" | "running" | "review" | "done" | "failed";
 export const COLUMNS: Status[] = ["todo", "running", "review", "done", "failed"];
 export type Ticket = {
-  id: string; number: number; key: string; title: string; spec: string; status: Status;
+  id: string; number: number; key: string; title: string; spec: string; test_command: string | null; status: Status;
   provider_id: string | null; model: string | null; run_model: string | null; run_auth: string | null;
   run_status: string | null; run_count: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number;
   eval_case_id: string | null;

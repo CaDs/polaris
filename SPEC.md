@@ -192,6 +192,27 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
   deleting an epic deletes its children (refused while any of their runs is active); `auto_approve_children` in
   `/api/settings`. Events: `handoff {text}` on a child's last run, `round_finished {round, notes, completed}` on a round.
 
+## Orchestration: the test gate
+
+After a worker's loop ends, the gate runs the ticket's test command (its own `test_command`, else the workspace's) and
+checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back).
+
+- **Flaky re-run.** A failure that is a non-zero exit or a timeout, with no protected path touched, is run once more at
+  once (the epic gate too). If that passes, the gate passes: `test_result` (`epic_gate`) gets `flaky: true` and
+  `first_failure {code, timed_out, output}`, and the transcript says "Tests passed on a re-run (flaky)". If it fails
+  again, the second result is the failure. This happens before any fix round, so a flake never triggers one.
+- **Gate fix round.** A failed gate resumes the *worker's own conversation* (`RunOptions.resume`, like review fix rounds)
+  with the failure (command, exit code or timeout, protected paths touched with "revert these", output tail) and "Fix it
+  and finish; the tests run again.", then re-checks. `GATE_FIX_ROUNDS` = 1 per attempt, counted across the whole attempt:
+  a gate failure after a review fix round uses it too, if it is still unused. Only a gate that still fails fails the
+  attempt (then the fresh retry applies). The round's turns and usage add to the run; a `gate_fix {reason}` event marks
+  it ("Tests failed — fixing in the same run"). Not for eval case runs (they measure the unassisted worker) or planners.
+- **Environment.** The first message says the repository is at `/work` in the sandbox, also every shell command's working
+  directory; tool paths are relative to it (absolute `/work/...` is accepted).
+- **Tool input errors.** `InvalidArguments` about a tool's input shape (missing or mistyped field) ends with
+  `Expected input: {command: string, timeout?: number}`, derived from the tool's schema. Path errors do not.
+- **Per-ticket test command.** The ticket view and New ticket dialog edit `tickets.test_command` (empty = workspace default).
+
 ## Model review (M8)
 
 Workspace setting `model_review` (migration 009, default on). After a worker run passes the test gate, the run's own
@@ -200,17 +221,18 @@ provider and model review the change before a human sees it (not for eval case r
 - **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
   [{file, line?, problem, fix}]}` (request_changes needs a finding; `InvalidArguments` otherwise), which ends its loop.
-  Budget: 25 turns, same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
+  Budget: `clamp(6 + ceil(lines / 8), 8, 25)` turns for `lines` changed lines (git numstat against base plus new
+  files, minus `.harness/` scratch), same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
   `git diff` (new files are untracked: it reads them). Its first message: ticket, base sha, the test command that passed.
   It hunts correctness bugs against the spec and neighbouring code paths, not style.
 - **Fix rounds.** `request_changes`: the findings are appended to the worker's own conversation (`RunOptions.resume`, still
   append-only), the worker fixes and finishes, the gate runs again, then the next review. At most 3 review rounds per
   attempt; if round 3 still requests changes the attempt fails with `model review: changes still requested after 3 rounds`
   and the normal retry rules apply (the next attempt's first message includes the last findings). A gate failure after a
-  fix round fails the attempt like any gate failure.
+  fix round may use the attempt's gate fix round (see the test gate), else it fails the attempt.
 - **Fail-open.** A reviewer that errors, or ends without `submit_review` (budget, provider error), is logged as a
   `model_review` event with verdict `error` and the change goes to human review anyway.
-- **Events and cost.** `model_review_started {round}` before each reviewer, `model_review {round, verdict: approve |
+- **Events and cost.** `model_review_started {round, budget, lines}` before each reviewer, `model_review {round, verdict: approve |
   request_changes | error, findings, message?}` after; reviewer tool calls and usage go to the same run's log, so the run's
   tokens and cost include review. The transcript shows both.
 

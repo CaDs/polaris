@@ -80,3 +80,10 @@
 - [x] Approve queues a serialized wiki ingest (role `wiki`: read-only code checkout + wiki clone, `edit_file` only in the wiki); mechanical lint with fix rounds before the commit
 - [x] Build wiki (bootstrap), Refresh stale pages (LLM lint), Lint button; human page edits as commits
 - [x] Wiki page: index with stale flags, viewer/editor, history with diffs, maintainer runs; `## Wiki notes` asked of workers; demo maintainer
+
+## Learnings from the ladder
+- [x] Gate fix round: a failed gate resumes the worker's own conversation once per attempt (`gate_fix` event) before the fresh retry; not for evals
+- [x] Flaky gate re-run (worker gate and epic gate): a failure that passes at once is a pass flagged `flaky`
+- [x] Reviewer turn budget proportional to the change (`clamp(6 + ceil(lines / 8), 8, 25)`), shown in the transcript
+- [x] `InvalidArguments` on a tool's input shape appends the expected input; the environment names `/work`; worker prompt: run relevant tests while iterating
+- [x] Ticket view + New ticket dialog: per-ticket test command; demo `GATE-FIX-ONCE`
