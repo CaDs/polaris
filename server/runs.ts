@@ -464,7 +464,7 @@ async function execute(runId: string) {
     };
     const providerFor = (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task));
     const addUsage = (u: Usage) => (Object.keys(u) as (keyof Usage)[]).forEach((k) => (usage[k] += u[k]));
-    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: BUDGET });
+    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left)." });
     ({ usage, turns, status, reason } = a);
     reply = finalText(a.messages);
     if (status !== "passed") return;
@@ -494,7 +494,7 @@ async function execute(runId: string) {
       const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
       log({ type: "model_review_started", payload: { round } });
       const before = await snapshot(worktree);
-      const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget: REVIEW_BUDGET, finished: () => !!out.review });
+      const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget: REVIEW_BUDGET, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
       addUsage(r.usage);
       abortCheck();
       if ((await snapshot(worktree)) !== before) {
@@ -511,7 +511,7 @@ async function execute(runId: string) {
         return;
       }
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET });
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left)." });
       addUsage(a.usage);
       turns += a.turns;
       ({ status, reason } = a);
@@ -608,6 +608,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
       tools: plannerTools(t, outcome, since, startChild, () => epicGate(s, gateCommand, log, signal)), root: worktree, budget: BUDGET, signal, cacheKey: t.id,
       compactAt,
       finished: () => outcome.notes !== undefined || outcome.summary !== undefined,
+      finishHint: "Call finish_round (or complete_epic) now with your notes.",
       onEvent: (e) => e.type !== "run_finished" && log(e),
     });
     ({ usage, turns, status, reason } = a);

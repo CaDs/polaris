@@ -116,3 +116,12 @@ test("resume continues a conversation with a new user message; the earlier messa
   assert.deepEqual(sent, [...before, { role: "user", content: [{ type: "text", text: "please fix" }] }]);
   assert.deepEqual(b.messages.slice(0, 3), sent);
 });
+
+test("finishHint is appended to the tool results when 2 turns are left, once", async () => {
+  const sh = (id: string) => [use(id, "shell", { command: "true" })];
+  const { fake, done } = run([sh("a"), sh("b"), sh("c"), sh("d"), sh("e")], { budget: { maxTurns: 5, maxTokens: 1e6 }, finishHint: "Wrap up." });
+  assert.equal((await done).reason, "turn budget exhausted (5)");
+  const notes = (i: number) => fake.requests[i].messages.at(-1)!.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text);
+  assert.deepEqual(notes(3), ["[harness] Only 2 turns are left in your budget. Wrap up."]); // sent with turn 4 of 5
+  assert.deepEqual([notes(2), notes(4)], [[], []]);
+});

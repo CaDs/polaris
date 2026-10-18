@@ -20,6 +20,7 @@ export type RunOptions = {
   budget: { maxTurns: number; maxTokens: number };
   signal?: AbortSignal;
   finished?: () => boolean; // checked after each batch of tool calls: true ends the run as passed (planner: finish_round/complete_epic)
+  finishHint?: string; // told to the model when 2 turns are left, so it wraps up instead of running out (a reviewer once used all 25 exploring)
   onEvent: (e: AgentEvent) => void;
   onStream?: (e: StreamEvent) => void;
 };
@@ -128,6 +129,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
         o.onEvent({ type: "tool_result", payload: { tool_use_id: call.id, content: r.content, is_error: r.is_error, error_kind: r.kind } });
         results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error });
       }
+      if (o.finishHint && turns === o.budget.maxTurns - 2) results.push({ type: "text", text: `[harness] Only 2 turns are left in your budget. ${o.finishHint}` });
       messages.push({ role: "user", content: results });
       if (o.finished?.()) {
         status = "passed";
