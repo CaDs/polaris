@@ -1,0 +1,274 @@
+# Agent Harness — Spec
+
+A self-hosted coding-agent harness with a web dashboard. You file tickets; agents work them in
+sandboxed git worktrees; tests gate the result; you approve merges. From M3 on, the harness
+builds its own remaining milestones (`tasks.md`).
+
+## Architecture
+
+- **One TypeScript process**: Hono API + N concurrent agent loops. Split workers out only when one process can't keep up.
+- **SQLite** via `node:sqlite`. Raw SQL, no ORM. Our migrations: `server/migrations/NNN_*.sql`, run once in order (`PRAGMA user_version`).
+- **Auth**: Better Auth (email/password) + organization plugin. **Workspace = organization.**
+- **Dashboard**: React + Vite in `web/`, live updates over SSE.
+- **Sandbox**: one Docker container per run, worktree mounted at `/work`; every shell tool call is a `docker exec`.
+
+## Core abstractions (do not bypass)
+
+1. **Workspace scoping.** Every resource has `workspace_id` (directly, or via its ticket). Every `/api/*` route except auth goes through the session + membership middleware in `server/app.ts` and filters by `c.get("workspaceId")`.
+2. **Event log is the source of truth.** A run appends `events(run_id, seq, type, payload)`; dashboard views, token totals, replays and evals are projections. Never store state only in memory.
+3. **Ticket → Run → Event.** A ticket has many runs (retries, other models). A run records role, model, worktree, attempt, status, token totals.
+4. **Secrets** (provider keys, OAuth tokens) are encrypted at rest with a key from env and never enter agent context or events.
+
+## Agent loop
+
+```
+messages = [system, task]
+loop: resp = provider.stream(messages, tools) → append → no tool calls? done
+      else run each tool, append result (errors returned as text, classified)
+      stop on turn/token budget
+```
+
+- Tools: `read_file`, `edit_file` (`str_replace` for Claude, `apply_patch` for GPT), `shell`, `search` (rg).
+- Fresh context per run: SPEC + PROGRESS notes + LESSONS + ticket + last failure.
+- A reply that stops on `max_tokens` without a tool call is not an answer: a "continue" user message is appended (≤ 2 in a row, then the run fails).
+- A tool call whose JSON arguments were cut off is answered with an `InvalidArguments` tool_result; the tool does not run.
+- Error classes: `InvalidArguments`, `UnexpectedEnvironment`, `ProviderError`, `Timeout`, `UserAborted`; anything else is a harness bug.
+
+## Context management (M5)
+
+**Conversations are append-only.** Current Claude models bind thinking blocks to the exact conversation that produced them:
+editing, reordering or deleting earlier messages invalidates them (newer accounts get a 400 on edited history), and it
+busts the prompt cache. So within a conversation the loop only ever appends. The tool list and the system prompt are
+never changed mid-conversation either (cache prefix, model behaviour).
+
+- **Request layout** (stable prefix first): tools (static per provider kind, keys serialized in sorted order) → system
+  prompt (the workspace's active prompt version, v1 = `prompts/worker.md`; static, no per-run or per-repo text) → messages.
+  The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node,
+  repo, base branch, read-only paths), the skills list, `# Lessons from earlier runs` (M6), the latest reviewer note, the
+  previous attempt's gate failure, then `# Task`.
+- **Cache breakpoints** (Anthropic, 3 of the 4 allowed): end of tools, end of system, and a moving one on the last content
+  block of the last message, so each turn reads the previous turn's prefix. OpenAI sends `prompt_cache_key` (the ticket id,
+  so retries of a ticket share a cache). Cache hit rate = `cache_read / (input + cache_read + cache_write)`, shown per run
+  and on the Usage page (`GET /api/usage`: totals, last 14 days, per model, top 10 tickets by tokens).
+- **Long tool output → file.** `shell` and `search` results over 8,000 chars are written in full to
+  `.harness/outputs/<turn>-<tool>-<id>.txt` in the run root (`/work/.harness/...` in the sandbox); the model gets the path,
+  size, line count and the last ~2,000 chars, and reads the rest with `read_file` offset/limit or `rg`/`tail`. Capture is
+  capped at 20 MB per stream. (`read_file` keeps its own 30k-char cap; it has offset/limit already, and spilling its output
+  would make reading a spilled file spill again.) `.harness/outputs/` and `.harness/history/` are added to the repo's
+  shared `info/exclude` when a worktree is created, and are also left out of `git add`, the diff and the protected-path
+  check. `.harness/skills/` is *not* excluded: skills are committed by humans.
+- **Compaction = summarize, then start a new conversation.** When the latest request's context size
+  (`input + cache_read + cache_write`) exceeds `min(70% of the provider's context_window, workspace compact_at_tokens)`
+  (defaults: anthropic 1M, openai 400k, ollama 32,768; cap 150,000; an Ollama provider still at 32,768 is "auto": the run asks Ollama for the served context at start (`/api/ps` `context_length` of the loaded model, else `/api/show` `*.context_length`), any other stored value wins, detection failure falls back to the stored value; a `setup {step: "context", window, source, compact_at}` event records it; `HARNESS_COMPACT_AT` overrides both, for tests):
+  (a) the whole conversation is written as markdown to `.harness/history/<n>.md` (every message, tool call with input,
+  tool result as the model saw it); (b) a user message asks for a progress summary with fixed headings (Goal, Done, Decisions, Key facts as file:line → fact, Left, Next step), appended at the end with the same tools and system, "no tool calls" instructed, calls made anyway are ignored;
+  (c) a fresh `messages` array starts with original task + `Context was compacted. Summary: …` + the harness's own `git status --short` / `git diff` (cut at 12,000 chars; omitted outside a git repo) + the paths the old conversation read + `Full history:
+  .harness/history/1.md, … (search it with rg/read_file if a detail is missing)`. Event
+  `compaction {n, tokens_before, summary_chars, history_path}`; the transcript renders a divider. Turn and token budgets
+  span compactions (the summary turn counts).
+- **read_file dedupe.** A `read_file` whose output is byte-identical to an earlier one (same path and range) in the *current* conversation returns a one-line stub naming that turn; any edit changes the bytes, so the content comes back. The memory is dropped on compaction and is empty on `resume`.
+- **Skills = our lazy loading.** Skills are `.harness/skills/*.md` with `name`/`description` frontmatter (plus optional
+  scripts beside them). Only `name — description — path` goes into the first user message; the model reads the file with
+  `read_file` when relevant. Tool definitions are *not* loaded on demand: changing the tool list mid-conversation busts the
+  cache prefix, so tools stay static per run and only the (cheap, append-only) text of skills is lazy. Same idea as
+  Cursor's lazy loading, without touching the prefix.
+- **Provider retries.** HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to 4 times with
+  exponential backoff (1 s base, ×2, ≤ 30 s) plus jitter, or the `retry-after` header when present. Each retry is an
+  `error` event with `retrying: true`. Never after output started streaming.
+
+## Providers
+
+```ts
+interface Provider {
+  stream(req: { system: Block[]; messages: Msg[]; tools: ToolDef[]; model: string },
+         onEvent: (e: StreamEvent) => void): Promise<{ message: Msg; usage: Usage }>
+}
+```
+
+| Backend | Adapter | Auth |
+|---|---|---|
+| Anthropic | Messages | API key |
+| Ollama | Messages (Anthropic-compatible endpoint) | none + `base_url` |
+| OpenAI | Responses | API key |
+| OpenAI subscription | Responses via Codex backend | ChatGPT OAuth (unofficial; personal use) |
+
+Internal message format is Anthropic-style content blocks. Reasoning is an opaque block passed back verbatim.
+
+## Self-improvement (M6)
+
+The harness gets better at the user's repo in three loops of increasing risk. Everything they produce lives in the DB
+(`lessons`, `prompts`, `eval_cases`, `eval_runs`, `eval_results`; migration 006), never in the worktree, so no agent tool
+can read or write it, and every change is a new version you can see in full on the **Improvement** page.
+
+1. **Reflection → lessons** (lowest risk, applies at once). When a run series ends (it passed → review, it failed for
+   good after its retries, or a reviewer rejected it with a note) the harness makes one extra call: a fresh one-message
+   conversation, no tools, the run's own provider and model, system prompt = the reflection instructions. Input: the current
+   lessons + a compact digest of the series (ticket key/title, final status, per attempt: status/reason, turns, tokens,
+   model, tool errors with their class and first line, setup/gate failures with a 1,000-char output tail, the reviewer
+   note); never the transcript. Output: the full updated document (short imperative bullets about this repo and harness,
+   deduped), capped at 8,000 chars (≈ 2,000 tokens; asked for in the prompt, then cut at a line break), common secret
+   shapes redacted. Same text → no new version. Each version records its source (reflection on run X / human edit /
+   restore of vN). The latest version goes into the first user message of every new run as `# Lessons from earlier runs`
+   (never the system prompt: that would bust the cache prefix); runs record `lessons_version`. Because lessons apply
+   immediately, the Improvement page shows them in full with a diff per version and one-click **Restore** (a new version).
+   The run gets a `reflection` event (lessons version, chars, usage) just before `run_finished`, so it shows in the
+   transcript; reflection tokens are not booked on the run. Reflections of one workspace are serialized.
+2. **Eval suite from past tickets.** "Add to evals" on an approved (done) ticket freezes a case: title + spec, repo,
+   `base_sha` = the commit the approved run started from, the workspace's setup command, the test command (the ticket's own, else the workspace's), protected paths and image
+   as they are now. **A case must fail at base_sha**: the harness checks out base_sha in a clean detached worktree + sandbox,
+   runs setup and the test command, and rejects the case if the tests already pass. A case that passes without the change
+   can't tell an agent that solved it from one that did nothing, so it would only add noise to every score. An **eval
+   run** scores one prompt version on every case (or a chosen subset): one queued run per case through the normal FIFO
+   queue and `HARNESS_CONCURRENCY` slots, each with a fresh detached worktree at base_sha + sandbox, the same pipeline
+   (setup → agent → test gate incl. protected-path check) with that prompt version and the lessons version active when
+   the eval started; but no retries, no commit, no review, no reflection, the source ticket's status and run list never
+   change, and the worktree is always removed (there is no branch). Results per case: passed, turns, tokens, cost, duration,
+   run id (the transcript is viewable). Score = cases passed / cases; tie-break = mean `tokens_in + tokens_out`.
+3. **Prompt versions + eval-gated promotion** (highest risk, applies only after a human click). The worker system prompt
+   is versioned per workspace in `prompts` (role `worker`, v1 seeded from `prompts/worker.md`). The active version is
+   recorded on each run when it is queued (`prompt_version`, shown as "prompt vN" in the transcript); a run's system prompt
+   never changes mid-run, so a promotion applies to runs queued after it. New versions come from "New version" (a human
+   edits a copy) or **Propose improvement**: a fresh no-tools call with the current prompt, the lessons and digests of the
+   5 most recent failed runs (incl. eval runs), returning a full revised prompt (≤ 20,000 chars) + a one-paragraph
+   rationale, stored as an inactive version. **Promotion rule:** a version can be promoted only if its latest finished eval
+   on the *current* case set (same case ids) beats the active version's latest finished eval on that same set: strictly
+   more cases passed, or as many with ≥ 10% fewer mean tokens. Otherwise Promote is disabled and the reason is shown (no
+   eval yet, active version has no eval on this set, not better). Changing the case set invalidates earlier evals for
+   promotion. **There is deliberately no auto-promotion:** eval sets are small and agent runs noisy, so a human reads the
+   prompt and the scores before it affects every run.
+
+Guardrails specific to M6: agents can't write lessons, prompts, cases or results (DB only, no tool reaches them);
+reflection and proposal calls get no tools; lessons and prompts are size-capped and shown in full before they matter.
+Agent-written tools (`tools/`) are not built.
+
+## Planner (M7)
+
+Large goals are **epics** (`tickets.kind = 'epic'`; migration 007). Design follows what worked for Cursor's long-running
+agents: a root planner that owns the goal and writes no code, workers that each finish one task in isolation and return
+one handoff, handoffs flowing back to the planner that asked, and recursion through sub-planners.
+
+- **Roles.** A *planner run* (`runs.role = 'planner'`, `attempt` = round number) works on a detached checkout of the
+  base branch's current commit with `read_file` and `search` only (on the host, no sandbox, no edit/patch/shell tool) plus
+  `create_ticket {title, spec, depends_on?: [sibling keys], kind?: task|epic, test_command?}`, `list_children {}`, `finish_round {notes}`
+  and `complete_epic {summary}` (M9: gated by the epic gate). System prompt: `prompts/planner.md`, a file, not versioned like the worker prompt: there is
+  no eval that could score planning, so the M6 promotion loop would have nothing to gate on. Planner runs go through the
+  same FIFO queue; no test gate, commit, review, retry or reflection; the checkout is always removed. *Workers* are normal
+  ticket runs; a child's first user message names its epic and asks for a final `## Handoff` section (results, concerns,
+  findings).
+- **Rounds = the feedback loop.** Round 1 plans, creates children, `finish_round`. The epic stays `running` ("waiting for
+  children"). Whenever a child **settles** (done = merged, failed after its retries, or rejected, which counts as failed
+  and appends the note to its handoff) and no round is queued or running, the next round starts as a **new run** (fresh
+  conversation; conversations stay append-only). Its first message: environment (checkout commit, test gate, limits),
+  skills, lessons, a reviewer's note if the epic was sent back, the epic, the notes of every earlier round, and every child
+  with status, latest run, dependencies and handoff, those settled since the previous round started marked new. Rounds
+  never overlap: children settling while a round is queued are seen by it; children settling while it runs start the next
+  round as soon as it ends, so one round handles all of them (`tickets.settled_at` vs the round's start).
+  `finish_round`/`complete_epic` end the run at once (loop `finished` check, no extra turn).
+- **Ending.** `complete_epic` is refused (tool error listing them) while a child is open: queued, running, in review,
+  waiting on dependencies, or stopped by a cancel. A child whose dependency failed or is blocked is *blocked*, not open:
+  it never starts on its own; the planner replaces it or leaves it out. Completed → epic `review` with the summary
+  (`tickets.handoff`) → **Approve** marks it `done` (nothing to merge: children were merged one by one); **Reject** sends it
+  back to `todo`, and the note goes to the next round (Run planner). An epic `failed`s with its reason in `handoff` when a
+  round fails (provider error, budget), the round limit is reached, or a round ends without `complete_epic` while nothing
+  is open (nothing would ever wake it). `finish_round` with nothing open is refused for the same reason.
+- **Scheduling.** A child is queued when created, unless a `depends_on` ticket is not `done`; it is queued when its last
+  dependency becomes done. Children branch from the base branch when they start, so they see merged dependencies.
+  Dependents of a failed child are not started. A child that cannot be queued fails with the reason (the planner hears of
+  it). Children inherit the epic's provider/model choice.
+- **Limits.** ≤ 12 children per epic (`MAX_CHILDREN`), ≤ 8 rounds (`MAX_ROUNDS`, `server/planner.ts`); epics nest to depth
+  2: a root epic's planner may create sub-epics, whose planners cannot. A sub-epic is a child like any other: its summary
+  is its handoff, its approval settles it.
+- **Auto-approve** (workspace setting, default off). On: a child whose run passes the gate is merged through the same
+  code path as the Approve button (a merge conflict leaves it in review with the error on the run), and a completed sub-epic
+  is approved; the root epic always waits for a human. Cursor accepted a small error rate for throughput: agents commit
+  straight to the branch and later work fixes earlier mistakes. Here the human gate is the default, because the only
+  automatic check is the repo's test command; turn it on when the tests are good enough to be the reviewer.
+- **Not built, on purpose:** messaging between workers or from planner to a running worker (workers only hand off at the
+  end); shared state or plan files that agents read and write (with locks), which serialized Cursor's agents; a central
+  integrator agent that merges everything (merges are per child, by the harness); a judge agent that grades handoffs
+  (the test gate and the human reviewer do); re-planning of children already running.
+- **API.** `POST /api/tickets {kind}`; `GET /api/tickets/:id` of an epic adds `children` (every descendant with its state
+  label and dependency keys); `POST /api/tickets/:id/runs` on an epic queues its next round; approve/reject as for tasks;
+  deleting an epic deletes its children (refused while any of their runs is active); `auto_approve_children` in
+  `/api/settings`. Events: `handoff {text}` on a child's last run, `round_finished {round, notes, completed}` on a round.
+
+## Model review (M8)
+
+Workspace setting `model_review` (migration 009, default on). After a worker run passes the test gate, the run's own
+provider and model review the change before a human sees it (not for eval case runs or planner rounds).
+
+- **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
+  versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
+  [{file, line?, problem, fix}]}` (request_changes needs a finding; `InvalidArguments` otherwise), which ends its loop.
+  Budget: 25 turns, same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
+  `git diff` (new files are untracked: it reads them). Its first message: ticket, base sha, the test command that passed.
+  It hunts correctness bugs against the spec and neighbouring code paths, not style.
+- **Fix rounds.** `request_changes`: the findings are appended to the worker's own conversation (`RunOptions.resume`, still
+  append-only), the worker fixes and finishes, the gate runs again, then the next review. At most 3 review rounds per
+  attempt; if round 3 still requests changes the attempt fails with `model review: changes still requested after 3 rounds`
+  and the normal retry rules apply (the next attempt's first message includes the last findings). A gate failure after a
+  fix round fails the attempt like any gate failure.
+- **Fail-open.** A reviewer that errors, or ends without `submit_review` (budget, provider error), is logged as a
+  `model_review` event with verdict `error` and the change goes to human review anyway.
+- **Events and cost.** `model_review_started {round}` before each reviewer, `model_review {round, verdict: approve |
+  request_changes | error, findings, message?}` after; reviewer tool calls and usage go to the same run's log, so the run's
+  tokens and cost include review. The transcript shows both.
+
+## Automatic splitting (M9)
+
+Local models (27–35B) finish small tickets and fail large ones, so the harness turns work that is too large into an epic
+whose planner splits it into tickets of a size the worker model can finish. Migration 010.
+
+- **Per-child test command.** `create_ticket` takes an optional `test_command` (validated like the API: a string of ≤ 2,000
+  chars, `""` = none) stored as the child's `tickets.test_command`, which replaces the workspace command in its gate. The
+  planner gives one to a child whose part can't pass the full suite until later children land (a single test file, a
+  `--test-name-pattern`, `npx tsc --noEmit`). The children list shows each child's command.
+- **Epic gate.** `complete_epic` (after the open-children check) runs the epic's test command (its own `test_command`,
+  else the workspace's) on the base branch's current head, after the setup command, in a fresh detached worktree +
+  sandbox that is always removed (planner rounds have no sandbox of their own). It fails → the call is refused with the
+  command, exit code, sha and output tail; the round goes on, so the planner creates fix-up children and `finish_round`s.
+  Event `epic_gate {passed, command, code, timed_out, output, sha}` on the round, shown in its transcript. No command → no
+  gate. A split epic keeps the test command of the ticket it replaced, so a split child is gated by its own slice, not by
+  a full suite that its siblings still have to make pass.
+- **Escalate on failure.** Workspace setting `auto_split` (default on). When a task's series ends failed (its last
+  attempt failed and no retry follows; not cancelled, not a human reject, not an eval case run), the harness creates a
+  new epic `Split: <title>` with the same spec plus `## Previous direct attempt` (status/reason/turns of every attempt,
+  the last gate failure with a 2,000-char output tail, the last model review findings, the worker's final reply), the
+  same provider/model choice and test command, sets the task's `escalated_to` to it, and queues the epic's round 1.
+  Under an epic, the new epic is created under the same parent (the parent's planner sees it as a child), the task's
+  dependents depend on the new epic instead, and the task is failed *without* waking the parent's planner (the new
+  epic is open in its place; the planner hears of both when something next settles). The task's label is `split into
+  KEY (failed as one ticket)`, not open. Not split: children of a sub-epic (the new epic would be a third level), a
+  child whose epic already has `MAX_CHILDREN`, a ticket that was already split once (a manual re-run that fails stays
+  failed), and failures that a smaller ticket would hit too (`ProviderError`, `UnexpectedEnvironment`, `Unknown`). The
+  UI shows "Escalated to KEY" on the task and "Split from KEY" on the epic. A split epic that can't be queued fails with
+  the reason, which wakes the parent.
+- **Size hint.** Workspace setting `child_size_hint` (default "at most 3 files and about 60 changed lines, finishable in
+  20 agent turns"; empty = none) goes into every round's environment: "the worker model reliably finishes tickets of
+  this size: …; make every child at most that size". Meant to be calibrated per model from a benchmark.
+- **Triage** (optional). Workspace setting `triage_model` (default "", off). With `auto_split` on, queueing the first
+  run of a top-level task first asks a System One decision model on the workspace's default provider (must be Ollama):
+  `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>", questions: {size: score 0–4, five criteria}}`,
+  10 s timeout. `answers.size.score ≥ 3` → the ticket is split as above (a `## Triage` section instead of the previous
+  attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities,
+  confidence | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error →
+  logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.
+- **Planner prompt.** Size children by the hint; use per-child `test_command`, mapped from the repo's protected tests;
+  when a child fails and the environment says failed children are split, expect a `Split:` child instead of creating a
+  same-size follow-up; call `complete_epic` only when the epic gate can pass.
+- **Demo provider.** `SPLIT-ME` in a ticket also writes `tests/broken.txt`, failing every attempt; an epic whose spec says
+  `SPLIT-ME` plans `part1.txt`/`part2.txt` with their own test commands. `SPLIT-CHILD` passes `SPLIT-ME` on to the
+  epic's first child. `EPIC-GATE-FAIL` plans only `a.txt` (own command), and answers an epic-gate refusal with
+  "Fix: create fix.txt".
+
+## Guardrails
+
+- `tests/` and `evals/` are read-only to agents (harness rejects writes).
+- The harness never edits its running code; changes land through the review queue.
+- Every run has a token budget; every passing run is a commit on its own branch.
+
+## Conventions
+
+- Node ≥ 26 runs `.ts` directly (type stripping): erasable syntax only, imports use `.ts` extensions.
+- Tests: `node:test` in `test/`, in-memory DB (`npm test`). Each non-trivial piece leaves one test.
+- Deps pinned via lockfile; install with `npm install --before <date ≥ 2 weeks ago>`.
