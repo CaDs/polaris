@@ -121,6 +121,8 @@ For bigger work, choose **Epic** when creating the ticket and click **Run planne
 | `WEB_ORIGIN` | Origin of the dashboard (default `http://localhost:5173` in dev) |
 | `POLARIS_SECRET_KEY` | 64 hex characters; encrypts provider API keys and OAuth tokens at rest |
 | `PORT` | API port (default 3000) |
+| `HOST` | Interface the API listens on (default `127.0.0.1`; `0.0.0.0` exposes it to your network) |
+| `POLARIS_OPEN_SIGNUP=1` | Allow sign-ups after the first account (by default the first account is the owner and sign-up then closes) |
 | `DB_PATH` | SQLite database file (default `polaris.db`) |
 | `POLARIS_DATA_DIR` | Worktrees, wikis and run data (default `./data`) |
 | `POLARIS_CONCURRENCY` | Runs at the same time (default 2; use 1 with a single local model) |

@@ -160,7 +160,7 @@ async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow
       if (e instanceof SecretKeyError) return { error: e.message };
       throw e;
     }
-  } else if (cur && auth_type !== cur.auth_type) secret = null; // switching auth type drops the old credential
+  } else if (cur && (auth_type !== cur.auth_type || (base_url || null) !== cur.base_url)) secret = null; // a new auth type or endpoint drops the old credential (it would be sent there)
   return { v: { name: name.trim(), kind, auth_type, base_url: base_url || null, context_window: context_window as number, secret } };
 }
 

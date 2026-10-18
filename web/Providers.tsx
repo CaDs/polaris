@@ -188,7 +188,7 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
         {auth === "api_key" && (
           <label>
             API key
-            <input name="api_key" type="password" autoComplete="off" spellCheck={false} placeholder={p?.has_secret ? "Leave empty to keep the stored key" : ""} />
+            <input name="api_key" type="password" autoComplete="off" spellCheck={false} placeholder={p?.has_secret ? "Leave empty to keep the stored key (a new base URL clears it)" : ""} />
             <span className="hint">Write-only: stored encrypted, only its last 4 characters are ever shown.</span>
           </label>
         )}

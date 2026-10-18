@@ -9,5 +9,7 @@ app.get("*", serveStatic({ path: "./dist/index.html" }));
 
 recoverOrphans();
 
+// Loopback only by default: anyone who reaches the API can point a workspace at a repo here and spend the provider keys.
 const port = Number(process.env.PORT ?? 3000);
-serve({ fetch: app.fetch, port }, () => console.log(`api on http://localhost:${port}`));
+const hostname = process.env.HOST ?? "127.0.0.1";
+serve({ fetch: app.fetch, port, hostname }, (a) => console.log(`api on http://${hostname}:${a.port}`));

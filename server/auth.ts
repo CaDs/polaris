@@ -1,4 +1,4 @@
-import { betterAuth, type BetterAuthOptions } from "better-auth";
+import { APIError, betterAuth, type BetterAuthOptions } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { organization } from "better-auth/plugins";
 import { db } from "./db.ts";
@@ -10,6 +10,15 @@ const options = {
   plugins: [organization()],
   trustedOrigins: [process.env.WEB_ORIGIN ?? "http://localhost:5173"],
   databaseHooks: {
+    user: {
+      create: {
+        // Single-owner by default: the first account is the owner, later sign-ups need POLARIS_OPEN_SIGNUP=1.
+        before: async () => {
+          if (process.env.POLARIS_OPEN_SIGNUP !== "1" && db.prepare("SELECT 1 FROM user LIMIT 1").get())
+            throw new APIError("FORBIDDEN", { message: "sign-up is closed: this Polaris already has an owner (set POLARIS_OPEN_SIGNUP=1 to allow more accounts)" });
+        },
+      },
+    },
     session: {
       create: {
         // New sessions start in the user's oldest workspace instead of none.

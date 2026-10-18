@@ -88,6 +88,7 @@ test("browser login via the temporary listener, then Codex backend requests with
   authReqs.length = 0;
   const { url } = (await call("POST", `/api/providers/${p.id}/oauth/start`, cookie)).body;
   const authz = new URL(url);
+  assert.equal((oauth.listener!.address() as AddressInfo).address, "127.0.0.1", "callback listener is loopback-only");
   assert.equal((await call("GET", "/api/providers", cookie)).body[0].login, "pending");
   const redirect = authz.searchParams.get("redirect_uri")!;
   // A wrong state is refused and signs nobody in.

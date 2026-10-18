@@ -5,5 +5,5 @@ export default defineConfig({
   root: "web",
   plugins: [react()],
   build: { outDir: "../dist", emptyOutDir: true },
-  server: { proxy: { "/api": "http://localhost:3000" } },
+  server: { proxy: { "/api": "http://127.0.0.1:3000" } },
 });
