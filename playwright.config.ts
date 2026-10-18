@@ -19,6 +19,7 @@ export default defineConfig({
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     baseURL: `http://localhost:${port}`,
+    extraHTTPHeaders: { origin: `http://localhost:${port}` }, // page.request calls pass the API's Origin check like the browser does
     headless: !headed,
     launchOptions: { slowMo: headed ? 350 : 0 },
     video: "on",
