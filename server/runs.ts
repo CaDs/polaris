@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
 import { createRun, eventLog } from "./agent/events.ts";
@@ -7,13 +7,14 @@ import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { runAgent } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
-import { parseProtected, tools, toolsFor, type ExecResult } from "./agent/tools.ts";
+import { parseProtected, tools, toolsFor, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, snapshot } from "./git.ts";
+import { addDetached, addWorktree, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
+import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
@@ -37,7 +38,7 @@ const REVIEW_BUDGET = { maxTurns: 25, maxTokens: BUDGET.maxTokens };
 export type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
-  auto_split: number; child_size_hint: string; triage_model: string;
+  auto_split: number; child_size_hint: string; triage_model: string; wiki: number;
 };
 export const settingsFor = (workspaceId: string) =>
   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
@@ -99,8 +100,8 @@ export async function runWindow(stored: ReturnType<typeof providerById>, model: 
 
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
 // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
-// lessons, and feedback (see below).
-function taskFor(t: { title: string; spec: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string }, feedback: string[]) {
+// lessons, the project wiki's index (M10) and feedback (see below).
+function taskFor(t: { title: string; spec: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string }, feedback: string[]) {
   const parts = [
     [
       "# Environment",
@@ -111,6 +112,7 @@ function taskFor(t: { title: string; spec: string }, info: { sandbox: string; re
   ];
   if (info.skills.length) parts.push(skillsText(info.skills));
   if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
+  if (info.wiki) parts.push(info.wiki);
   parts.push(...feedback, `# Task\n\n${t.spec ? `# ${t.title}\n\n${t.spec}` : t.title}`);
   return parts.join("\n\n");
 }
@@ -357,7 +359,7 @@ export function pump() {
 
 type RunRow = {
   ticket_id: string; role: string; model: string; attempt: number; provider_id: string | null; prompt_version: number | null; lessons_version: number | null;
-  eval_run_id: string | null; eval_case_id: string | null;
+  eval_run_id: string | null; eval_case_id: string | null; wiki_op: string | null; base_sha: string | null;
 };
 
 // Reflection on the series a run ended, with that run's provider and model, in a fresh no-tools conversation (improve.ts).
@@ -384,6 +386,7 @@ async function execute(runId: string) {
   const run = db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as RunRow;
   const t = ticketRow(run.ticket_id)!;
   if (run.role === "planner") return plan(runId, run, t);
+  if (run.role === "wiki") return maintain(runId, run, t);
   const s = settingsFor(t.workspace_id);
   const ev = run.eval_case_id ? (db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(run.eval_case_id) as EvalCase | undefined) : undefined;
   const cfg = run.eval_run_id ? ev : s; // repo_path, setup/test command, protected paths, image
@@ -403,7 +406,7 @@ async function execute(runId: string) {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "no repository configured for this workspace");
     // The ticket's own test_command (when set) overrides the workspace one; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
-    const protectedPaths = parseProtected(cfg.protected_paths);
+    let protectedPaths = parseProtected(cfg.protected_paths);
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     let base_sha: string;
     if (ev) await addDetached(cfg.repo_path, (base_sha = ev.base_sha), worktree);
@@ -413,6 +416,17 @@ async function execute(runId: string) {
     }
     db.prepare("UPDATE runs SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?").run(worktree, branch ?? null, base_sha, runId);
     log({ type: "setup", payload: { step: "worktree", branch: branch ?? "", base_sha } });
+    // M10: the wiki's HEAD as a read-only snapshot (a broken wiki must not stop the work: fail-open). Not for frozen eval cases.
+    let wiki = "";
+    let wikiTree: Awaited<ReturnType<typeof materialize>> | undefined;
+    if (s?.wiki && !ev)
+      try {
+        wikiTree = await materialize(t.workspace_id, worktree);
+        wiki = await wikiSection(t.workspace_id, cfg.repo_path, base_sha);
+        protectedPaths = [...protectedPaths, ".harness/wiki"];
+      } catch (e) {
+        log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
+      }
     sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image);
     log({ type: "setup", payload: { step: "sandbox", sandbox: sandbox.name } });
     const sh = (command: string) => sandbox!.exec(command, { cwd: worktree, timeoutMs: COMMAND_TIMEOUT, signal });
@@ -437,7 +451,7 @@ async function execute(runId: string) {
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
     const task = taskFor(ev ?? t, {
-      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body,
+      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
     if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
@@ -459,7 +473,8 @@ async function execute(runId: string) {
     const gate = async () => {
       const test = testCommand.trim() ? await sh(testCommand) : { stdout: "", stderr: "", code: 0, timedOut: false };
       abortCheck();
-      const touched = await protectedChanges(worktree, base_sha, protectedPaths);
+      // git can't see .harness/wiki (excluded), so its snapshot is compared directly.
+      const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
       const result = { passed: test.code === 0 && !touched.length, command: testCommand, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched };
       log({ type: "test_result", payload: result });
       if (!result.passed) {
@@ -476,7 +491,7 @@ async function execute(runId: string) {
     // A reviewer that errors or never submits is logged and skipped (fail-open): the human still reviews.
     for (let round = 1; !ev && s!.model_review; round++) {
       const out: { review?: Review } = {};
-      const rtask = reviewTask(t, { base_sha, test: testCommand });
+      const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
       log({ type: "model_review_started", payload: { round } });
       const before = await snapshot(worktree);
       const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget: REVIEW_BUDGET, finished: () => !!out.review });
@@ -566,6 +581,14 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     log({ type: "setup", payload: { step: "worktree", branch: "", base_sha } });
     const skills = listSkills(worktree);
     if (skills.length) log({ type: "setup", payload: { step: "skills", skills } });
+    let wiki = "";
+    if (s.wiki)
+      try {
+        await materialize(t.workspace_id, worktree);
+        wiki = await wikiSection(t.workspace_id, s.repo_path, base_sha);
+      } catch (e) {
+        log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
+      }
     const lessons = currentLessons(t.workspace_id);
     db.prepare("UPDATE runs SET lessons_version = ? WHERE id = ?").run(lessons?.version ?? null, runId);
     const notes = (db.prepare(`SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.ticket_id = ? AND e.type = 'round_finished'
@@ -573,7 +596,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     const gateCommand = t.test_command ?? s.test_command; // a split epic keeps the command of the ticket it replaced
     const task = plannerTask(t, {
       repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, test: s.test_command, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
-      lessons: lessons?.body, round: run.attempt, notes, review: reviewNote(t.id), since,
+      lessons: lessons?.body, wiki, round: run.attempt, notes, review: reviewNote(t.id), since,
     });
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
     if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
@@ -665,17 +688,162 @@ export function wake(epicId: string) {
   queue(ticketRow(epicId)!, last.model, last.attempt + 1, last.provider_id, true); // same provider and model as the last round
 }
 
+// --- M10 project wiki (see SPEC "Project wiki (M10)") ---
+
+const WIKI_BUDGET = { maxTurns: 30, maxTokens: BUDGET.maxTokens };
+const WIKI_FIX_BUDGET = { maxTurns: 10, maxTokens: BUDGET.maxTokens };
+const WIKI_FIX_ROUNDS = 2; // more conversation rounds to fix what the mechanical lint found, then the result is rejected
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
+
+// Bootstrap and lint runs belong to no ticket: they hang off one hidden ticket per workspace (ingest runs hang off the ticket they ingest).
+function wikiTicket(ws: string) {
+  const row = db.prepare("SELECT id FROM tickets WHERE workspace_id = ? AND hidden = 1").get(ws) as { id: string } | undefined;
+  if (row) return row.id;
+  const id = randomUUID();
+  db.prepare("INSERT INTO tickets (id, workspace_id, title, status, number, hidden) VALUES (?, ?, 'Project wiki', 'done', -1, 1)").run(id, ws);
+  return id;
+}
+
+// The worker's last reply of a run: its newest assistant message without tool calls (a reviewer's turns end in a tool call).
+function finalReply(runId: string) {
+  for (const e of db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'assistant_message' ORDER BY seq DESC").iterate(runId) as Iterable<{ payload: string }>) {
+    const m = (JSON.parse(e.payload) as EventPayloads["assistant_message"]).message;
+    if (!m.content.some((b) => b.type === "tool_use")) return finalText([m]);
+  }
+  return "";
+}
+
+// Queues a wiki maintainer run through the normal FIFO queue (runs of one workspace then still go one at a time: wikiSerial).
+// ingest: the merge `sha` of the approved ticket's run `run` (its provider and model are used, else the workspace default).
+// bootstrap / lint: the base branch head, run for the workspace default; lint needs at least one stale page. Errors are user-facing.
+export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint", from?: { ticketId: string; sha: string; run: string }): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
+  const s = settingsFor(ws);
+  if (!s) return { error: "No repository configured. Set one in Settings before using the wiki.", status: 400 };
+  if (!s.wiki) return { error: "The project wiki is off. Turn it on in Settings.", status: 409 };
+  if (!from) {
+    const repo = await inspectRepo(s.repo_path, s.base_branch);
+    if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
+    if (op === "lint" && !(await pageList(ws, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
+  }
+  let chosen: { provider_id: string | null; model: string };
+  try {
+    const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
+    chosen = prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
+  } catch (e) {
+    return { error: (e as Error).message, status: 400 };
+  }
+  const ticketId = from?.ticketId ?? wikiTicket(ws);
+  const attempt = (db.prepare("SELECT COUNT(*) AS n FROM runs WHERE ticket_id = ? AND role = 'wiki'").get(ticketId) as { n: number }).n + 1;
+  const runId = createRun({ ticketId, model: chosen.model, attempt, providerId: chosen.provider_id, role: "wiki", wikiOp: op, baseSha: from?.sha });
+  pump();
+  return { runId };
+}
+
+// A wiki maintainer run: a detached checkout of the project (code/, read-only) next to a clone of the wiki (wiki/, the only
+// place edit_file may write), read_file/search/edit_file only (no shell: nothing on the host can write outside wiki/). Its
+// change is committed to the wiki repo only if the mechanical lint passes; failures go back to the agent (up to
+// WIKI_FIX_ROUNDS more rounds in the same conversation), then the result is rejected and nothing is committed. Runs of one
+// workspace go one at a time, so each sees the previous one's commit. The ticket is never touched.
+async function maintain(runId: string, run: RunRow, t: TicketRow) {
+  const op = run.wiki_op as "ingest" | "bootstrap" | "lint";
+  const ws = t.workspace_id;
+  const s = settingsFor(ws);
+  const signal = controllers.get(runId)!.signal;
+  const log = eventLog(runId);
+  const root = join(dataDir(), "worktrees", runId);
+  const usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  let turns = 0;
+  let status: RunStatus = "failed";
+  let reason: string | undefined;
+  try {
+    if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
+    await wikiSerial(ws, async () => {
+      if (signal.aborted) throw new AgentError("UserAborted", "cancelled");
+      mkdirSync(root, { recursive: true });
+      const sha = op === "ingest" ? run.base_sha : await headOf(s);
+      if (!sha) throw new AgentError("UnexpectedEnvironment", `base branch ${s.base_branch} not found`);
+      await addDetached(s.repo_path, sha, join(root, "code"));
+      db.prepare("UPDATE runs SET worktree = ?, base_sha = ? WHERE id = ?").run(root, sha, runId);
+      log({ type: "setup", payload: { step: "worktree", branch: "", base_sha: sha } });
+      const wiki = join(root, "wiki");
+      await openCopy(ws, wiki);
+      const index = readFileSync(join(wiki, "index.md"), "utf8");
+      const repo = basename(s.repo_path);
+      const sha8 = sha.slice(0, 8);
+      let task: string;
+      let message: string;
+      let entry: string;
+      if (op === "ingest") {
+        const range = [`${sha}^1`, sha];
+        const diff = await git(s.repo_path, ["diff", "--no-color", ...range, "--", ".", ...scratchPathspec]).catch((e) => `(diff unavailable: ${e.message})`);
+        const files = (await git(s.repo_path, ["diff", "--name-only", ...range]).catch(() => "")).split("\n").filter(Boolean);
+        const approved = reviewRun(t.id);
+        task = wikiTask("ingest", { repo, sha, index, ticket: t, files, diff, reply: approved ? finalReply(approved.id) : "" });
+        message = oneLine(`ingest ${t.key}: ${t.title} (merge ${sha8})`);
+        entry = `## [${today()}] ingest | ${t.key} ${oneLine(t.title)} (merge ${sha8})`;
+      } else if (op === "bootstrap") {
+        task = wikiTask("bootstrap", { repo, sha, index });
+        message = `bootstrap: ${repo} at ${s.base_branch} ${sha8}`;
+        entry = `## [${today()}] ingest | bootstrap from ${s.base_branch} (${sha8})`;
+      } else {
+        const stale = (await pageList(ws, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
+        if (!stale.length) return void log({ type: "wiki", payload: { op, unchanged: true } });
+        task = wikiTask("lint", { repo, sha, index, stale });
+        message = `lint: re-verify ${stale.length} stale page${stale.length === 1 ? "" : "s"} at ${sha8}`;
+        entry = `## [${today()}] lint | re-verified ${stale.map((p) => p.path).join(", ")} at ${sha8}`;
+      }
+      const stored = run.provider_id ? providerById(run.provider_id) : undefined;
+      if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
+      const w = await runWindow(stored, run.model);
+      const compactAt = compactThreshold(s.compact_at_tokens, w.window);
+      log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
+      const common = {
+        provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
+        protectedPaths: ["code"], signal, cacheKey: ws, compactAt, onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e),
+      };
+      let a = await runAgent({ ...common, budget: WIKI_BUDGET });
+      for (let fix = 0; ; fix++) {
+        for (const k of Object.keys(usage) as (keyof Usage)[]) usage[k] += a.usage[k];
+        turns += a.turns;
+        ({ status, reason } = a);
+        if (a.status !== "passed") return;
+        const r: Finished = await finishCopy(ws, wiki, message, entry);
+        if (!("problems" in r)) return void log({ type: "wiki", payload: { op, ...("sha" in r ? { commit: r.sha } : { unchanged: true }) } });
+        if (fix === WIKI_FIX_ROUNDS) {
+          status = "failed";
+          reason = `the wiki check failed after ${WIKI_FIX_ROUNDS} fix rounds; nothing was committed`;
+          log({ type: "wiki", payload: { op, problems: r.problems } });
+          log({ type: "error", payload: { kind: "InvalidArguments", message: `${reason}:\n${r.problems.join("\n")}` } });
+          return;
+        }
+        const resume = { messages: a.messages, message: `# Wiki check failed\n\nThe harness found these problems in your wiki changes:\n${r.problems.map((p) => `- ${p}`).join("\n")}\n\nFix them with edit_file, then reply with a short summary. The check runs again.` };
+        a = await runAgent({ ...common, resume, budget: WIKI_FIX_BUDGET });
+      }
+    });
+  } catch (e) {
+    status = "failed";
+    reason = `${e instanceof AgentError ? e.kind : "UnexpectedEnvironment"}: ${(e as Error).message}`;
+    if (!signal.aborted) log({ type: "error", payload: { kind: e instanceof AgentError ? e.kind : "UnexpectedEnvironment", message: (e as Error).message } });
+  } finally {
+    if (signal.aborted) [status, reason] = ["cancelled", "cancelled"];
+    log({ type: "run_finished", payload: { status, reason, turns, usage } });
+    recordCost(runId, run.model, usage);
+    if (s) await removeWorktree(s.repo_path, join(root, "code"), null, dataDir());
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 export function cancelRun(runId: string) {
   const ac = controllers.get(runId);
   if (ac) {
     ac.abort();
     return true;
   }
-  const queued = db.prepare("SELECT ticket_id, eval_run_id FROM runs WHERE id = ? AND status = 'queued'").get(runId) as { ticket_id: string; eval_run_id: string | null } | undefined;
+  const queued = db.prepare("SELECT ticket_id, eval_run_id, role FROM runs WHERE id = ? AND status = 'queued'").get(runId) as { ticket_id: string; eval_run_id: string | null; role: string } | undefined;
   if (!queued) return false;
   eventLog(runId)({ type: "run_finished", payload: { status: "cancelled", reason: "cancelled while queued", turns: 0, usage: { input: 0, output: 0, cache_read: 0, cache_write: 0 } } });
   if (queued.eval_run_id) recordEvalResult(runId, false, 0); // counts as failed; the source ticket is never touched
-  else setTicket(queued.ticket_id, "todo");
+  else if (queued.role !== "wiki") setTicket(queued.ticket_id, "todo"); // a wiki run never changes its ticket
   return true;
 }
 
@@ -717,6 +885,11 @@ export async function approve(ticketId: string): Promise<{ error: string } | { m
   eventLog(r.id)({ type: "review", payload: { decision: "approved", merge_sha } });
   await cleanupTicket(ticketId, t.workspace_id);
   setTicket(ticketId, "done");
+  // M10: the wiki learns from approved work only. A failure to queue is logged on the approved run; the approval stands.
+  if (s.wiki) {
+    const w = await enqueueWiki(t.workspace_id, "ingest", { ticketId, sha: merge_sha, run: r.id }).catch((e: Error) => ({ error: e.message }));
+    if ("error" in w) eventLog(r.id)({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `wiki ingest not queued: ${w.error}` } });
+  }
   return { merge_sha };
 }
 
@@ -796,6 +969,12 @@ export function recoverOrphans() {
     if (o.eval_run_id) {
       recordEvalResult(o.id, false, 0);
       if (o.eval_repo) void removeWorktree(o.eval_repo, o.worktree, null, dataDir());
+      continue;
+    }
+    if (o.role === "wiki") {
+      const root = o.worktree;
+      const ws = settingsFor(o.workspace_id);
+      if (root?.startsWith(dataDir())) void (ws ? removeWorktree(ws.repo_path, join(root, "code"), null, dataDir()) : Promise.resolve()).then(() => rmSync(root, { recursive: true, force: true }));
       continue;
     }
     setTicket(o.ticket_id, "failed");

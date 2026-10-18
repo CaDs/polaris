@@ -13,8 +13,9 @@ export type Review = { verdict: "approve" | "request_changes"; findings: Finding
 
 export const findingsText = (findings: Finding[]) => findings.map((f) => `- ${f.file}${f.line ? `:${f.line}` : ""} — ${f.problem} → ${f.fix}`).join("\n");
 
-export function reviewTask(t: { title: string; spec: string }, o: { base_sha: string; test: string }) {
+export function reviewTask(t: { title: string; spec: string }, o: { base_sha: string; test: string; wiki?: string }) {
   return [
+    ...(o.wiki ? [o.wiki] : []),
     `# Ticket\n\n# ${t.title}${t.spec ? `\n\n${t.spec}` : ""}`,
     `# Change under review\n\nThe worker's change is uncommitted in the working directory, on top of commit ${o.base_sha}. The test gate${o.test.trim() ? ` (\`${o.test}\`)` : ""} passed. Inspect it with \`git status --short\` and \`git diff\`, and read the new files.`,
   ].join("\n\n");

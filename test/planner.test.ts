@@ -267,7 +267,7 @@ test("failure path: B fails the gate on every attempt → a round creates a foll
 });
 
 test("a rejected child counts as failed: its dependents are blocked and the planner replaces it", async () => {
-  const w = await workspace("rej");
+  const w = await workspace("rej", false, { wiki: false }); // an ingest run of an approved child would refuse the delete below
   const e = await w.epic("Two files");
   let d = await w.childIs(e.id, "Create a.txt", "review");
   const A = d.children[0];

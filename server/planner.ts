@@ -119,7 +119,7 @@ export function childrenText(epicId: string, since: number) {
 type Epic = { id: string; workspace_id: string; key: string; title: string; spec: string; parent_id: string | null; provider_id: string | null; model: string | null };
 
 export function plannerTask(epic: Epic, o: {
-  repo: string; base: string; sha: string; test: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; skills: Skill[]; lessons?: string; round: number;
+  repo: string; base: string; sha: string; test: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string; round: number;
   notes: { round: number; notes: string }[]; review?: string; since: number;
 }) {
   const parts = [
@@ -135,6 +135,7 @@ export function plannerTask(epic: Epic, o: {
   ];
   if (o.skills.length) parts.push(skillsText(o.skills));
   if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
+  if (o.wiki) parts.push(o.wiki);
   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
   parts.push(`# Epic\n\n# ${epic.title}${epic.spec ? `\n\n${epic.spec}` : ""}`);
   if (o.notes.length) parts.push(`# Your notes from earlier rounds\n\n${o.notes.map((n) => `## Round ${n.round}\n${n.notes}`).join("\n\n")}`);

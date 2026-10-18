@@ -7,9 +7,11 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
 import { withStates } from "./planner.ts";
 import { SANDBOX_IMAGE } from "./sandbox.ts";
+import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
+import { AgentError } from "./agent/types.ts";
 
 migrate();
 
@@ -37,7 +39,7 @@ const STATUSES = ["todo", "running", "review", "done", "failed"];
 
 // Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
-const OWN = "ticket_id = t.id AND eval_run_id IS NULL";
+const OWN = "ticket_id = t.id AND eval_run_id IS NULL AND role <> 'wiki'"; // wiki runs (M10) are listed in the ticket but never change its state or totals
 const TICKETS = `
   SELECT t.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
     (SELECT status FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_status,
@@ -113,7 +115,7 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
   return { v };
 }
 
-app.get("/api/tickets", (c) => c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? ORDER BY t.number`).all(c.get("workspaceId"))));
+app.get("/api/tickets", (c) => c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.hidden = 0 ORDER BY t.number`).all(c.get("workspaceId"))));
 
 app.post("/api/tickets", async (c) => {
   const p = await parse(c, false);
@@ -217,7 +219,7 @@ const SETTINGS_FIELDS = Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS
 
 app.get("/api/settings", (c) => {
   const s = settingsFor(c.get("workspaceId"));
-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, model_review: 1, auto_split: 1, ...s, configured: !!s });
+  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, ...s, configured: !!s });
 });
 
 // Workspace default provider/model (null = env fallback). Lives on the settings row, so the repository must be saved first.
@@ -254,19 +256,21 @@ app.put("/api/settings", async (c) => {
   const review = b.model_review === undefined ? (settingsFor(c.get("workspaceId"))?.model_review ?? 1) : b.model_review === true || b.model_review === "on" ? 1 : 0;
   // M9: likewise.
   const split = b.auto_split === undefined ? (settingsFor(c.get("workspaceId"))?.auto_split ?? 1) : b.auto_split === true || b.auto_split === "on" ? 1 : 0;
+  // M10: likewise.
+  const wiki = b.wiki === undefined ? (settingsFor(c.get("workspaceId"))?.wiki ?? 1) : b.wiki === true || b.wiki === "on" ? 1 : 0;
   const repo = await inspectRepo(v.repo_path, v.base_branch);
   if ("error" in repo) return c.json(repo, 400);
   db.prepare(
     `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, model_review,
-       auto_split, child_size_hint, triage_model, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       auto_split, child_size_hint, triage_model, wiki, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (workspace_id) DO UPDATE SET repo_path = excluded.repo_path, base_branch = excluded.base_branch, setup_command = excluded.setup_command,
        test_command = excluded.test_command, protected_paths = excluded.protected_paths, image = excluded.image, compact_at_tokens = excluded.compact_at_tokens,
        auto_approve_children = excluded.auto_approve_children, model_review = excluded.model_review, auto_split = excluded.auto_split,
-       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, updated_at = excluded.updated_at`,
+       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, updated_at = excluded.updated_at`,
   ).run(
     c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, compact, autoApprove, review,
-    split, v.child_size_hint, v.triage_model, Date.now(),
+    split, v.child_size_hint, v.triage_model, wiki, Date.now(),
   );
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });
@@ -290,7 +294,7 @@ app.get("/api/usage", (c) => {
     models: rows(`SELECT r.model, ${SUMS} ${FROM_RUNS} GROUP BY r.model ORDER BY SUM(r.tokens_in + r.tokens_out + r.tokens_cached) DESC, r.model`).map((r) => withRate(r as any)),
     tickets: rows(
       `SELECT t.id, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
-       WHERE t.workspace_id = ? AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
+       WHERE t.workspace_id = ? AND t.hidden = 0 AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
     ).map((r) => withRate(r as any)),
   });
 });
@@ -432,6 +436,68 @@ app.delete("/api/evals/cases/:id", (c) => {
   const r = db.prepare("DELETE FROM eval_cases WHERE id = ? AND workspace_id = ?").run(c.req.param("id"), c.get("workspaceId"));
   return r.changes ? c.body(null, 204) : c.json({ error: "not_found" }, 404);
 });
+
+// --- M10 project wiki (see SPEC "Project wiki (M10)", server/wiki.ts). Workspace-scoped like everything else; page paths are
+// checked against root .md / modules/ / howto/ and resolved with resolveIn.
+
+// A wiki function's AgentError is the caller's mistake (bad path, unknown page): 400.
+const wikiErr = (c: Context<Env>, e: unknown) => {
+  if (!(e instanceof AgentError)) throw e;
+  return c.json({ error: e.message }, 400);
+};
+
+app.get("/api/wiki", async (c) => {
+  const ws = c.get("workspaceId");
+  const s = settingsFor(ws);
+  const base = s && (await headOf(s));
+  const runs = db.prepare(`SELECT r.id, r.wiki_op, r.status, r.model, r.started_at, r.ended_at, r.tokens_in, r.tokens_out, r.tokens_cached, t.hidden,
+      CASE WHEN t.hidden THEN NULL ELSE upper(substr(o.slug, 1, 3)) || '-' || t.number END AS ticket_key, t.number AS ticket_number,
+      (SELECT payload FROM events e WHERE e.run_id = r.id AND e.type = 'wiki' ORDER BY e.seq DESC LIMIT 1) AS result
+    FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id WHERE t.workspace_id = ? AND r.role = 'wiki' ORDER BY r.rowid DESC LIMIT 20`).all(ws) as Record<string, any>[];
+  return c.json({
+    enabled: s ? !!s.wiki : true, configured: !!s, ...(await wikiView(ws, s && base ? { repo: s.repo_path, base } : undefined)),
+    runs: runs.map((r) => ({ ...r, result: r.result ? JSON.parse(r.result) : null })),
+  });
+});
+
+app.get("/api/wiki/page", async (c) => {
+  const path = c.req.query("path") ?? "";
+  try {
+    const body = await readPage(c.get("workspaceId"), path);
+    return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
+  } catch (e) {
+    return wikiErr(c, e);
+  }
+});
+
+// A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>".
+app.put("/api/wiki/page", async (c) => {
+  const b = await c.req.json().catch(() => null);
+  if (typeof b?.path !== "string" || typeof b?.body !== "string" || b.body.length > 20_000) return c.json({ error: "path and body (at most 20000 chars) are required" }, 400);
+  try {
+    const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c));
+    return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
+  } catch (e) {
+    return wikiErr(c, e);
+  }
+});
+
+app.get("/api/wiki/history", async (c) => c.json(await history(c.get("workspaceId"))));
+
+app.get("/api/wiki/diff", async (c) => {
+  try {
+    return c.json({ diff: await wikiDiff(c.get("workspaceId"), c.req.query("sha") ?? "") });
+  } catch (e) {
+    return e instanceof AgentError ? wikiErr(c, e) : c.json({ error: "not_found" }, 404);
+  }
+});
+
+// "Build wiki" / "Refresh stale pages": queue a maintainer run (same flow as an ingest); the run row tells where to watch it.
+for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const)
+  app.post(`/api/wiki/${path}`, async (c) => {
+    const r = await enqueueWiki(c.get("workspaceId"), op);
+    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
+  });
 
 app.get("/api/runs/:id", (c) => {
   const r = runIn(c);

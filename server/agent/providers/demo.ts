@@ -19,6 +19,11 @@ import { fakeProvider } from "./fake.ts";
 // harness splits it; the "Split:" epic (its spec still says SPLIT-ME) plans part1.txt and part2.txt with their own test
 // commands. EPIC-GATE-FAIL plans only a.txt; the test sets a workspace test command that also needs fix.txt, so the epic
 // gate refuses the first complete_epic and the planner creates "Fix: create fix.txt". SPLIT-CHILD passes SPLIT-ME on to a.txt.
+// M10: a system prompt starting "You maintain a project wiki" is the wiki maintainer (wikiScript). An ingest writes
+// modules/demo.md (sources: the files the merged diff touched), a bootstrap overview.md, a lint re-verifies its first stale
+// page; each also lists the page in index.md. A page that exists is updated line by line (sources, verified, updated).
+// WIKI-WRITE in a ticket makes a worker write .harness/wiki/x with the shell (the gate must fail it); WIKI-NOTES adds a
+// "## Wiki notes" section to its final reply; WIKI-BAD / WIKI-FIXME make the maintainer of its ingest produce an invalid wiki.
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
 const say = (text: string): TextBlock => ({ type: "text", text });
 const lastResult = (req: ProviderRequest) => req.messages.at(-1)!.content.flatMap((b) => (b.type === "tool_result" ? [b.content] : [])).join("\n");
@@ -107,6 +112,52 @@ function childScript(ticket: string) {
   ], { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
 }
 
+function wikiScript(task: string) {
+  const sha = /Commit for `verified`: (\w+)/.exec(task)![1];
+  const day = /today is (\S+)/.exec(task)![1];
+  const op = /# Task: (ingest|build|re-verify)/.exec(task)![1];
+  const files = op === "ingest" ? (/# Files changed\n\n([\s\S]*?)\n\n# Merged diff/.exec(task)?.[1] ?? "").split("\n").filter((f) => f && f !== "(none)") : ["README.md"];
+  const page = op === "ingest" ? "modules/demo.md" : op === "build" ? "overview.md" : /^- (\S+) — changed/m.exec(task)![1];
+  const title = op === "build" ? "Overview" : "Demo module";
+  const usage = { input: 80, output: 15, cache_read: 5, cache_write: 0 };
+  const line = (req: ProviderRequest, key: string) => new RegExp(`^\\d+\t(${key}: .*)$`, "m").exec(lastResult(req))?.[1] ?? `${key}: `;
+  const first = [say("Reading the index."), use("w1", "read_file", { path: "wiki/index.md" })];
+  // WIKI-BAD / WIKI-FIXME in the ticket: a page without frontmatter and not in the index; the fix rounds leave it (BAD) or repair it (FIXME).
+  const bad = /WIKI-(BAD|FIXME)/.exec(task)?.[1];
+  if (bad) {
+    const page = { path: "wiki/modules/bad.md", old_string: "no frontmatter\n" };
+    return fakeProvider([
+      [say("Writing a page."), use("b1", "edit_file", { ...page, old_string: "", new_string: page.old_string })],
+      [say("Done.")],
+      bad === "BAD" ? [say("Still broken.")] : [
+        use("b2", "edit_file", { ...page, new_string: `---\ntitle: Bad\nsources: []\nverified: ${sha}\nupdated: ${day}\n---\nfixed\n` }),
+        use("b3", "edit_file", { path: "wiki/index.md", old_string: "# Index\n", new_string: "# Index\n- [Bad](modules/bad.md) — fixed after the check\n" }),
+      ],
+      [say(bad === "BAD" ? "Still broken." : "Fixed.")],
+    ], usage).provider;
+  }
+  if (!task.includes(`](${page})`) && op !== "re-verify")
+    return fakeProvider([
+      first,
+      [
+        use("w2", "edit_file", { path: `wiki/${page}`, old_string: "", new_string: `---\ntitle: ${title}\nsources: [${files.join(", ")}]\nverified: ${sha}\nupdated: ${day}\n---\nNotes written by the demo maintainer.\n` }),
+        use("w3", "edit_file", { path: "wiki/index.md", old_string: "# Index\n", new_string: `# Index\n- [${title}](${page}) — written by the demo maintainer\n` }),
+      ],
+      [say(`Wrote ${page}.`)],
+    ], usage).provider;
+  return fakeProvider([
+    first,
+    [use("w2", "read_file", { path: `wiki/${page}` })],
+    (req) => {
+      const old = /\[(.*)\]/.exec(line(req, "sources"))?.[1] ?? "";
+      const sources = [...new Set([...old.split(", ").filter(Boolean), ...files])];
+      const edit = (id: string, key: string, now: string) => use(id, "edit_file", { path: `wiki/${page}`, old_string: line(req, key), new_string: `${key}: ${now}` });
+      return [edit("w3", "sources", `[${sources.join(", ")}]`), edit("w4", "verified", sha), edit("w5", "updated", day)];
+    },
+    [say(`Updated ${page}.`)],
+  ], usage).provider;
+}
+
 // Reflection: the current lessons plus one bullet naming the ticket and its outcome (deduped).
 // Proposal: the current prompt plus the ALWAYS-CREATE-OK marker, with a rationale.
 export function demoMeta(req: ProviderRequest): ProviderResponse {
@@ -154,10 +205,11 @@ function script(task: string, ok: boolean, why: string) {
             use("1", "edit_file", { path: "notes.txt", old_string: "", new_string: "hello from the demo agent\n" }),
             ...(ok ? [use("1b", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })] : []),
             ...(ticket.includes("SPLIT-ME") ? [use("1c", "shell", { command: "mkdir -p tests && echo broken > tests/broken.txt" })] : []),
+            ...(ticket.includes("WIKI-WRITE") ? [use("1d", "shell", { command: "echo tampered > .harness/wiki/x" })] : []),
           ],
           [use("2", "shell", { command: "ls" })],
           [use("3", "read_file", { path: "notes.txt" })],
-          [{ type: "text", text: "Wrote notes.txt, listed the directory and read it back." }],
+          [{ type: "text", text: `Wrote notes.txt, listed the directory and read it back.${ticket.includes("WIKI-NOTES") ? "\n\n## Wiki notes\n- notes.txt is written by the demo agent." : ""}` }],
         ],
     compact
       ? (req) => ({ input: 100 * req.messages.length, output: 20, cache_read: 300 * req.messages.length, cache_write: 0 })
@@ -173,7 +225,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
       const retry = task.includes("Previous attempt failed");
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
-      scripted ??= req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript() : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
+      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript() : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delayMs);
         req.signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });

@@ -178,7 +178,7 @@ let shared: { repo: string; ticket: any; caseId: string; baseSha: string; v1: st
 
 test("eval cases: an approved ticket that fails at base_sha is accepted, one that passes there is rejected", async () => {
   const repo = tempRepo();
-  await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt", model_review: false });
+  await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt", model_review: false, wiki: false }); // no ingest run: the tests delete tickets and count worktrees
   const t = (await call("POST", "/api/tickets", alice, { title: "make ok", spec: "create ok.txt" })).body;
   assert.equal((await call("POST", "/api/evals/cases", alice, { ticket_id: t.id })).status, 409); // not done yet
   await call("POST", `/api/tickets/${t.id}/runs`, alice);

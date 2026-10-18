@@ -346,7 +346,7 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
   assert.doesNotMatch(JSON.stringify(a.first.system) + JSON.stringify(a.first.tools), /deploy|zed|Sandbox:/);
 
   const m0 = a.first.messages[0].content[0].text as string;
-  assert.match(m0, /^# Environment\n- Sandbox: .+\n- Repository: repo-.+, branched from main\n- Read-only paths \(changes there fail the run\): tests, evals\n\nSkills /);
+  assert.match(m0, /^# Environment\n- Sandbox: .+\n- Repository: repo-.+, branched from main\n- Read-only paths \(changes there fail the run\): tests, evals, \.harness\/wiki\n\nSkills /);
   assert.match(m0, /- deploy — Deploy the thing — \.harness\/skills\/deploy\.md\n\n# Task\n\n# ticket of zed\n\ndo it$/);
   assert.doesNotMatch(m0, /STEP-ONE/); // description only; the body is read on demand
   assert.doesNotMatch(b.first.messages[0].content[0].text, /Skills/);
