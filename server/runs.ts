@@ -15,6 +15,7 @@ import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordE
 import { dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { trackerHeader } from "./tracker.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
@@ -112,7 +113,7 @@ export async function runWindow(stored: ReturnType<typeof providerById>, model: 
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
 // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
 // lessons, the project wiki's index (M10) and feedback (see below).
-function taskFor(t: { title: string; spec: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string }, feedback: string[]) {
+function taskFor(t: { title: string; spec: string; header?: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string }, feedback: string[]) {
   const parts = [
     [
       "# Environment",
@@ -124,7 +125,8 @@ function taskFor(t: { title: string; spec: string }, info: { sandbox: string; re
   if (info.skills.length) parts.push(skillsText(info.skills));
   if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
   if (info.wiki) parts.push(info.wiki);
-  parts.push(...feedback, `# Task\n\n${t.spec ? `# ${t.title}\n\n${t.spec}` : t.title}`);
+  const body = [t.header, t.spec].filter(Boolean).join("\n\n"); // header: the tracker's priority, labels, project, due date (M11)
+  parts.push(...feedback, `# Task\n\n${body ? `# ${t.title}\n\n${body}` : t.title}`);
   return parts.join("\n\n");
 }
 
@@ -352,10 +354,12 @@ export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: s
 }
 
 // FIFO over the whole process: start queued runs until HARNESS_CONCURRENCY (default 2) are in flight.
+// M11: ticket work (not eval cases or wiki runs) goes by ticket priority first, urgent (1) to low (4), then none (0).
 export function pump() {
   const limit = Number(process.env.HARNESS_CONCURRENCY ?? 2);
   while (controllers.size < limit) {
-    const next = db.prepare("SELECT id FROM runs WHERE status = 'queued' ORDER BY rowid LIMIT 1").get() as { id: string } | undefined;
+    const next = db.prepare(`SELECT r.id FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.status = 'queued'
+      ORDER BY CASE WHEN r.eval_run_id IS NULL AND r.role <> 'wiki' AND t.priority > 0 THEN t.priority ELSE 5 END, r.rowid LIMIT 1`).get() as { id: string } | undefined;
     if (!next) return;
     controllers.set(next.id, new AbortController());
     db.prepare("UPDATE runs SET status = 'running', started_at = ? WHERE id = ?").run(Date.now(), next.id);
@@ -461,7 +465,7 @@ async function execute(runId: string) {
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
-    const task = taskFor(ev ?? t, {
+    const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;

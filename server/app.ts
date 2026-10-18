@@ -11,6 +11,7 @@ import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvide
 import { withStates } from "./planner.ts";
 import { SANDBOX_IMAGE } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
+import { applyTracker, hydrate, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 
 migrate();
@@ -34,6 +35,7 @@ app.use("/api/*", async (c, next) => {
 });
 
 app.route("/api/providers", providerRoutes);
+app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, views, members
 
 const STATUSES = ["todo", "running", "review", "done", "failed"];
 
@@ -55,13 +57,13 @@ const TICKETS = `
     (SELECT upper(substr(o.slug, 1, 3)) || '-' || e.number FROM tickets e WHERE e.id = t.escalated_to) AS escalated_key,
     (SELECT upper(substr(o.slug, 1, 3)) || '-' || s.number FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id) AS child_count,
-    (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done
+    (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done,${TRACKER_COLS}
   FROM tickets t JOIN organization o ON o.id = t.workspace_id`;
 // d = the ticket bound to ? and all of its descendants (epic → children → a sub-epic's children).
 const TREE = "WITH RECURSIVE d(id) AS (SELECT ? UNION ALL SELECT t.id FROM tickets t JOIN d ON t.parent_id = d.id)";
 
 const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
-  db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined;
+  hydrate(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined);
 
 // Runs are only reachable through a ticket in the caller's workspace.
 const runIn = (c: Context<Env>) =>
@@ -85,13 +87,14 @@ function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v:
 }
 
 // Validated fields of a JSON body, or an error message.
-type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null };
-async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string } | { v: Fields }> {
+// cur: the ticket being patched (its tracker fields are validated against it).
+type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null; tracker: TrackerFields };
+async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any>): Promise<{ error: string } | { v: Fields }> {
   const b = await c.req.json().catch(() => null);
   if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };
   const m = pick(c, b);
   if ("error" in m) return m;
-  const v: Fields = { ...m.v };
+  const v: Omit<Fields, "tracker"> = { ...m.v };
   if (b.kind !== undefined) {
     if (partial || (b.kind !== "task" && b.kind !== "epic")) return { error: 'kind must be "task" or "epic" (set when the ticket is created)' };
     v.kind = b.kind;
@@ -112,10 +115,16 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
     if (b.test_command !== null && (typeof b.test_command !== "string" || b.test_command.length > 2000)) return { error: "test_command must be a string of at most 2000 chars or null" };
     v.test_command = b.test_command || null;
   }
-  return { v };
+  const tracker = trackerFields(c.get("workspaceId"), b, v.kind ?? cur?.kind ?? "task", cur as any);
+  return "error" in tracker ? tracker : { v: { ...v, tracker } };
 }
 
-app.get("/api/tickets", (c) => c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.hidden = 0 ORDER BY t.number`).all(c.get("workspaceId"))));
+// M11: filters, search and sort from the query string (tracker.ts ticketQuery).
+app.get("/api/tickets", (c) => {
+  const q = ticketQuery(c.get("workspaceId"), c.get("userId"), c.req.query());
+  if ("error" in q) return c.json(q, 400);
+  return c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.hidden = 0${q.where} ORDER BY ${q.order}`).all(c.get("workspaceId"), ...q.params, ...q.orderParams).map((t) => hydrate(t)));
+});
 
 app.post("/api/tickets", async (c) => {
   const p = await parse(c, false);
@@ -124,6 +133,7 @@ app.post("/api/tickets", async (c) => {
   db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
     id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null,
   );
+  applyTracker(id, p.v.tracker);
   return c.json(ticketIn(c, id), 201);
 });
 
@@ -133,20 +143,21 @@ app.get("/api/tickets/:id", (c) => {
   if (!t) return c.json({ error: "not_found" }, 404);
   const runs = db.prepare("SELECT r.*, p.auth_type AS auth_type FROM runs r LEFT JOIN providers p ON p.id = r.provider_id WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid").all(t.id);
   if (t.kind !== "epic") return c.json({ ...t, runs });
-  const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id) as any[];
+  const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id).map((r) => hydrate(r)) as any[];
   return c.json({ ...t, runs, children: withStates(tree) });
 });
 
 app.patch("/api/tickets/:id", async (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
-  const p = await parse(c, true);
+  const p = await parse(c, true, t);
   if ("error" in p) return c.json(p, 400);
   const v = p.v;
   db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
     v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
     v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
   );
+  applyTracker(t.id, v.tracker);
   return c.json(ticketIn(c));
 });
 

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Providers } from "./Providers.tsx";
+import { LabelSettings } from "./tracker.tsx";
 import { api } from "./ui.tsx";
 
 type WorkspaceSettings = {
@@ -129,6 +130,7 @@ export function Settings() {
       </div>
     </form>
     <Providers defaults={s} />
+    <LabelSettings />
     </div>
   );
 }

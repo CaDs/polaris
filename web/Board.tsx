@@ -1,4 +1,5 @@
 import { COLUMNS, StatusIcon, cost, fmt, waiting, type Ticket } from "./ui.tsx";
+import { Avatar, LabelChip, PriorityIcon } from "./tracker.tsx";
 
 export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: Ticket) => void }) {
   return (
@@ -18,6 +19,14 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
                   {t.kind === "epic" && <span className="badge epic">Epic</span>}
                 </span>
                 <span className="title">{t.title}</span>
+                {(t.priority > 0 || t.labels.length > 0 || t.due_date || t.assignee) && (
+                  <span className="props">
+                    {t.priority > 0 && <PriorityIcon p={t.priority} />}
+                    {t.labels.map((l) => <LabelChip key={l.id} label={l} />)}
+                    {t.due_date && <span className="muted" title="Due date">{t.due_date}</span>}
+                    {t.assignee && <Avatar user={t.assignee} />}
+                  </span>
+                )}
                 {t.kind === "epic" && t.child_count > 0 && <span className="meta muted">{t.child_done}/{t.child_count} done</span>}
                 {t.run_status && (
                   <span className="meta muted">

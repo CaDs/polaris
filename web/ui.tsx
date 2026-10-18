@@ -11,6 +11,10 @@ export type Ticket = {
   kind: "task" | "epic"; parent_id: string | null; parent_key: string | null; handoff: string | null; child_count: number; child_done: number;
   // M9: the "Split:" epic that replaced this ticket, and the ticket a "Split:" epic replaced.
   escalated_key: string | null; split_from_key: string | null;
+  // M11 tracker. priority: 0 none, 1 urgent … 4 low.
+  priority: number; estimate: number | null; due_date: string | null; created_at: number; updated_at: number;
+  labels: { id: string; name: string; color: string }[]; project: { id: string; name: string } | null; milestone: { id: string; name: string } | null;
+  cycle: { id: string; number: number; name: string } | null; assignee: { id: string; name: string; email: string } | null;
 };
 // GET /api/tickets/:id of an epic: every descendant with its state label (as the planner sees it) and dependency keys.
 export type Child = Ticket & { label: string; depends_keys: string[] };
