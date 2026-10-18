@@ -126,6 +126,7 @@ test("filters: every field, AND across fields, OR within one", async () => {
   await ticket(w, { title: "c", priority: 0, label_ids: [blue], cycle_id: now, parent_id: epic.id });
   const d = await ticket(w, { title: "d", priority: 4, assignee_id: me });
   await ticket(w, { title: "e", priority: 3 });
+  await new Promise((r) => setTimeout(r, 5)); // updated_at has ms resolution: no tie with FIL-6
   await call("PATCH", `/api/tickets/${d.id}`, w, { status: "done" });
 
   assert.deepEqual(await keys(w, "status=done"), ["FIL-5"]);
