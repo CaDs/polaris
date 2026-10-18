@@ -4,6 +4,7 @@ import { db } from "./db.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
+import { applyTracker, ESTIMATES, Invalid, labelIds, trackerHeader } from "./tracker.ts";
 
 // M7 planner (see SPEC "Planner (M7)"). An epic's runs are planner rounds: each a fresh conversation with a read-only
 // checkout, the planner prompt file and the tools below. Children are ordinary tickets with parent_id = the epic; each
@@ -137,7 +138,8 @@ export function plannerTask(epic: Epic, o: {
   if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
   if (o.wiki) parts.push(o.wiki);
   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
-  parts.push(`# Epic\n\n# ${epic.title}${epic.spec ? `\n\n${epic.spec}` : ""}`);
+  const header = trackerHeader(epic.id); // M11: priority, labels, project, due date
+  parts.push(`# Epic\n\n# ${epic.title}${header ? `\n\n${header}` : ""}${epic.spec ? `\n\n${epic.spec}` : ""}`);
   if (o.notes.length) parts.push(`# Your notes from earlier rounds\n\n${o.notes.map((n) => `## Round ${n.round}\n${n.notes}`).join("\n\n")}`);
   parts.push(`# Children\n\n${childrenText(epic.id, o.since)}`);
   return parts.join("\n\n");
@@ -171,6 +173,9 @@ export function plannerTools(
           depends_on: { type: "array", items: { type: "string" }, description: "Keys of tickets in this epic that must be merged first" },
           kind: { type: "string", enum: ["task", "epic"], description: "epic = a sub-planner owns this slice (default task)" },
           test_command: { type: "string", description: "This ticket's own test gate (an epic: its epic gate) instead of the workspace test command, e.g. one test file, a --test-name-pattern, or `npx tsc --noEmit`, when the full suite can't pass until later tickets land" },
+          labels: { type: "array", items: { type: "string" }, description: "Label names (unknown ones are created)" },
+          priority: { type: "integer", enum: [0, 1, 2, 3, 4], description: "0 none, 1 urgent, 2 high, 3 medium, 4 low (default: the epic's). Queued work starts by priority" },
+          estimate: { type: "integer", enum: ESTIMATES, description: "Size in points" },
         },
         required: ["title", "spec"],
       },
@@ -192,10 +197,23 @@ export function plannerTools(
         if (!k) throw new AgentError("InvalidArguments", `unknown dependency ${key}: depends_on must name tickets of this epic (${kids.map((x) => x.key).join(", ") || "none yet"})`);
         return k;
       });
+      // M11: children inherit the epic's project, milestone, cycle and (unless given) priority.
+      const priority = input.priority ?? (db.prepare("SELECT priority FROM tickets WHERE id = ?").get(epic.id) as { priority: number }).priority;
+      if (!Number.isInteger(priority) || (priority as number) < 0 || (priority as number) > 4) throw new AgentError("InvalidArguments", '"priority" must be 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)');
+      const estimate = input.estimate ?? null;
+      if (estimate !== null && !ESTIMATES.includes(estimate as number)) throw new AgentError("InvalidArguments", `"estimate" must be one of ${ESTIMATES.join(", ")}`);
+      let labels: string[] = [];
+      try {
+        labels = input.labels === undefined ? [] : labelIds(epic.workspace_id, input.labels);
+      } catch (e) {
+        throw e instanceof Invalid ? new AgentError("InvalidArguments", e.message) : e;
+      }
       const id = randomUUID();
-      db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, depends_on, provider_id, model, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, // children inherit the epic's model choice
+      db.prepare(`INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, depends_on, provider_id, model, test_command, project_id, milestone_id, cycle_id, cycle_added_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, project_id, milestone_id, cycle_id, iif(cycle_id IS NULL, NULL, ?) FROM tickets WHERE id = ?`).run(
+        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice
       );
+      applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
       const key = `${epic.key.split("-")[0]}-${(db.prepare("SELECT number FROM tickets WHERE id = ?").get(id) as { number: number }).number}`;
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;
