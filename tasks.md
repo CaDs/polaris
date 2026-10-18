@@ -95,3 +95,8 @@
 - [x] Parent epic set by hand within the planner's rules
 - [x] UI: filter bar with URL state, list layout with grouping, properties sidebar + shortcuts, command palette, Projects/Cycles/Views pages, labels in Settings
 - [x] Agents: tracker header in worker/planner first messages; queue by priority; planner `create_ticket` labels/priority/estimate, children inherit project/milestone/cycle
+
+## Learnings from the model benchmark
+- [x] Fair worker budget: `max_turns` (10..500, 120) and `max_minutes` (5..600, 60) workspace settings; attempt-wide wall-clock `budget.deadline` in the loop (`time budget exhausted`), finishHint on 2 turns left or low time; evals use the frozen defaults
+- [x] Reflection gets the run's real tool names and must not invent tools
+- [x] `Split:` epics copy the original's tracker fields (labels, priority, assignee, estimate, due date, project, milestone, cycle)

@@ -63,7 +63,9 @@ test("a gate that still fails after the fix round fails the attempt; attempt 2 s
 });
 
 test("a fix round that runs out of turns falls back to a fresh attempt 2, like any gate failure", async () => {
+  await settings({ max_turns: 10 }); // the stalling fix round scripts 130 turns: keep the test fast
   const t = await ticketRun("GATE-FIX-STALL change");
+  await settings({ max_turns: 120 });
   assert.ok(t.runs.length >= 2, "attempt 2 was queued");
   const a1 = t.runs[0];
   assert.equal(events(a1.id, "gate_fix").length, 1);

@@ -17,10 +17,12 @@ export type RunOptions = {
   exec?: Exec;
   protectedPaths?: string[];
   // maxTokens counts input (incl. cache writes) + output; cache reads are not counted.
-  budget: { maxTurns: number; maxTokens: number };
+  // deadline: epoch ms wall-clock limit (minutes is only for the message: the budget the deadline came from, which a resumed run has partly used).
+  budget: { maxTurns: number; maxTokens: number; deadline?: number; minutes?: number };
+  now?: () => number; // clock for the deadline (tests)
   signal?: AbortSignal;
   finished?: () => boolean; // checked after each batch of tool calls: true ends the run as passed (planner: finish_round/complete_epic)
-  finishHint?: string; // told to the model when 2 turns are left, so it wraps up instead of running out (a reviewer once used all 25 exploring)
+  finishHint?: string; // told to the model when 2 turns are left or the time is nearly up, so it wraps up instead of running out (a reviewer once used all 25 exploring)
   onEvent: (e: AgentEvent) => void;
   onStream?: (e: StreamEvent) => void;
 };
@@ -44,6 +46,9 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   let contextTokens = 0;
   let continues = 0;
   let turns = 0;
+  let hinted = false;
+  const now = o.now ?? Date.now;
+  const began = now();
   let status: RunStatus = "failed";
   let reason: string | undefined;
 
@@ -92,6 +97,11 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
         reason = `turn budget exhausted (${o.budget.maxTurns})`;
         break;
       }
+      const { deadline } = o.budget;
+      if (deadline !== undefined && now() >= deadline) {
+        reason = `time budget exhausted (${o.budget.minutes ?? Math.round((deadline - began) / 60_000)} min)`;
+        break;
+      }
       const spent = usage.input + usage.cache_write + usage.output;
       if (spent >= o.budget.maxTokens) {
         reason = `token budget exhausted (${spent} >= ${o.budget.maxTokens})`;
@@ -129,7 +139,13 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
         o.onEvent({ type: "tool_result", payload: { tool_use_id: call.id, content: r.content, is_error: r.is_error, error_kind: r.kind } });
         results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error });
       }
-      if (o.finishHint && turns === o.budget.maxTurns - 2) results.push({ type: "text", text: `[harness] Only 2 turns are left in your budget. ${o.finishHint}` });
+      // Time is nearly up when under 10% of this call's window (min 2 minutes) remains; once, whichever limit comes first.
+      const left = deadline === undefined ? Infinity : deadline - now();
+      const lowTime = left < Math.max(120_000, ((deadline ?? 0) - began) / 10);
+      if (o.finishHint && !hinted && (turns >= o.budget.maxTurns - 2 || lowTime)) {
+        hinted = true;
+        results.push({ type: "text", text: `[harness] ${lowTime ? `Less than ${Math.max(1, Math.ceil(left / 60_000))} minutes are` : "Only 2 turns are"} left in your budget. ${o.finishHint}` });
+      }
       messages.push({ role: "user", content: results });
       if (o.finished?.()) {
         status = "passed";

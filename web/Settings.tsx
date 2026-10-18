@@ -6,7 +6,7 @@ import { api } from "./ui.tsx";
 type WorkspaceSettings = {
   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
-  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number;
+  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
 };
 
 export function Settings() {
@@ -66,6 +66,18 @@ export function Settings() {
         Sandbox image
         <input name="image" className="mono" defaultValue={s.image} spellCheck={false} />
         <span className="hint">The default image is built automatically on first use.</span>
+      </label>
+
+      <h2>Run budget</h2>
+      <label>
+        Max turns per attempt
+        <input name="max_turns" type="number" min={10} max={500} step={1} defaultValue={s.max_turns} required />
+        <span className="hint">Model calls the worker may make in one go (the first run and each fix round count separately).</span>
+      </label>
+      <label>
+        Max minutes per attempt
+        <input name="max_minutes" type="number" min={5} max={600} step={1} defaultValue={s.max_minutes} required />
+        <span className="hint">Wall-clock limit for the whole attempt, fix rounds included, counted from its start. Fast models run out of turns first; slow ones out of minutes.</span>
       </label>
 
       <h2>Context</h2>

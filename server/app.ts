@@ -226,11 +226,12 @@ const SETTINGS_DEFAULTS = {
   repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
 };
+const SETTINGS_BUDGET = { max_turns: 120, max_minutes: 60 };
 const SETTINGS_FIELDS = Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS_DEFAULTS)[];
 
 app.get("/api/settings", (c) => {
   const s = settingsFor(c.get("workspaceId"));
-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, ...s, configured: !!s });
+  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60, ...s, configured: !!s });
 });
 
 // Workspace default provider/model (null = env fallback). Lives on the settings row, so the repository must be saved first.
@@ -259,6 +260,16 @@ app.put("/api/settings", async (c) => {
   // Cap on the context size at which a run compacts (also limited to 70% of the provider's window). Form posts send a string.
   const compact = b.compact_at_tokens === undefined || b.compact_at_tokens === "" ? 150000 : Number(b.compact_at_tokens);
   if (!Number.isInteger(compact) || compact < 1000 || compact > 100_000_000) return c.json({ error: "Compact at must be a whole number of tokens (1000 to 100000000)" }, 400);
+  // Worker budget (runs.ts): whole numbers in range; omitted = unchanged (default for a new workspace). Form posts send strings.
+  const cur = settingsFor(c.get("workspaceId"));
+  const limit = (k: "max_turns" | "max_minutes", lo: number, hi: number, label: string) => {
+    const x = b[k] === undefined ? (cur?.[k] ?? SETTINGS_BUDGET[k]) : typeof b[k] === "number" || typeof b[k] === "string" ? Number(b[k]) : NaN;
+    return Number.isInteger(x) && x >= lo && x <= hi ? x : { error: `${label} must be a whole number from ${lo} to ${hi}` };
+  };
+  const turns = limit("max_turns", 10, 500, "Max turns per attempt");
+  const minutes = limit("max_minutes", 5, 600, "Max minutes per attempt");
+  if (typeof turns === "object") return c.json(turns, 400);
+  if (typeof minutes === "object") return c.json(minutes, 400);
   if (v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
     return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);
   // M7: merge children that pass the gate without a click. Form posts send "on" for a checked box and omit it otherwise.
@@ -273,15 +284,15 @@ app.put("/api/settings", async (c) => {
   if ("error" in repo) return c.json(repo, 400);
   db.prepare(
     `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, model_review,
-       auto_split, child_size_hint, triage_model, wiki, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       auto_split, child_size_hint, triage_model, wiki, max_turns, max_minutes, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (workspace_id) DO UPDATE SET repo_path = excluded.repo_path, base_branch = excluded.base_branch, setup_command = excluded.setup_command,
        test_command = excluded.test_command, protected_paths = excluded.protected_paths, image = excluded.image, compact_at_tokens = excluded.compact_at_tokens,
        auto_approve_children = excluded.auto_approve_children, model_review = excluded.model_review, auto_split = excluded.auto_split,
-       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, updated_at = excluded.updated_at`,
+       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, max_turns = excluded.max_turns, max_minutes = excluded.max_minutes, updated_at = excluded.updated_at`,
   ).run(
     c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, compact, autoApprove, review,
-    split, v.child_size_hint, v.triage_model, wiki, Date.now(),
+    split, v.child_size_hint, v.triage_model, wiki, turns, minutes, Date.now(),
   );
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });

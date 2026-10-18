@@ -105,7 +105,7 @@ function gateFixScript(task: string) {
   const once = task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-ONCE");
   const usage = { input: 100, output: 20, cache_read: 10, cache_write: 0 };
   // GATE-FIX-STALL: the fix round never finishes (it runs out of turns), so the attempt falls back to a fresh retry.
-  if (task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-STALL")) return fakeProvider(Array.from({ length: 60 }, (_, i) => [use(`s${i}`, "shell", { command: "true" })]), usage).provider;
+  if (task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: "true" })]), usage).provider;
   if (!once) // changes nothing and repeats its earlier final reply, so a handoff still reads the same
     return fakeProvider([(req) => [say(req.messages.findLast((m) => m.role === "assistant" && m.content.some((b) => b.type === "text") && !m.content.some((b) => b.type === "tool_use"))?.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n") ?? "Done.")]], usage).provider;
   return fakeProvider([[say("Fixing the failing tests."), use("g1", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })], [say("Created ok.txt.")]], usage).provider;

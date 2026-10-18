@@ -25,8 +25,16 @@ builds its own remaining milestones (`tasks.md`).
 messages = [system, task]
 loop: resp = provider.stream(messages, tools) → append → no tool calls? done
       else run each tool, append result (errors returned as text, classified)
-      stop on turn/token budget
+      stop on turn/token/time budget
 ```
+
+Worker budget: workspace settings `max_turns` (10..500, default 120) and `max_minutes` (5..600, default 60). `max_minutes`
+is one wall-clock deadline for the whole attempt (counted from the run's start; the first run, gate fix rounds and review
+fix rounds share it); `max_turns` applies per agent call (the first run and each fix round count separately). The loop
+checks `budget.deadline` (epoch ms) at the top of each turn and ends with `time budget exhausted (<n> min)`. The
+`finishHint` fires once, when 2 turns are left or less than max(2 min, 10% of the call's window) remains, whichever
+comes first. Planner (50 turns), reviewer, wiki and CLI runs keep their own budgets. Eval case runs use the frozen
+defaults (120/60), not the workspace's values, so scores stay comparable when Settings change.
 
 - Tools: `read_file`, `edit_file` (`str_replace` for Claude, `apply_patch` for GPT), `shell`, `search` (rg).
 - Fresh context per run: SPEC + PROGRESS notes + LESSONS + ticket + last failure.
@@ -103,7 +111,7 @@ can read or write it, and every change is a new version you can see in full on t
 1. **Reflection → lessons** (lowest risk, applies at once). When a run series ends (it passed → review, it failed for
    good after its retries, or a reviewer rejected it with a note) the harness makes one extra call: a fresh one-message
    conversation, no tools, the run's own provider and model, system prompt = the reflection instructions. Input: the current
-   lessons + a compact digest of the series (ticket key/title, final status, per attempt: status/reason, turns, tokens,
+   lessons + the run's real tool names (`<tools>`; the instructions say to name tools exactly as listed, never invent one) + a compact digest of the series (ticket key/title, final status, per attempt: status/reason, turns, tokens,
    model, tool errors with their class and first line, setup/gate failures with a 1,000-char output tail, the reviewer
    note); never the transcript. Output: the full updated document (short imperative bullets about this repo and harness,
    deduped), capped at 8,000 chars (≈ 2,000 tokens; asked for in the prompt, then cut at a line break), common secret
@@ -256,7 +264,8 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
   attempt failed and no retry follows; not cancelled, not a human reject, not an eval case run), the harness creates a
   new epic `Split: <title>` with the same spec plus `## Previous direct attempt` (status/reason/turns of every attempt,
   the last gate failure with a 2,000-char output tail, the last model review findings, the worker's final reply), the
-  same provider/model choice and test command, sets the task's `escalated_to` to it, and queues the epic's round 1.
+  same provider/model choice and test command, and the original's tracker fields (labels, priority, assignee, estimate,
+  due date, project, milestone, cycle; its children inherit them as the planner's do), sets the task's `escalated_to` to it, and queues the epic's round 1.
   Under an epic, the new epic is created under the same parent (the parent's planner sees it as a child), the task's
   dependents depend on the new epic instead, and the task is failed *without* waking the parent's planner (the new
   epic is open in its place; the planner hears of both when something next settles). The task's label is `split into

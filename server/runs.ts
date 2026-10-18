@@ -33,7 +33,9 @@ export const controllers = new Map<string, AbortController>();
 const TICKET_STATUS: Record<RunStatus, string> = { passed: "review", failed: "failed", cancelled: "todo" };
 const MAX_ATTEMPTS = 3; // gate failures retry automatically, with the failure fed back, up to this attempt
 const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
-const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 };
+const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
+// Eval case runs use these frozen defaults (the migration's), not the workspace's: a score must not move when someone edits Settings.
+const EVAL_WORKER = { max_turns: 120, max_minutes: 60 };
 const GATE_FIX_ROUNDS = 1; // per attempt: a failed gate resumes the worker's own conversation this many times before the attempt fails
 // A reviewer reads the whole change and a few callers: its turns grow with the changed lines (it once used 25 on a 10-line diff).
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
@@ -42,7 +44,7 @@ const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your
 export type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
-  auto_split: number; child_size_hint: string; triage_model: string; wiki: number;
+  auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
 };
 export const settingsFor = (workspaceId: string) =>
   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
@@ -410,6 +412,7 @@ async function execute(runId: string) {
   const cfg = run.eval_run_id ? ev : s; // repo_path, setup/test command, protected paths, image
   const signal = controllers.get(runId)!.signal;
   const log = eventLog(runId);
+  const attemptStart = Date.now();
   let usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   let turns = 0;
   let status: RunStatus = "failed";
@@ -482,7 +485,10 @@ async function execute(runId: string) {
     };
     const providerFor = (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task));
     const addUsage = (u: Usage) => (Object.keys(u) as (keyof Usage)[]).forEach((k) => (usage[k] += u[k]));
-    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
+    // Turns count per agent call (initial run, each fix round); the minutes run from the attempt's start, across all of them.
+    const limits = ev || !s ? EVAL_WORKER : s;
+    const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
+    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
     ({ usage, turns, status, reason } = a);
     reply = finalText(a.messages);
     if (status !== "passed") return;
@@ -512,7 +518,7 @@ async function execute(runId: string) {
         const why = gateFailure(result);
         log({ type: "gate_fix", payload: { reason: why } });
         const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
-        a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
+        a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
         addUsage(a.usage);
         turns += a.turns;
         reply = finalText(a.messages);
@@ -560,7 +566,7 @@ async function execute(runId: string) {
         return;
       }
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
       addUsage(a.usage);
       turns += a.turns;
       ({ status, reason } = a);

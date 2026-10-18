@@ -125,3 +125,37 @@ test("finishHint is appended to the tool results when 2 turns are left, once", a
   assert.deepEqual(notes(3), ["[harness] Only 2 turns are left in your budget. Wrap up."]); // sent with turn 4 of 5
   assert.deepEqual([notes(2), notes(4)], [[], []]);
 });
+
+// Wall-clock budget: the clock is injected and each scripted turn advances it by a minute.
+function timed(turns: number, opts: Partial<RunOptions>) {
+  let clock = 0;
+  const sh = (i: number) => (): ToolUseBlock[] => ((clock += 60_000), [use(`t${i}`, "shell", { command: "true" })]);
+  return run(Array.from({ length: turns }, (_, i) => sh(i)), { now: () => clock, ...opts });
+}
+const noteAt = (fake: { requests: { messages: { content: { type: string; text?: string }[] }[] }[] }, i: number) =>
+  fake.requests[i].messages.at(-1)!.content.filter((b) => b.type === "text" && b.text!.startsWith("[harness]")).map((b) => b.text);
+
+test("deadline: the run ends at the top of the turn once the wall clock passes it, naming the minutes", async () => {
+  const { done } = timed(20, { budget: { maxTurns: 50, maxTokens: 1e6, deadline: 5 * 60_000 } });
+  const r = await done;
+  assert.deepEqual([r.status, r.turns, r.reason], ["failed", 5, "time budget exhausted (5 min)"]);
+  const resumed = await timed(20, { budget: { maxTurns: 50, maxTokens: 1e6, deadline: 5 * 60_000, minutes: 60 } }).done; // a fix round: the attempt's minutes, not what is left
+  assert.equal(resumed.reason, "time budget exhausted (60 min)");
+});
+
+test("finishHint also fires when under 10% of the time (min 2 minutes) is left, once, whichever limit comes first", async () => {
+  // 100-minute window: 10% = 10 min, so the hint comes with the turn that leaves 9 minutes (turn 91 of the clock).
+  const t = timed(100, { budget: { maxTurns: 500, maxTokens: 1e6, deadline: 100 * 60_000 }, finishHint: "Wrap up." });
+  await t.done;
+  const hinted = t.fake.requests.map((_, i) => i).filter((i) => noteAt(t.fake, i).length);
+  assert.deepEqual(hinted, [91]); // request 91 carries the results of turn 91, sent after the clock reached 91 min
+  assert.deepEqual(noteAt(t.fake, 91), ["[harness] Less than 9 minutes are left in your budget. Wrap up."]);
+  // A short window uses the 2-minute floor.
+  const s = timed(10, { budget: { maxTurns: 50, maxTokens: 1e6, deadline: 10 * 60_000 }, finishHint: "Wrap up." });
+  await s.done;
+  assert.deepEqual(s.fake.requests.map((_, i) => i).filter((i) => noteAt(s.fake, i).length), [9]);
+  // Turns first: 3 turns of a minute against a 60-minute window.
+  const n = timed(5, { budget: { maxTurns: 5, maxTokens: 1e6, deadline: 60 * 60_000 }, finishHint: "Wrap up." });
+  assert.equal((await n.done).reason, "turn budget exhausted (5)");
+  assert.deepEqual(noteAt(n.fake, 3), ["[harness] Only 2 turns are left in your budget. Wrap up."]);
+});
