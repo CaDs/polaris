@@ -62,7 +62,7 @@ export const refreshTokens = (refresh: string) => tokenRequest({ grant_type: "re
 // Login state per provider id, polled by the UI through GET /api/providers.
 export const logins = new Map<string, { status: "pending" | "error"; error?: string }>();
 const pending = new Map<string, { providerId: string; verifier: string; redirectUri: string; save: (t: Tokens) => void; timer: NodeJS.Timeout }>();
-let listener: Server | undefined;
+export let listener: Server | undefined;
 
 const page = (msg: string) => `<!doctype html><meta charset=utf-8><title>Polaris</title><body style="font:16px system-ui;margin:3rem">${msg}`;
 
@@ -94,7 +94,7 @@ export async function startLogin(providerId: string, save: (t: Tokens) => void) 
       }
       stop(state);
     });
-    await new Promise<void>((ok, fail) => srv.once("error", fail).listen(loginPort(), ok)).catch((e) => {
+    await new Promise<void>((ok, fail) => srv.once("error", fail).listen(loginPort(), "127.0.0.1", ok)).catch((e) => {
       throw new Error(e.code === "EADDRINUSE" ? `port ${loginPort()} is busy (another Codex login running?); close it and retry` : e.message);
     });
     listener = srv;

@@ -123,6 +123,16 @@ test("provider API never returns secrets, validates input, and is isolated per w
   assert.equal((await call("GET", `/api/providers/${id}/models`, alice)).status, 404);
 });
 
+test("changing the base URL drops the stored secret", async () => {
+  const id = (await call("POST", "/api/providers", alice, { name: "Moved", kind: "anthropic", api_key: "sk-ant-keep-1111" })).body.id;
+  const secret = () => (db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret;
+  assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { name: "Moved", base_url: null })).body.has_secret, true, "same (empty) base URL keeps it");
+  const moved = await call("PATCH", `/api/providers/${id}`, alice, { base_url: "https://attacker.example" });
+  assert.deepEqual([moved.status, moved.body.has_secret, secret()], [200, false, null]);
+  const rekeyed = await call("PATCH", `/api/providers/${id}`, alice, { base_url: "https://other.example", api_key: "sk-ant-new-2222" });
+  assert.deepEqual([rekeyed.body.has_secret, rekeyed.body.secret_last4], [true, "2222"], "a key sent with the new URL is kept");
+});
+
 test("models and the tool-calling smoke test", async () => {
   const claude = (await call("POST", "/api/providers", alice, { name: "C", kind: "anthropic", api_key: "k-1234" })).body.id;
   assert.deepEqual((await call("GET", `/api/providers/${claude}/models`, alice)).body.models, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);

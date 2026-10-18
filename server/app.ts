@@ -22,6 +22,18 @@ export const app = new Hono<Env>();
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
+// CSRF: cookie-authenticated mutations must come from a trusted origin (BETTER_AUTH_URL, WEB_ORIGIN) or this host.
+// No Origin and no Sec-Fetch-Site means a non-browser client (curl, CLI): allowed only without a cookie.
+app.use("/api/*", async (c, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return next();
+  const origin = c.req.header("origin");
+  const site = c.req.header("sec-fetch-site");
+  const ok = origin
+    ? (await auth.$context).isTrustedOrigin(origin) || URL.parse(origin)?.host === c.req.header("host")
+    : site ? site === "same-origin" : !c.req.header("cookie");
+  return ok ? next() : c.json({ error: "forbidden_origin" }, 403);
+});
+
 // Every other API route requires a session and an active workspace the user still belongs to.
 app.use("/api/*", async (c, next) => {
   const s = await auth.api.getSession({ headers: c.req.raw.headers });
