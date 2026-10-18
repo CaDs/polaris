@@ -95,12 +95,6 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       </div>
       <input className="h-input" aria-label="Title" value={title} onChange={(e) => setTitle(e.target.value)} onBlur={save} maxLength={200} />
       <div className="row">
-        <label className="inline">
-          Status
-          <select value={ticket.status} onChange={(e) => patch({ status: e.target.value as Status })}>
-            {COLUMNS.map((s) => <option key={s}>{s}</option>)}
-          </select>
-        </label>
         {waiting(ticket) && <span className="muted" role="status">waiting for children</span>}
         {ticket.escalated_key && <span className="muted">Escalated to {link(ticket.escalated_key)}</span>}
         {ticket.split_from_key && <span className="muted">Split from {link(ticket.split_from_key)}</span>}
