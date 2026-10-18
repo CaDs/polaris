@@ -21,7 +21,7 @@ export function Settings() {
     setSaved(false);
     try {
       const f = new FormData(e.currentTarget);
-      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(f), model_review: f.has("model_review"), auto_split: f.has("auto_split"), wiki: f.has("wiki") }));
+      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(f), auto_approve_children: f.has("auto_approve_children"), model_review: f.has("model_review"), auto_split: f.has("auto_split"), wiki: f.has("wiki") }));
       setSaved(true);
     } catch (e) {
       setError((e as Error).message);

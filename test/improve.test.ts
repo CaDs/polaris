@@ -312,7 +312,7 @@ test("promotion rule: no eval / other case set / not better are blocked; strictl
   const c1 = await addCase();
   assert.match(rule().reason, /Run an eval of v2/);
   evalOf(v2, 1, 100, [c1]);
-  assert.match(rule().reason, /active v1 has no eval on the current case set/);
+  assert.match(rule().reason, /active v1 has no eval with m on the current case set/);
   evalOf(v1, 1, 100, [c1]);
   evalOf(v2, 1, 95, [c1]);
   assert.deepEqual([rule().ok, /Not better/.test(rule().reason)], [false, true]); // only 5% fewer tokens
@@ -335,6 +335,37 @@ test("promotion rule: no eval / other case set / not better are blocked; strictl
   evalOf(v2, 0, 100, [c1, c2]);
   evalOf(v2, 2, 1, [c2]);
   assert.equal(rule().ok, false);
+});
+
+test("promotion compares only evals run with the same model, and none with a cancelled case", async () => {
+  const cookie = await user("mona");
+  const ws = wsOf("mona");
+  const v1 = activePrompt(ws);
+  const v2 = addPrompt(ws, "prompt two", { source: "human", author: "mona@x.dev" });
+  const t = (await call("POST", "/api/tickets", cookie, { title: "case" })).body.id;
+  const c1 = crypto.randomUUID();
+  db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image)
+    VALUES (?, ?, ?, 'c', '', '/x', 'abc', '', 'true', '', 'img')`).run(c1, ws, t);
+  let at = 0;
+  const evalOf = (p: { id: string; version: number }, passed: number, model: string) => {
+    const id = crypto.randomUUID();
+    db.prepare("INSERT INTO eval_runs (id, workspace_id, prompt_id, prompt_version, case_ids, model, status, passed, total, mean_tokens, started_at) VALUES (?, ?, ?, ?, ?, ?, 'done', ?, 1, 100, ?)").run(
+      id, ws, p.id, p.version, JSON.stringify([c1]), model, passed, ++at,
+    );
+    return id;
+  };
+  evalOf(v1, 0, "small");
+  evalOf(v2, 1, "big");
+  assert.deepEqual([promotion(ws, v2).ok, promotion(ws, v2).reason], [false, "The active v1 has no eval with big on the current case set: run one to compare against."]);
+  evalOf(v1, 1, "big");
+  evalOf(v1, 0, "small"); // a later baseline on another model does not count
+  assert.deepEqual([promotion(ws, v2).ok, /Not better/.test(promotion(ws, v2).reason)], [false, true]);
+
+  // A cancelled case run counts as failed, so that eval says nothing about the prompt.
+  const e = evalOf(v1, 0, "big");
+  const run = db.prepare("INSERT INTO runs (id, ticket_id, model, status, eval_run_id, eval_case_id) VALUES (?, ?, 'big', 'cancelled', ?, ?) RETURNING id").get(crypto.randomUUID(), t, e, c1) as { id: string };
+  db.prepare("INSERT INTO eval_results (eval_run_id, case_id, run_id, passed, turns, tokens, cost_usd, duration_ms) VALUES (?, ?, ?, 0, 0, 0, 0, 0)").run(e, c1, run.id);
+  assert.equal(promotion(ws, v2).ok, false);
 });
 
 test("a running run keeps its prompt version; runs queued after a promotion use the new one", async () => {

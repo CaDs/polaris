@@ -69,7 +69,9 @@ test("settings: auto_split defaults on and round-trips; size hint and triage mod
   assert.equal((await put({})).auto_split, 0); // omitted = unchanged
   assert.equal((await put({ auto_split: "on" })).auto_split, 1);
   s = await put({ auto_split: true });
-  assert.deepEqual([s.child_size_hint, s.triage_model], ["at most 3 files and about 60 changed lines, finishable in 20 agent turns", ""]); // omitted = default, like the commands
+  assert.deepEqual([s.child_size_hint, s.triage_model], ["one file", "d1"]); // omitted = unchanged, like every field
+  s = await put({ child_size_hint: null, triage_model: null });
+  assert.deepEqual([s.child_size_hint, s.triage_model], ["at most 3 files and about 60 changed lines, finishable in 20 agent turns", ""]); // null = default
   assert.equal((await call("PUT", "/api/settings", w.cookie, { ...base, child_size_hint: "x".repeat(2001) })).status, 400);
   assert.equal((await call("PUT", "/api/settings", w.cookie, { ...base, triage_model: 5 })).status, 400);
 });

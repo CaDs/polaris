@@ -81,12 +81,13 @@ export function capture(child: ChildProcess, kill: () => void, { timeoutMs, sign
     const out = { stdout: "", stderr: "" };
     let timedOut = false;
     // ponytail: capture stops at MAX_CAPTURE per stream (the tail beyond it is lost).
-    const collect = (k: "stdout" | "stderr") => (d: Buffer) => {
+    const collect = (k: "stdout" | "stderr") => (d: string) => {
       if (out[k].length < MAX_CAPTURE) out[k] += d;
       else if (!out[k].endsWith(CAPPED)) out[k] += CAPPED;
     };
-    child.stdout!.on("data", collect("stdout"));
-    child.stderr!.on("data", collect("stderr"));
+    // Decoded as a stream, so a UTF-8 character split across two chunks stays whole.
+    child.stdout!.setEncoding("utf8").on("data", collect("stdout"));
+    child.stderr!.setEncoding("utf8").on("data", collect("stderr"));
     const timer = setTimeout(() => {
       timedOut = true;
       kill();
@@ -151,8 +152,12 @@ const readFile: Tool = {
     const p = str(input, "path")!;
     const file = resolveIn(root, p);
     if (!existsSync(file)) throw new AgentError("InvalidArguments", `file not found: ${p}`);
-    const lines = readFileSync(file, "utf8").split("\n");
+    const buf = readFileSync(file);
+    if (buf.subarray(0, 8000).includes(0)) throw new AgentError("InvalidArguments", `${p} is a binary file; inspect it with shell (file, xxd, ...)`); // git's heuristic
+    if (!buf.length) return "(empty file)";
+    const lines = buf.toString("utf8").split("\n");
     const start = Math.max(1, num(input, "offset", 1));
+    if (start > lines.length) throw new AgentError("InvalidArguments", `offset ${start} is past the end of ${p} (${lines.length} lines)`);
     const end = Math.min(lines.length, start - 1 + num(input, "limit", 2000));
     // Every line numbered: a bare tab gutter got copied into edit_file's old_string by local models.
     const body = lines.slice(start - 1, end).map((l, i) => `${start + i}\t${l}`);
@@ -196,10 +201,13 @@ const editFile: Tool = {
     }
     if (!exists) throw new AgentError("InvalidArguments", `file not found: ${p}`);
     const text = readFileSync(file, "utf8");
-    const count = text.split(oldS).length - 1;
+    const occurs = (s: string) => text.split(s).length - 1;
+    // read_file shows a CRLF file's line breaks as \n: match them, and write new_string's, as \r\n.
+    const [o, n] = !occurs(oldS) && text.includes("\r\n") ? [oldS, newS].map((s) => s.replace(/\r?\n/g, "\r\n")) : [oldS, newS];
+    const count = occurs(o);
     if (count === 0) throw new AgentError("InvalidArguments", `old_string not found in ${p} (it must match the file exactly, without read_file's line-number prefix)`);
     if (count > 1) throw new AgentError("InvalidArguments", `old_string occurs ${count} times in ${p}; include more context to make it unique`);
-    writeFileSync(file, text.replace(oldS, () => newS));
+    writeFileSync(file, text.replace(o, () => n));
     return `edited ${p}`;
   },
 };
@@ -221,7 +229,6 @@ function applyHunks(path: string, text: string, hunks: { header?: string; lines:
   let pos = 0;
   hunks.forEach((h, n) => {
     const old = h.lines.filter((l) => l[0] !== "+").map((l) => l.slice(1));
-    const next = h.lines.filter((l) => l[0] !== "-").map((l) => l.slice(1));
     if (h.header) {
       const at = findRun(lines, [h.header], pos);
       if (at < 0) throw new AgentError("InvalidArguments", `${path}: hunk ${n + 1}: header line not found: ${h.header}`);
@@ -230,6 +237,9 @@ function applyHunks(path: string, text: string, hunks: { header?: string; lines:
     // A hunk with nothing to match is a pure insertion: after the header line, else at the end of the file.
     const at = old.length ? findRun(lines, old, pos) : h.header ? pos : lines.length;
     if (at < 0) throw new AgentError("InvalidArguments", `${path}: hunk ${n + 1} does not apply: these lines were not found (in order, after the previous hunk):\n${old.join("\n")}`);
+    // Context lines stay as they are in the file (a whitespace-fuzzy match must not rewrite their indentation).
+    let k = 0;
+    const next = h.lines.flatMap((l) => (l[0] === "+" ? [l.slice(1)] : l[0] === " " ? [lines[at + k++]] : (k++, [])));
     lines.splice(at, old.length, ...next);
     pos = at + next.length;
   });
@@ -258,6 +268,7 @@ const applyPatch: Tool = {
       let j = i + 1;
       while (j < lines.length - 1 && !lines[j].startsWith("*** ")) j++;
       const body = lines.slice(i + 1, j).filter((l) => l !== "*** End of File");
+      while (body.at(-1) === "") body.pop(); // a blank line before the next '***' is spacing, not an empty context line
       i = j;
       const cur = read(file);
       if (op === "Add") {
@@ -310,7 +321,7 @@ const shell: Tool = {
   async run(input, ctx) {
     const { root, exec, signal } = ctx;
     const command = str(input, "command")!;
-    const timeoutMs = Math.min(num(input, "timeout", 120), 600) * 1000;
+    const timeoutMs = Math.min(num(input, "timeout", 120) || 120, 600) * 1000; // 0 would kill it at once: models mean "no limit"
     const r = await exec(command, { cwd: root, timeoutMs, signal });
     const text = spill(ctx, `exit code: ${r.code}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
     if (signal?.aborted) throw new AgentError("UserAborted", `command aborted\n${text}`);
@@ -342,6 +353,8 @@ const search: Tool = {
     return new Promise((done, fail) => {
       execFile("rg", args, { cwd: root, timeout: 30_000, maxBuffer: MAX_CAPTURE, signal }, (err, stdout, stderr) => {
         if (!err) return done(spill(ctx, stdout));
+        // Exit 2 with matches: some files could not be read (permissions, broken links); the matches still count.
+        if (err.code === 2 && stdout) return done(spill(ctx, `${stdout}\n[rg could not search some files]\n${stderr.trim()}`));
         if (err.code === 1) return done("no matches");
         if (signal?.aborted) return fail(new AgentError("UserAborted", "search aborted"));
         if (err.killed) return fail(new AgentError("Timeout", "search timed out after 30s"));
@@ -375,10 +388,11 @@ export async function runTool(all: Tool[], call: ToolUseBlock, ctx: ToolContext)
     if (!tool) throw new AgentError("InvalidArguments", `unknown tool: ${call.name}`);
     if (call.invalid_input !== undefined)
       throw new AgentError("InvalidArguments", `the arguments of this ${call.name} call were not valid JSON (the output was probably cut off by the token limit): ${call.invalid_input.slice(0, 200)}${call.invalid_input.length > 200 ? "…" : ""}\nNothing was run. Call it again with smaller arguments, e.g. split a large edit into several.`);
-    return { content: await tool.run(call.input ?? {}, { ...ctx, tool: call.name, callId: call.id }), is_error: false };
+    // toWellFormed: truncating cuts by UTF-16 unit and can leave half of a surrogate pair (emoji), which providers reject.
+    return { content: (await tool.run(call.input ?? {}, { ...ctx, tool: call.name, callId: call.id })).toWellFormed(), is_error: false };
   } catch (e) {
     // fs errors (EISDIR, EACCES, ...) are the environment's; anything else is a harness bug.
     const kind: ErrorKind = e instanceof AgentError ? e.kind : typeof (e as NodeJS.ErrnoException).code === "string" ? "UnexpectedEnvironment" : "Unknown";
-    return { content: `${kind}: ${(e as Error).message}${e instanceof AgentError && e.badInput && tool ? `\nExpected input: ${expectedInput(tool.def)}` : ""}`, is_error: true, kind };
+    return { content: `${kind}: ${(e as Error).message.toWellFormed()}${e instanceof AgentError && e.badInput && tool ? `\nExpected input: ${expectedInput(tool.def)}` : ""}`, is_error: true, kind };
   }
 }

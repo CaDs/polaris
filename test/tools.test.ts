@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostExec, runTool, tools } from "../server/agent/tools.ts";
@@ -86,4 +86,49 @@ test("a bad input shape says which input the tool expects; other InvalidArgument
   assert.match(r.content, /"command" must be a string\nExpected input: \{command: string, timeout\?: number\}$/);
   assert.doesNotMatch((await call("read_file", { path: "../x" })).content, /Expected input/);
   assert.doesNotMatch((await call("read_file", { path: "no-such-file" })).content, /Expected input/);
+});
+
+test("read_file: an offset past the end, an empty file and a binary file say so", async () => {
+  writeFileSync(join(root, "five.txt"), "1\n2\n3\n4\n5");
+  const past = await call("read_file", { path: "five.txt", offset: 9 });
+  assert.equal(past.kind, "InvalidArguments");
+  assert.match(past.content, /offset 9 is past the end of five\.txt \(5 lines\)/);
+  writeFileSync(join(root, "empty.txt"), "");
+  assert.equal((await call("read_file", { path: "empty.txt" })).content, "(empty file)");
+  writeFileSync(join(root, "img.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0xff, 10]));
+  const bin = await call("read_file", { path: "img.png" });
+  assert.equal(bin.kind, "InvalidArguments");
+  assert.match(bin.content, /img\.png is a binary file/);
+});
+
+test("edit_file matches a CRLF file and keeps its line endings", async () => {
+  writeFileSync(join(root, "crlf.txt"), "a\r\nb\r\nc\r\n");
+  const r = await call("edit_file", { path: "crlf.txt", old_string: "a\nb", new_string: "x\ny" });
+  assert.equal(r.is_error, false, r.content);
+  assert.equal(readFileSync(join(root, "crlf.txt"), "utf8"), "x\r\ny\r\nc\r\n");
+});
+
+test("search still returns its matches when some file can't be read", async () => {
+  mkdirSync(join(root, "sr"));
+  writeFileSync(join(root, "sr/ok.txt"), "needle\n");
+  writeFileSync(join(root, "sr/locked.txt"), "needle\n");
+  chmodSync(join(root, "sr/locked.txt"), 0);
+  const r = await call("search", { pattern: "needle", path: "sr" });
+  assert.equal(r.is_error, false, r.content);
+  assert.match(r.content, /sr\/ok\.txt:1:needle/);
+  assert.match(r.content, /locked\.txt: Permission denied/);
+});
+
+test("shell: a UTF-8 character split across output chunks survives; timeout 0 means the default", async () => {
+  const r = await call("shell", { command: "printf '\\342\\202'; sleep 0.2; printf '\\254 done'" });
+  assert.match(r.content, /stdout:\n€ done\n/);
+  const z = await call("shell", { command: "echo hi", timeout: 0 });
+  assert.equal(z.is_error, false, z.content);
+});
+
+test("truncated tool output never ends with half of a surrogate pair", async () => {
+  writeFileSync(join(root, "emoji.txt"), "x" + "😀".repeat(20_000));
+  const r = await call("read_file", { path: "emoji.txt" });
+  assert.match(r.content, /chars truncated/);
+  assert.ok(r.content.isWellFormed());
 });

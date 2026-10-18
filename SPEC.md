@@ -70,9 +70,9 @@ never changed mid-conversation either (cache prefix, model behaviour).
 - **Compaction = summarize, then start a new conversation.** When the latest request's context size
   (`input + cache_read + cache_write`) exceeds `min(70% of the provider's context_window, workspace compact_at_tokens)`
   (defaults: anthropic 1M, openai 400k, ollama 32,768; cap 150,000; an Ollama provider still at 32,768 is "auto": the run asks Ollama for the served context at start (`/api/ps` `context_length` of the loaded model, else `/api/show` `*.context_length`), any other stored value wins, detection failure falls back to the stored value; a `setup {step: "context", window, source, compact_at}` event records it; `POLARIS_COMPACT_AT` overrides both, for tests):
-  (a) the whole conversation is written as markdown to `.polaris/history/<n>.md` (every message, tool call with input,
+  (a) the whole conversation is written as markdown to `.polaris/history/<n>.md` (the next free n; every message, tool call with input,
   tool result as the model saw it); (b) a user message asks for a progress summary with fixed headings (Goal, Done, Decisions, Key facts as file:line → fact, Left, Next step), appended at the end with the same tools and system, "no tool calls" instructed, calls made anyway are ignored;
-  (c) a fresh `messages` array starts with original task + `Context was compacted. Summary: …` + the harness's own `git status --short` / `git diff` (cut at 12,000 chars; omitted outside a git repo) + the paths the old conversation read + `Full history:
+  (c) a fresh `messages` array starts with original task (+ the fix-round message when the call resumed a conversation) + `Context was compacted. Summary: …` + the harness's own `git status --short` / `git diff` (cut at 12,000 chars; omitted outside a git repo) + the paths the old conversation read + `Full history:
   .polaris/history/1.md, … (search it with rg/read_file if a detail is missing)`. Event
   `compaction {n, tokens_before, summary_chars, history_path}`; the transcript renders a divider. Turn and token budgets
   span compactions (the summary turn counts).
@@ -141,9 +141,10 @@ can read or write it, and every change is a new version you can see in full on t
    edits a copy) or **Propose improvement**: a fresh no-tools call with the current prompt, the lessons and digests of the
    5 most recent failed runs (incl. eval runs), returning a full revised prompt (≤ 20,000 chars) + a one-paragraph
    rationale, stored as an inactive version. **Promotion rule:** a version can be promoted only if its latest finished eval
-   on the *current* case set (same case ids) beats the active version's latest finished eval on that same set: strictly
-   more cases passed, or as many with ≥ 10% fewer mean tokens. Otherwise Promote is disabled and the reason is shown (no
-   eval yet, active version has no eval on this set, not better). Changing the case set invalidates earlier evals for
+   on the *current* case set (same case ids) beats the active version's latest finished eval on that same set with the
+   same model: strictly more cases passed, or as many with ≥ 10% fewer mean tokens. An eval with a cancelled case never
+   counts. Otherwise Promote is disabled and the reason is shown (no eval yet, active version has no eval on this set
+   with that model, not better). Changing the case set invalidates earlier evals for
    promotion. **There is deliberately no auto-promotion:** eval sets are small and agent runs noisy, so a human reads the
    prompt and the scores before it affects every run.
 
