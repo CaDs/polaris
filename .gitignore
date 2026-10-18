@@ -1,8 +1,26 @@
+# dependencies and build output
 node_modules
 dist
+
+# local databases and run data (POLARIS_DATA_DIR defaults to ./data)
 *.db
 *.db-*
+data
+
+# secrets: only the example is committed
 .env
+.env.*
+!.env.example
+
+# test output
 test-results
 playwright-report
-data
+
+# Polaris's scratch folders when it works on this repo (.polaris/skills stays tracked)
+.polaris/outputs/
+.polaris/history/
+.polaris/wiki/
+
+# OS and editor files, logs
+.DS_Store
+*.log
