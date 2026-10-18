@@ -62,6 +62,14 @@ test("a gate that still fails after the fix round fails the attempt; attempt 2 s
   assert.match(events(a2.id, "run_started")[0].task, /Previous attempt failed: `test -f ok\.txt` exited with code 1/);
 });
 
+test("a fix round that runs out of turns falls back to a fresh attempt 2, like any gate failure", async () => {
+  const t = await ticketRun("GATE-FIX-STALL change");
+  assert.ok(t.runs.length >= 2, "attempt 2 was queued");
+  const a1 = t.runs[0];
+  assert.equal(events(a1.id, "gate_fix").length, 1);
+  assert.match(events(a1.id, "run_finished")[0].reason, /exited with code 1; the fix round ended: turn budget exhausted/);
+});
+
 test("flaky: a failure that passes on an immediate re-run passes the gate, flagged, with no fix round", async () => {
   const m = marker();
   await settings({ test_command: "test -f notes.txt" });

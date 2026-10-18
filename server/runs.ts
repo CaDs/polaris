@@ -508,9 +508,13 @@ async function execute(runId: string) {
         a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
         addUsage(a.usage);
         turns += a.turns;
-        ({ status, reason } = a);
         reply = finalText(a.messages);
-        if (status !== "passed") return false;
+        // A fix round that ends without finishing (budget, provider) falls back to the fresh retry a gate failure always got.
+        if (a.status !== "passed") {
+          [status, reason, gateOutput] = [a.status, `${why}; the fix round ended: ${a.reason}`, result.output];
+          retry = a.status === "failed" && run.attempt < MAX_ATTEMPTS;
+          return false;
+        }
         ({ result, test } = await check());
       }
       if (!result.passed) {
