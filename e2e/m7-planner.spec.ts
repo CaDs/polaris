@@ -91,7 +91,8 @@ test("M7: epic → planner round → children with a dependency → approvals dr
   expect(git(repo, "show", "main:a.txt")).toBe("a");
   expect(git(repo, "show", "main:b.txt")).toBe("b");
   expect(git(repo, "for-each-ref", "refs/heads/harness")).toBe("");
-  expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
+  // The last approval's wiki ingest (M10) holds a checkout of its own until it finishes.
+  await expect.poll(() => git(repo, "worktree", "list").split("\n").length, { timeout: 30_000 }).toBe(1);
 });
 
 test("M7: with auto-approve on, an epic runs to review without child approvals", async ({ page }) => {
