@@ -137,7 +137,7 @@ test("queue: FIFO, at most HARNESS_CONCURRENCY running, queued runs can be cance
   let max = 0;
   const sample = setInterval(() => {
     max = Math.max(max, (db.prepare("SELECT COUNT(*) AS n FROM runs WHERE status = 'running'").get() as { n: number }).n);
-  }, 5);
+  }, 5).unref(); // a failed assertion must not keep the process alive (it hung the suite)
   const runs: any[] = [];
   for (const t of ts) runs.push((await call("POST", `/api/tickets/${t.id}/runs`, carol)).body);
   const status = (id: string) => (call("GET", `/api/runs/${id}`, carol)).then((r) => r.body.status);

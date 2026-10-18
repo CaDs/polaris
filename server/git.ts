@@ -34,7 +34,10 @@ export async function inspectRepo(repoPath: string, baseBranch: string): Promise
   const top = await git(repoPath, ["rev-parse", "--show-toplevel"]).catch(() => "");
   if (!top) return { error: `${repoPath} is not a git repository (or does not exist)` };
   if (realpathSync(top) !== realpathSync(repoPath)) return { error: `${repoPath} is inside a git repository; use its root ${top}` };
-  if (!(await git(repoPath, ["rev-list", "-n1", "--all"]).catch(() => ""))) return { error: "Repository has no commits yet" };
+  // Not `rev-list --all`: it also reads every linked worktree's HEAD and fails while a run's `git worktree add` is half done
+  // (~13% of checks under concurrent runs), so a run queued then got "no commits yet".
+  const commit = (await git(repoPath, ["rev-list", "-n1", "--branches", "--tags", "--remotes"]).catch(() => "")) || (await git(repoPath, ["rev-parse", "--verify", "-q", "HEAD"]).catch(() => ""));
+  if (!commit) return { error: "Repository has no commits yet" };
   const base = baseBranch || (await git(repoPath, ["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => ""));
   if (!base) return { error: "HEAD is detached; set a base branch" };
   if (!(await git(repoPath, ["rev-parse", "--verify", "-q", `refs/heads/${base}^{commit}`]).catch(() => ""))) return { error: `Branch "${base}" does not exist` };
