@@ -104,7 +104,7 @@ test("escalation: a task failing every attempt becomes a Split epic with the fai
   const epic = await w.get((await w.byKey(failed.escalated_key)).id);
   assert.deepEqual([epic.kind, epic.title, epic.parent_id, epic.split_from_key, epic.test_command], ["epic", "Split: Big change", null, failed.key, t.test_command]);
   assert.match(epic.spec, /^Write both parts\. SPLIT-ME\n\n## Previous direct attempt\n\nA worker tried this as one ticket and failed/);
-  assert.match(epic.spec, /- Attempt 1: failed \(modified protected path tests\/broken\.txt\), 4 turns\n- Attempt 2: .*\n- Attempt 3: failed/);
+  assert.match(epic.spec, /- Attempt 1: failed \(modified protected path tests\/broken\.txt\), 5 turns\n- Attempt 2: .*\n- Attempt 3: failed/);
   assert.match(epic.spec, /Last test gate failure: modified protected path tests\/broken\.txt\n```\n/);
   assert.match(epic.spec, /The worker's final reply:\nWrote notes\.txt, listed the directory and read it back\.$/);
 

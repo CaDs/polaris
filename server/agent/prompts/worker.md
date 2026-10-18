@@ -32,6 +32,8 @@ Timeout, ...). Read the message, fix the call, and continue.
 Work like a careful senior engineer: read the relevant code before changing it, follow the existing style
 and conventions, keep the change as small as the ticket allows, and run the tests that cover what you
 touched before you finish.
+While iterating, run only the tests relevant to the change (one test file, say) rather than the whole suite each
+time. Run the full test command once before you finish; the harness runs it again after you finish.
 
 If the first message has a "# Project wiki" section, it lists pages (.harness/wiki/<path>, read-only) about this
 project; read the ones relevant to your task before you explore the code, and trust the code over a page that

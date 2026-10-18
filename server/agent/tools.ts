@@ -58,16 +58,18 @@ export function resolveIn(root: string, p: string) {
   return real;
 }
 
+const badInput = (message: string) => Object.assign(new AgentError("InvalidArguments", message), { badInput: true });
+
 function str(input: Record<string, unknown>, key: string, optional = false) {
   const v = input[key];
   if (v === undefined && optional) return undefined;
-  if (typeof v !== "string") throw new AgentError("InvalidArguments", `"${key}" must be a string`);
+  if (typeof v !== "string") throw badInput(`"${key}" must be a string`);
   return v;
 }
 
 function num(input: Record<string, unknown>, key: string, fallback: number) {
   const v = input[key] ?? fallback;
-  if (typeof v !== "number" || !(v >= 0)) throw new AgentError("InvalidArguments", `"${key}" must be a non-negative number`);
+  if (typeof v !== "number" || !(v >= 0)) throw badInput(`"${key}" must be a non-negative number`);
   return v;
 }
 
@@ -361,6 +363,12 @@ export const wikiTools: Tool[] = [readFile, editFile, search];
 export const toolsFor = (kind?: string): Tool[] => (kind === "openai" ? [readFile, applyPatch, shell, search] : tools);
 
 // Never throws: every failure becomes an is_error result the model can read.
+// {command: string, timeout?: integer}, from the tool's input_schema.
+const expectedInput = (def: ToolDef) => {
+  const s = def.input_schema as { properties?: Record<string, { type?: string }>; required?: string[] };
+  return `{${Object.entries(s.properties ?? {}).map(([k, v]) => `${k}${s.required?.includes(k) ? "" : "?"}: ${v.type ?? "any"}`).join(", ")}}`;
+};
+
 export async function runTool(all: Tool[], call: ToolUseBlock, ctx: ToolContext): Promise<{ content: string; is_error: boolean; kind?: ErrorKind }> {
   const tool = all.find((t) => t.def.name === call.name);
   try {
@@ -371,6 +379,6 @@ export async function runTool(all: Tool[], call: ToolUseBlock, ctx: ToolContext)
   } catch (e) {
     // fs errors (EISDIR, EACCES, ...) are the environment's; anything else is a harness bug.
     const kind: ErrorKind = e instanceof AgentError ? e.kind : typeof (e as NodeJS.ErrnoException).code === "string" ? "UnexpectedEnvironment" : "Unknown";
-    return { content: `${kind}: ${(e as Error).message}`, is_error: true, kind };
+    return { content: `${kind}: ${(e as Error).message}${e instanceof AgentError && e.badInput && tool ? `\nExpected input: ${expectedInput(tool.def)}` : ""}`, is_error: true, kind };
   }
 }

@@ -15,6 +15,9 @@ import { fakeProvider } from "./fake.ts";
 // M8: requests with submit_review are the model reviewer (reviewScript): it looks at `git status --short`, approves, but a
 // ticket containing REVIEW-ONCE gets one round of changes until fixed.txt exists. A worker resumed with review findings
 // ("# Model review") writes fixed.txt (fixScript).
+// A worker resumed with a failed gate ("# Tests failed", the gate fix round) creates ok.txt when its ticket contains
+// GATE-FIX-ONCE (the first finish leaves a `test -f ok.txt` gate failing), else changes nothing: FAIL-GATE and a plain
+// failing gate still fail every attempt (gateFixScript).
 // M9: a ticket containing SPLIT-ME also writes tests/broken.txt (a protected path), so every attempt fails the gate and the
 // harness splits it; the "Split:" epic (its spec still says SPLIT-ME) plans part1.txt and part2.txt with their own test
 // commands. EPIC-GATE-FAIL plans only a.txt; the test sets a workspace test command that also needs fix.txt, so the epic
@@ -96,6 +99,14 @@ function fixScript() {
     [say("Fixing the review findings."), use("f1", "edit_file", { path: "fixed.txt", old_string: "", new_string: "fixed\n" })],
     [say("Created fixed.txt.")],
   ], { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
+}
+
+function gateFixScript(task: string) {
+  const once = task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-ONCE");
+  const usage = { input: 100, output: 20, cache_read: 10, cache_write: 0 };
+  if (!once) // changes nothing and repeats its earlier final reply, so a handoff still reads the same
+    return fakeProvider([(req) => [say(req.messages.findLast((m) => m.role === "assistant" && m.content.some((b) => b.type === "text") && !m.content.some((b) => b.type === "tool_use"))?.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n") ?? "Done.")]], usage).provider;
+  return fakeProvider([[say("Fixing the failing tests."), use("g1", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })], [say("Created ok.txt.")]], usage).provider;
 }
 
 // Creates the first *.txt file its ticket names and ends with a handoff. FAIL-GATE in the ticket: it also writes
@@ -225,7 +236,8 @@ export function demoProvider(task: string, delayMs = 400): Provider {
       const retry = task.includes("Previous attempt failed");
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
-      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript() : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
+      const gateFix = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Tests failed"));
+      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript() : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delayMs);
         req.signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { isProtected } from "./agent/tools.ts";
 
@@ -85,6 +85,20 @@ export async function changedPaths(worktree: string, baseSha: string) {
   const tracked = await git(worktree, ["diff", "--name-only", "--no-renames", "-z", baseSha]);
   const untracked = await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"]);
   return [...tracked.split("\0"), ...untracked.split("\0")].filter((f) => f && !isProtected(f, HARNESS_SCRATCH));
+}
+
+// Lines added + removed against base: tracked files by numstat (binary counts 0), new files by their line count.
+export async function changedLines(worktree: string, baseSha: string) {
+  const sum = (await git(worktree, ["diff", "--numstat", baseSha, "--", ".", ...scratchPathspec])).split("\n").reduce((n, l) => n + (Number(l.split("\t")[0]) || 0) + (Number(l.split("\t")[1]) || 0), 0);
+  const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, HARNESS_SCRATCH));
+  const count = (f: string) => {
+    try {
+      return readFileSync(join(worktree, f), "utf8").match(/\n/g)?.length ?? 0;
+    } catch {
+      return 0; // a symlink to a directory, an unreadable file
+    }
+  };
+  return fresh.reduce((n, f) => n + count(f), sum);
 }
 
 export const protectedChanges = async (worktree: string, baseSha: string, protectedPaths: string[]) =>

@@ -42,6 +42,7 @@ export class AgentError extends Error {
   // Provider adapters only: worth retrying if nothing was streamed yet (429/5xx/overloaded/network); retry-after in ms.
   retryable = false;
   retryAfterMs?: number;
+  badInput = false; // InvalidArguments about the shape of the tool's input (missing or mistyped field): runTool adds the expected input
   constructor(kind: ErrorKind, message: string) {
     super(message);
     this.kind = kind;
@@ -65,7 +66,10 @@ export type EventPayloads = {
   run_finished: { status: RunStatus; reason?: string; turns: number; usage: Usage };
   // M3 orchestration (server/runs.ts): sandbox setup, test gate, commit of a passing run, review decision.
   setup: { step: "worktree"; branch: string; base_sha: string } /* branch "" = detached (eval) */ | { step: "sandbox"; sandbox: string } | { step: "context"; window: number; source: string; compact_at: number } | { step: "skills"; skills: { name: string; description: string; path: string }[] } | { step: "command"; command: string; code: number | null; output: string };
-  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[] };
+  // flaky: the command failed, then passed on an immediate re-run (first_failure is the first run); the gate passed.
+  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[]; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
+  // The test gate failed and the worker's own conversation is resumed to fix it (reason: gateFailure).
+  gate_fix: { reason: string };
   commit: { sha: string; branch: string };
   review: { decision: "approved" | "rejected"; note?: string; merge_sha?: string };
   // M6: the series this run ended was reflected on (server/improve.ts). unchanged: the model returned the same lessons.
@@ -75,10 +79,10 @@ export type EventPayloads = {
   // M7: a planner round ended: finish_round notes, or the complete_epic summary (completed).
   round_finished: { round: number; notes: string; completed: boolean };
   // M8: the same model reviewed the change before a human sees it (server/review.ts). error: the reviewer failed; the run went on (fail-open).
-  model_review_started: { round: number };
+  model_review_started: { round: number; budget: number; lines: number }; // budget: the reviewer's turns, from the changed lines
   model_review: { round: number; verdict: "approve" | "request_changes" | "error"; findings: Finding[]; message?: string };
   // M9: complete_epic first ran this command on the base branch's head (sha); failed → complete_epic was refused.
-  epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string };
+  epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
   // M9: the triage model scored a new ticket's size (0 trivial … 4 epic); split = it became a "Split:" epic. error: ran directly.
   triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; error?: string };
   // M10: a wiki maintainer run ended: the wiki commit it made, nothing to commit (unchanged), or the mechanical problems that rejected it.

@@ -10,7 +10,7 @@ import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, tools, toolsFor, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
@@ -33,7 +33,10 @@ const TICKET_STATUS: Record<RunStatus, string> = { passed: "review", failed: "fa
 const MAX_ATTEMPTS = 3; // gate failures retry automatically, with the failure fed back, up to this attempt
 const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
 const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 };
-const REVIEW_BUDGET = { maxTurns: 25, maxTokens: BUDGET.maxTokens };
+const GATE_FIX_ROUNDS = 1; // per attempt: a failed gate resumes the worker's own conversation this many times before the attempt fails
+// A reviewer reads the whole change and a few callers: its turns grow with the changed lines (it once used 25 on a 10-line diff).
+const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
+const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
 
 export type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
@@ -81,6 +84,14 @@ const tail = (r: ExecResult, n = 4000) => {
   return s.length > n ? `[...]\n${s.slice(-n)}` : s;
 };
 
+// A failing test command (non-zero exit or timeout) is run once more at once: passing then means a flake, not a failure.
+// again is only called after a failure; the second result is the failure when it fails too.
+async function rerunFlaky(first: ExecResult, again: () => Promise<ExecResult>) {
+  if (first.code === 0) return { r: first };
+  const second = await again();
+  return second.code === 0 ? { r: second, flaky: true as const, first_failure: { code: first.code, timed_out: first.timedOut, output: tail(first) } } : { r: second };
+}
+
 // A run compacts its conversation once the context passes min(70% of the provider's window, the workspace cap).
 // HARNESS_COMPACT_AT overrides it (tests).
 export function compactThreshold(capTokens: number | undefined, window: number) {
@@ -106,7 +117,7 @@ function taskFor(t: { title: string; spec: string }, info: { sandbox: string; re
     [
       "# Environment",
       `- Sandbox: ${info.sandbox || "unknown"}; your working directory is the repository root`,
-      `- Repository: ${info.repo}, branched from ${info.base}`,
+      `- Repository: ${info.repo}, branched from ${info.base}. It is at /work in the sandbox, which is also every shell command's working directory; tool paths are relative to it (absolute /work/... is accepted too)`,
       ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
     ].join("\n"),
   ];
@@ -304,8 +315,8 @@ async function epicGate(s: Settings, command: string, log: ReturnType<typeof eve
     const setup = s.setup_command.trim() ? await sh(s.setup_command) : undefined;
     const broken = setup && setup.code !== 0; // a failing setup command fails the gate
     const ran = broken ? s.setup_command : command;
-    const r = broken ? setup : await sh(command);
-    log({ type: "epic_gate", payload: { passed: r.code === 0, command: ran, code: r.code, timed_out: r.timedOut, output: tail(r), sha } });
+    const { r, ...flake } = broken ? { r: setup } : await rerunFlaky(await sh(command), () => sh(command));
+    log({ type: "epic_gate", payload: { passed: r.code === 0, command: ran, code: r.code, timed_out: r.timedOut, output: tail(r), sha, ...flake } });
     if (r.code === 0) return;
     return `The epic gate failed: \`${ran}\` ${r.timedOut ? "timed out" : `exited with code ${r.code}`} on ${s.base_branch} at ${sha.slice(0, 8)}. Output (tail):\n\`\`\`\n${tail(r, 2000)}\n\`\`\``;
   } finally {
@@ -464,19 +475,44 @@ async function execute(runId: string) {
     };
     const providerFor = (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task));
     const addUsage = (u: Usage) => (Object.keys(u) as (keyof Usage)[]).forEach((k) => (usage[k] += u[k]));
-    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left)." });
+    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
     ({ usage, turns, status, reason } = a);
     reply = finalText(a.messages);
     if (status !== "passed") return;
 
-    // Returns whether the gate passed; on failure the attempt is over (and retried).
-    const gate = async () => {
-      const test = testCommand.trim() ? await sh(testCommand) : { stdout: "", stderr: "", code: 0, timedOut: false };
+    // Runs the tests and the protected-path check, logging test_result. A failure that is not a protected-path change is
+    // re-run once at once (flaky).
+    const check = async () => {
+      const run = () => (testCommand.trim() ? sh(testCommand) : Promise.resolve({ stdout: "", stderr: "", code: 0, timedOut: false }));
+      const first = await run();
       abortCheck();
       // git can't see .harness/wiki (excluded), so its snapshot is compared directly.
       const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
-      const result = { passed: test.code === 0 && !touched.length, command: testCommand, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched };
+      const { r: test, ...flake } = touched.length ? { r: first } : await rerunFlaky(first, run);
+      abortCheck();
+      const result = { passed: test.code === 0 && !touched.length, command: testCommand, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched, ...flake };
       log({ type: "test_result", payload: result });
+      return { result, test };
+    };
+    // Returns whether the gate passed. A failure resumes the worker's own conversation once per attempt (GATE_FIX_ROUNDS,
+    // counted across the review's fix rounds too; not for eval cases, which measure the unassisted worker) and re-checks; a
+    // gate that still fails ends the attempt (and retries it).
+    let gateFixes = 0;
+    const gate = async () => {
+      let { result, test } = await check();
+      if (!result.passed && !ev && gateFixes < GATE_FIX_ROUNDS) {
+        gateFixes++;
+        const why = gateFailure(result);
+        log({ type: "gate_fix", payload: { reason: why } });
+        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
+        a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
+        addUsage(a.usage);
+        turns += a.turns;
+        ({ status, reason } = a);
+        reply = finalText(a.messages);
+        if (status !== "passed") return false;
+        ({ result, test } = await check());
+      }
       if (!result.passed) {
         status = "failed";
         reason = gateFailure(result);
@@ -492,9 +528,11 @@ async function execute(runId: string) {
     for (let round = 1; !ev && s!.model_review; round++) {
       const out: { review?: Review } = {};
       const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
-      log({ type: "model_review_started", payload: { round } });
+      const lines = await changedLines(worktree, base_sha);
+      const budget = reviewBudget(lines);
+      log({ type: "model_review_started", payload: { round, budget: budget.maxTurns, lines } });
       const before = await snapshot(worktree);
-      const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget: REVIEW_BUDGET, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
+      const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
       addUsage(r.usage);
       abortCheck();
       if ((await snapshot(worktree)) !== before) {
@@ -511,7 +549,7 @@ async function execute(runId: string) {
         return;
       }
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left)." });
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: BUDGET, finishHint: WORKER_FINISH });
       addUsage(a.usage);
       turns += a.turns;
       ({ status, reason } = a);
