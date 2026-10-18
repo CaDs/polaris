@@ -80,3 +80,11 @@
 - [x] Approve queues a serialized wiki ingest (role `wiki`: read-only code checkout + wiki clone, `edit_file` only in the wiki); mechanical lint with fix rounds before the commit
 - [x] Build wiki (bootstrap), Refresh stale pages (LLM lint), Lint button; human page edits as commits
 - [x] Wiki page: index with stale flags, viewer/editor, history with diffs, maintainer runs; `## Wiki notes` asked of workers; demo maintainer
+
+## M11: tracker (Linear-style)
+- [x] Labels (palette, case-insensitive unique), priority, assignee, estimate, due date on tickets; workspace-scoped validation (migration 012)
+- [x] Projects with ordered milestones and progress; cycles (no overlap, current/upcoming/past, scope change, move unfinished)
+- [x] Filters, FTS5 search with key jump, sorts on `GET /api/tickets`; saved views (personal or shared)
+- [x] Parent epic set by hand within the planner's rules
+- [x] UI: filter bar with URL state, list layout with grouping, properties sidebar + shortcuts, command palette, Projects/Cycles/Views pages, labels in Settings
+- [x] Agents: tracker header in worker/planner first messages; queue by priority; planner `create_ticket` labels/priority/estimate, children inherit project/milestone/cycle

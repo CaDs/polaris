@@ -324,6 +324,67 @@ bootstrap (existing pages stay readable in the UI).
   worker writing the wiki directly (only approved, linted, serialized changes land); LLM lint on a schedule (a button);
   multi-file human edits (a new page has to be linked from the index in the same commit, so humans edit existing pages).
 
+## Tracker (M11)
+
+The board is a Linear-style issue tracker whose workers are agents. Migration 012, server in `server/tracker.ts` (routes
+under `/api`, all workspace-scoped: every id a body or a filter names is looked up in the caller's workspace, a foreign id
+is a 400 in a body and matches nothing in a filter).
+
+- **Data model.** `labels {name 1–40 chars, unique per workspace case-insensitively (Unicode, plus a NOCASE index), color
+  from a fixed palette}` ↔ tickets via `ticket_labels`. On tickets: `priority` (Linear's numbers: 0 none, 1 urgent, 2 high,
+  3 medium, 4 low), `assignee_id` (a workspace member: the human who owns the outcome and the review; agents run either
+  way), `estimate` (1, 2, 3, 5, 8 points), `due_date`, `project_id`, `milestone_id` (a milestone of that project; moving
+  the ticket to another project clears it), `cycle_id` and `cycle_added_at`. `projects {name, description, status
+  planned|started|paused|completed|canceled, lead (member), target_date}` with ordered `milestones {name, target_date,
+  position}`. `cycles {number (per workspace), name?, starts_at, ends_at}`: calendar days (UTC), both ends included, never
+  overlapping within a workspace; current / upcoming / past come from the dates. `views {name, filters (the query params),
+  sort, layout board|list, shared}`: a personal view is seen only by its owner, a shared one by the workspace; only the
+  owner changes or deletes it. Deleting a label/project/milestone/cycle unsets it on its tickets. Dates are `YYYY-MM-DD`.
+- **Ticket JSON** adds `priority, estimate, due_date, labels [{id, name, color}], project {id, name}, milestone {id, name},
+  cycle {id, number, name}, assignee {id, name, email}`; `POST/PATCH /api/tickets` take `priority, estimate, due_date,
+  assignee_id, project_id, milestone_id, cycle_id, label_ids` (null clears) with 400s naming the field.
+- **Parent epic by hand** (`parent_id`): only a todo task without runs moves (the planner owns everything else), into an
+  epic that is todo or running and has fewer than `MAX_CHILDREN` children; never out of an epic when a sibling depends on
+  it, or when it is the last open child of a running epic (its planner would wait forever). Moving clears `depends_on`
+  (sibling ids).
+- **Filters** on `GET /api/tickets` (AND across fields, OR within one, comma-separated): `status`, `label` + `label_mode`
+  any|all, `priority`, `assignee` (ids, `me`, `none`), `project`, `milestone`, `cycle` (ids, `current`, `none`), `kind`,
+  `parent` (id, `none`), `due_before` / `due_after` (inclusive). Unknown params are ignored (the UI keeps `layout` and
+  `group` in the same query); bad values are a 400. **Sort**: `manual` (number; the default), `priority` (urgent → low, none
+  last), `updated`, `created`, `due` (undated last).
+- **Search** `q`: SQLite FTS5 (`tickets_fts`, external content kept by triggers, `unicode61 remove_diacritics`) over title
+  + spec, every word prefix-matched and quoted (no FTS syntax gets through), ranked by bm25 with title weighted 10:1;
+  `ABC-12` (this workspace's prefix) or a bare number also matches that ticket and ranks it first. An explicit sort
+  replaces relevance.
+- **Projects / cycles API.** `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:id` (with lead, milestones and
+  progress = total, done, points, by status), `POST /api/projects/:id/milestones`, `PUT …/milestones/order {ids}`,
+  `PATCH/DELETE /api/milestones/:id`; `GET/POST /api/cycles`, `GET/PATCH/DELETE /api/cycles/:id` (`current` works as an
+  id), each with state, progress and `added_after_start` (scope change: tickets that entered after it started);
+  `POST /api/cycles/:id/move-unfinished` moves every ticket that is not done to the next cycle (the first starting after
+  this one ends; none → 400). `GET /api/tracker` returns what the pickers need in one request (me, members, labels,
+  projects with milestones, cycles); `GET /api/members`; `GET/POST/PATCH/DELETE /api/labels`, `/api/views`.
+- **UI.** Board and **List** layouts share a filter bar: search (`/` focuses it; Enter on a key opens the ticket), a chip
+  per active filter (click to edit, × to remove, labels toggle any/all), **+ Filter** menu, Clear, sort, layout, group
+  (list: status, priority, project, assignee, cycle, label), **Save view**. All of it lives in the URL query, so a view is
+  a bookmarkable link, and back/forward step through filter changes (typing in search replaces the entry instead).
+  Cards and dense list rows show priority, labels, due date, assignee (initials); rows also key, status, parent epic,
+  project, cycle. The ticket page has a **properties sidebar** (status, priority, assignee, labels with "create label",
+  project, milestone, cycle, estimate, due date, parent epic) with shortcuts `s` `p` `a` `l`; run controls and transcript
+  are unchanged. **Command palette** (Cmd/Ctrl+K): tickets by key prefix or title, Create ticket, Go to pages. Pages:
+  Projects (list + project page with progress, milestones, tickets), Cycles (current/upcoming/past + cycle page with
+  progress, scope change, Move unfinished), Current cycle shortcut, Views; labels are managed in Settings. New ticket
+  dialog takes every field (prefilled with the project or cycle whose page is open). Native selects and date inputs
+  only: keyboard-friendly, both themes, phone width.
+- **Agents.** The first user message of a worker (`# Task`) and of a planner round (`# Epic`) has a header line under the
+  title: `Priority: Urgent · Labels: bug, ui · Project: Core › v1 · Due: 2026-11-30` (only what is set; eval case runs keep
+  their frozen text). The run queue starts ticket work (worker and planner runs; not eval cases or wiki runs) by the
+  ticket's priority, urgent first, then FIFO; no priority comes after low. Planner `create_ticket` takes optional `labels`
+  (names, matched case-insensitively, unknown ones created), `priority` (default: the epic's) and `estimate`; children
+  inherit the epic's project, milestone and cycle.
+- **Not built, on purpose:** comments (separate work), custom workflow states (statuses are the harness's run states),
+  drag-and-drop ordering (manual order = ticket number), sub-issue trees beyond epics, notifications, project/cycle
+  history charts (progress is computed live), and per-viewer time zones for cycles (UTC calendar days).
+
 ## Guardrails
 
 - `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.harness/wiki` (M10).
