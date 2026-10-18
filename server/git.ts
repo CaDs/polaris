@@ -41,9 +41,9 @@ export async function inspectRepo(repoPath: string, baseBranch: string): Promise
   return { repo_path: repoPath, base_branch: base };
 }
 
-// The agent's scratch dirs (spilled tool outputs, compaction history) are never part of a change. .harness/skills/ is not
-// listed: skills are committed by humans.
-export const HARNESS_SCRATCH = [".harness/outputs", ".harness/history"];
+// The agent's scratch dirs (spilled tool outputs, compaction history, the read-only wiki snapshot) are never part of a
+// change. .harness/skills/ is not listed: skills are committed by humans.
+export const HARNESS_SCRATCH = [".harness/outputs", ".harness/history", ".harness/wiki"];
 export const scratchPathspec = HARNESS_SCRATCH.map((p) => `:(exclude)${p}`);
 
 // Adds them to the repo's shared info/exclude (read by every worktree), so status/add/ls-files skip them.

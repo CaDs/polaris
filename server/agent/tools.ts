@@ -355,6 +355,8 @@ export const tools: Tool[] = [readFile, editFile, shell, search];
 export const readOnlyTools: Tool[] = [readFile, search];
 // Model review (M8): reads and runs commands (git diff, tests), never edits.
 export const reviewTools: Tool[] = [readFile, search, shell];
+// Wiki maintainer (M10): reads the code, edits only the wiki copy (the caller protects the code checkout).
+export const wikiTools: Tool[] = [readFile, editFile, search];
 // Edit tool per model family: GPT models are trained on apply_patch, everything else gets str_replace.
 export const toolsFor = (kind?: string): Tool[] => (kind === "openai" ? [readFile, applyPatch, shell, search] : tools);
 

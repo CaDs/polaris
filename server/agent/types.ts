@@ -81,5 +81,7 @@ export type EventPayloads = {
   epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string };
   // M9: the triage model scored a new ticket's size (0 trivial … 4 epic); split = it became a "Split:" epic. error: ran directly.
   triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; error?: string };
+  // M10: a wiki maintainer run ended: the wiki commit it made, nothing to commit (unchanged), or the mechanical problems that rejected it.
+  wiki: { op: "ingest" | "bootstrap" | "lint"; commit?: string; unchanged?: boolean; problems?: string[] };
 };
 export type AgentEvent = { [K in keyof EventPayloads]: { type: K; payload: EventPayloads[K] } }[keyof EventPayloads];
