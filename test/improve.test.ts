@@ -236,7 +236,7 @@ test("eval run: every case in a fresh worktree at base_sha; the ticket is untouc
 
   const ev = events(res.id);
   assert.deepEqual(ev[0].p, { step: "worktree", branch: "", base_sha: baseSha });
-  assert.ok(!ev.some((e) => ["commit", "reflection"].includes(e.type)));
+  assert.ok(!ev.some((e) => ["commit", "reflection", "gate_fix"].includes(e.type)));
   assert.equal(ev.find((e) => e.type === "test_result")!.p.passed, false);
   const task = ev.find((e) => e.type === "run_started")!.p.task;
   assert.match(task, /branched from [0-9a-f]{8}\.[^\n]*\n[\s\S]*# Lessons from earlier runs\n\n- ALI-1 make ok: passed[\s\S]*# Task\n\n# make ok\n\ncreate ok.txt$/);

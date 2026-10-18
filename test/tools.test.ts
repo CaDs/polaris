@@ -79,3 +79,11 @@ test("edit_file refuses protected paths (also via symlinks), other paths still w
   assert.equal(existsSync(join(root, "tests/a.test.ts")), false);
   assert.equal((await edit("testsuite/ok.ts")).is_error, false);
 });
+
+test("a bad input shape says which input the tool expects; other InvalidArguments do not", async () => {
+  const r = await call("shell", { cmd: "ls" });
+  assert.equal(r.kind, "InvalidArguments");
+  assert.match(r.content, /"command" must be a string\nExpected input: \{command: string, timeout\?: number\}$/);
+  assert.doesNotMatch((await call("read_file", { path: "../x" })).content, /Expected input/);
+  assert.doesNotMatch((await call("read_file", { path: "no-such-file" })).content, /Expected input/);
+});
