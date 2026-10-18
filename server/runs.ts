@@ -383,7 +383,7 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
     if (run.provider_id && !stored) throw new Error("the run's provider was deleted");
     const provider = stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider("");
-    return await reflect({ workspaceId: ws, runId, digest: seriesDigest(runId, final, note), provider, model: run.model, signal });
+    return await reflect({ workspaceId: ws, runId, digest: seriesDigest(runId, final, note), tools: toolsFor(stored?.kind).map((t) => t.def.name), provider, model: run.model, signal });
   } catch (e) {
     return { error: `reflection failed: ${(e as Error).message}` };
   }

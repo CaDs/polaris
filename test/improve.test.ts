@@ -115,6 +115,10 @@ test("reflection: a separate no-tools conversation, capped, injected into the ne
   assert.equal(rq.system[0].text, REFLECT_SYSTEM);
   assert.match(rq.messages[0].content[0].text, /^<lessons>\n\(none yet\)\n<\/lessons>\n\n<digest>\nTicket: RIT-1 first ticket\nFinal status: passed after 1 attempt\n/);
 
+  // It sees the run's real tool names (the demo provider is a fake adapter: the default tool set) and is told to use only those.
+  assert.match(rq.messages[0].content[0].text, /<\/digest>\n\n<tools>\nread_file, edit_file, shell, search\n<\/tools>$/);
+  assert.match(REFLECT_SYSTEM, /Name tools exactly as listed there, and never mention a tool that is not listed/);
+
   const lessons = (await call("GET", "/api/lessons", w.cookie)).body;
   assert.equal(lessons.versions.length, 1);
   const v1 = lessons.versions[0];

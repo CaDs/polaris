@@ -114,6 +114,7 @@ Reply with the full updated lessons document and nothing else. Rules:
 - Short imperative bullets about THIS repository and THIS harness ("Run npm ci before the tests", "The sandbox has no network", "Read tests/ first"). No prose, no headings needed.
 - Merge new insights into the existing bullets, deduplicate, and remove bullets the digest shows to be wrong.
 - Keep only what will help future tickets; skip one-off details of this ticket.
+- The digest is followed by <tools>, the exact tool names the agent has. Name tools exactly as listed there, and never mention a tool that is not listed (do not invent tools or call a missing capability a missing tool).
 - Never include secrets, API keys, tokens, passwords or personal data.
 - Stay under ${LESSONS_MAX} characters (about 2,000 tokens): drop the least useful bullets to fit.
 - If nothing new was learned, return the current document unchanged.`;
@@ -153,10 +154,10 @@ async function ask(provider: Provider, model: string, system: string, text: stri
 const chains = new Map<string, Promise<unknown>>();
 
 // A fresh one-message conversation with no tools: current lessons + digest in, the full updated document out → new version.
-export function reflect(o: { workspaceId: string; runId: string; digest: string; provider: Provider; model: string; signal?: AbortSignal }): Promise<EventPayloads["reflection"]> {
+export function reflect(o: { workspaceId: string; runId: string; digest: string; tools?: string[]; provider: Provider; model: string; signal?: AbortSignal }): Promise<EventPayloads["reflection"]> {
   const job = (chains.get(o.workspaceId) ?? Promise.resolve()).then(async () => {
     const cur = currentLessons(o.workspaceId);
-    const r = await ask(o.provider, o.model, REFLECT_SYSTEM, `<lessons>\n${cur?.body || "(none yet)"}\n</lessons>\n\n<digest>\n${scrub(o.digest)}\n</digest>`, 4096, 120_000, o.signal);
+    const r = await ask(o.provider, o.model, REFLECT_SYSTEM, `<lessons>\n${cur?.body || "(none yet)"}\n</lessons>\n\n<digest>\n${scrub(o.digest)}\n</digest>${o.tools ? `\n\n<tools>\n${o.tools.join(", ")}\n</tools>` : ""}`, 4096, 120_000, o.signal);
     const body = capLessons(scrub(r.text.replace(/^```\w*\n([\s\S]*?)\n```$/, "$1")));
     if (!body) throw new Error("the model returned no lessons");
     if (cur?.body === body) return { lessons_id: cur.id, version: cur.version, chars: body.length, unchanged: true, usage: r.usage };
