@@ -261,3 +261,31 @@ test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error run
     srv.close();
   }
 });
+
+test("escalation: the Split epic copies the ticket's tracker fields; its children inherit them as the planner's do", async () => {
+  const w = await workspace("trk", { test_command: "test -f part1.txt && test -f part2.txt", auto_approve_children: true });
+  const ws = (db.prepare("SELECT id FROM organization WHERE slug = 'trk'").get() as { id: string }).id;
+  const me = (db.prepare("SELECT userId FROM member WHERE organizationId = ?").get(ws) as { userId: string }).userId;
+  db.prepare("INSERT INTO labels (id, workspace_id, name, color) VALUES ('l1', ?, 'bug', 'red'), ('l2', ?, 'ui', 'blue')").run(ws, ws);
+  db.prepare("INSERT INTO projects (id, workspace_id, name) VALUES ('p1', ?, 'Proj')").run(ws);
+  db.prepare("INSERT INTO milestones (id, project_id, name, position) VALUES ('m1', 'p1', 'Beta', 0)").run();
+  db.prepare("INSERT INTO cycles (id, workspace_id, number, starts_at, ends_at) VALUES ('c1', ?, 1, '2026-01-01', '2026-12-31')").run(ws);
+  const t = await w.create({ title: "Tracked", spec: "SPLIT-ME" });
+  db.prepare("INSERT INTO ticket_labels (ticket_id, label_id) VALUES (?, 'l1'), (?, 'l2')").run(t.id, t.id);
+  db.prepare("UPDATE tickets SET priority = 2, assignee_id = ?, estimate = 5, due_date = '2026-06-30', project_id = 'p1', milestone_id = 'm1', cycle_id = 'c1', cycle_added_at = 123 WHERE id = ?").run(me, t.id);
+  assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, w.cookie)).status, 201);
+  const failed = await until("escalated", async () => {
+    const x = await w.get(t.id);
+    return x.status === "failed" && x.escalated_key && x;
+  });
+  const epic = await w.get((await w.byKey(failed.escalated_key)).id);
+  const fields = (id: string): Record<string, any> => ({
+    ...(db.prepare("SELECT priority, assignee_id, estimate, due_date, project_id, milestone_id, cycle_id, cycle_added_at FROM tickets WHERE id = ?").get(id) as Record<string, unknown>),
+    labels: (db.prepare("SELECT label_id FROM ticket_labels WHERE ticket_id = ? ORDER BY label_id").all(id) as { label_id: string }[]).map((l) => l.label_id),
+  });
+  assert.deepEqual(fields(epic.id), { priority: 2, assignee_id: me, estimate: 5, due_date: "2026-06-30", project_id: "p1", milestone_id: "m1", cycle_id: "c1", cycle_added_at: 123, labels: ["l1", "l2"] });
+  const done = await w.is(epic.id, "review");
+  assert.equal(done.children.length, 2);
+  for (const k of done.children) assert.deepEqual([fields(k.id).project_id, fields(k.id).milestone_id, fields(k.id).cycle_id, fields(k.id).priority], ["p1", "m1", "c1", 2]);
+  await idle(ws);
+});

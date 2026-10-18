@@ -267,9 +267,12 @@ function canSplit(t: TicketRow) {
 // (the new epic is open in its place). Returns the epic's queued round, or why it could not be queued (it fails then).
 async function split(t: TicketRow, context: string, triaged?: EventPayloads["triage"]) {
   const id = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, provider_id, model, test_command) VALUES (?, ?, ?, 'epic', ?, ?, ?, ?, ?)").run(
-    id, t.workspace_id, t.parent_id, `Split: ${t.title}`, `${t.spec}\n\n${context}`.trim(), t.provider_id, t.model, t.test_command,
+  // The tracker fields come along (SELECT from the original), so the epic sits where the ticket did; its children inherit as the planner's do.
+  db.prepare(`INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, provider_id, model, test_command, priority, assignee_id, estimate, due_date, project_id, milestone_id, cycle_id, cycle_added_at)
+    SELECT ?, workspace_id, parent_id, 'epic', ?, ?, provider_id, model, test_command, priority, assignee_id, estimate, due_date, project_id, milestone_id, cycle_id, cycle_added_at FROM tickets WHERE id = ?`).run(
+    id, `Split: ${t.title}`, `${t.spec}\n\n${context}`.trim(), t.id,
   );
+  db.prepare("INSERT INTO ticket_labels (ticket_id, label_id) SELECT ?, label_id FROM ticket_labels WHERE ticket_id = ?").run(id, t.id);
   if (t.parent_id)
     for (const k of childrenOf(t.parent_id)) {
       const deps = JSON.parse(k.depends_on) as string[];
