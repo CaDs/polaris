@@ -10,7 +10,9 @@ builds its own remaining milestones (`tasks.md`).
 - **SQLite** via `node:sqlite`. Raw SQL, no ORM. Our migrations: `server/migrations/NNN_*.sql`, run once in order (`PRAGMA user_version`).
 - **Auth**: Better Auth (email/password) + organization plugin. **Workspace = organization.**
 - **Dashboard**: React + Vite in `web/`, live updates over SSE.
-- **Sandbox**: one Docker container per run, worktree mounted at `/work`; every shell tool call is a `docker exec`.
+- **Sandbox**: one Docker container per run, worktree mounted at `/work`; every shell tool call is a `docker exec`. The repo's git dir is
+  mounted read-only at its host path, so `git status`/`diff`/`log` work inside but commits and ref changes do not (the harness
+  commits on the host).
 
 ## Core abstractions (do not bypass)
 

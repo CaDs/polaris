@@ -100,3 +100,16 @@
 - [x] Fair worker budget: `max_turns` (10..500, 120) and `max_minutes` (5..600, 60) workspace settings; attempt-wide wall-clock `budget.deadline` in the loop (`time budget exhausted`), finishHint on 2 turns left or low time; evals use the frozen defaults
 - [x] Reflection gets the run's real tool names and must not invent tools
 - [x] `Split:` epics copy the original's tracker fields (labels, priority, assignee, estimate, due date, project, milestone, cycle)
+
+## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
+- [ ] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
+- [ ] Benchmark in the repo: the complexity ladder (tickets, locked tests, answer keys, runner) with 3 runs per level and a held-out set
+- [ ] Measure automatic splitting on levels a real model fails at the fair budget
+- [ ] Failure mining: per-run metrics (tool errors, repeated reads, budget use), failure classes, draft improvement tickets
+- [ ] Stuck monitor: a decision model checks every few turns whether the agent is stuck; nudge, then end the attempt
+- [ ] Separate reviewer model per workspace
+- [ ] Spending caps per epic and per workspace
+- [ ] Sandbox containers run as a non-root user
+- [ ] A planner round that crashes is restarted
+- [ ] Ticket comments and notifications
+- [ ] Candidate-harness pipeline: benchmark a proposed harness change against the stable one; human promotion with rollback
