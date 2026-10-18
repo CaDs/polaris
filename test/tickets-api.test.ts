@@ -157,3 +157,14 @@ test("startup recovery fails orphaned runs and their tickets", async () => {
   assert.match(ev[0].payload, /interrupted by server restart/);
   assert.equal(recoverOrphans(), 0);
 });
+
+test("settings accept only a plain docker image reference (it is an argument of docker run)", async () => {
+  const dan = await userWithWorkspace("dan");
+  for (const image of ["--privileged", "-v/:/host", "ubuntu --privileged", "Ubuntu", "a;b", "x:y:z", "img@sha256:abc"]) {
+    const r = await json("PUT", "/api/settings", dan, { repo_path: repo, image });
+    assert.equal(r.status, 400, image);
+    assert.match(r.body.error, /image/i, image);
+  }
+  for (const image of ["polaris-sandbox:1", "node:22-bookworm", "ghcr.io/org/img:v1.2", `localhost:5000/team/img@sha256:${"a".repeat(64)}`])
+    assert.equal((await json("PUT", "/api/settings", dan, { repo_path: repo, image })).body.image, image);
+});

@@ -16,10 +16,17 @@ const env = {
   GIT_COMMITTER_EMAIL: "polaris@localhost",
 };
 
+// Worktree path → its git dir, read right after `worktree add` (before any agent ran). git() passes it explicitly instead of
+// discovering it: the worktree's .git file is writable from the sandbox shell, and pointed at a repo the agent wrote, that
+// repo's config (core.fsmonitor, aliases, ...) would run commands on the host.
+// ponytail: in memory; a restart fails every running run (recoverOrphans), so no worktree outlives it.
+const gitDirs = new Map<string, string>();
+
 export async function git(cwd: string, args: string[]) {
+  const dir = gitDirs.get(cwd);
   try {
-    // Hooks off: a hooksPath inside the work tree (husky etc.) is agent-writable and would run on the host.
-    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-C", cwd, ...args], { env, maxBuffer: 50e6 });
+    // Hooks and fsmonitor off: a hooksPath inside the work tree (husky etc.) is agent-writable and would run on the host.
+    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-C", cwd, ...(dir ? [`--git-dir=${dir}`, `--work-tree=${cwd}`] : []), ...args], { env, maxBuffer: 50e6 });
     return stdout.trimEnd();
   } catch (e) {
     const err = e as Error & { stderr?: string };
@@ -63,6 +70,7 @@ export async function excludeScratch(repo: string) {
 export async function addWorktree(repo: string, baseBranch: string, path: string, branch: string) {
   const sha = await git(repo, ["rev-parse", "--verify", `refs/heads/${baseBranch}^{commit}`]);
   await git(repo, ["worktree", "add", "-q", "-b", branch, path, sha]);
+  gitDirs.set(path, await git(path, ["rev-parse", "--absolute-git-dir"]));
   await excludeScratch(repo);
   return sha;
 }
@@ -70,16 +78,19 @@ export async function addWorktree(repo: string, baseBranch: string, path: string
 // Detached checkout of `sha` at `path`, no branch (eval cases: nothing is committed).
 export async function addDetached(repo: string, sha: string, path: string) {
   await git(repo, ["worktree", "add", "-q", "--detach", path, sha]);
+  gitDirs.set(path, await git(path, ["rev-parse", "--absolute-git-dir"]));
   await excludeScratch(repo);
 }
 
 // Best effort: a half-created or already-removed worktree/branch is fine. `dataRoot` guards the rm fallback.
 export async function removeWorktree(repo: string, path: string | null, branch: string | null, dataRoot: string) {
-  if (path)
+  if (path) {
+    gitDirs.delete(path);
     await git(repo, ["worktree", "remove", "--force", path]).catch(async () => {
       if (path.startsWith(dataRoot)) rmSync(path, { recursive: true, force: true });
       await git(repo, ["worktree", "prune"]).catch(() => {});
     });
+  }
   if (branch) await git(repo, ["branch", "-D", branch]).catch(() => {});
 }
 

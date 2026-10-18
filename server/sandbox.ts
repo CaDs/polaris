@@ -5,12 +5,15 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { capture, hostExec, type Exec } from "./agent/tools.ts";
+import { git } from "./git.ts";
 
 // One Docker container per run: the worktree is bind-mounted at /work, protected paths are re-mounted read-only on
 // top, and every shell command (tool calls, setup, tests) is a `docker exec`. POLARIS_SANDBOX=host runs commands on
 // the host instead (unit tests only: no isolation at all).
 const execFileP = promisify(execFile);
 export const SANDBOX_IMAGE = "polaris-sandbox:1";
+// A docker image reference ([host[:port]/]path[:tag][@sha256:digest]), so a setting can't smuggle `docker run` flags.
+export const IMAGE_REF = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d+)?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?$/;
 export const dataDir = () => resolve(process.env.POLARIS_DATA_DIR ?? "data");
 const dockerDir = fileURLToPath(new URL("../docker/", import.meta.url));
 
@@ -47,12 +50,14 @@ export function dockerExec(name: string): Exec {
 
 export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string): Promise<Sandbox> {
   if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
+  if (!IMAGE_REF.test(image)) throw new Error(`not a docker image reference: ${image}`); // rows saved before the settings check
   await ensureImage(image);
   const name = `polaris-${runId}`;
-  const ro = protectedPaths.filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+  // .git too: the host's git must not be pointed elsewhere (git.ts also never reads it for worktrees it created).
+  const ro = [...protectedPaths, ".git"].filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
   // A worktree's .git file points at the repo's git dir by its host path: mount that read-only at the same path so
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
-  const gitDir = await execFileP("git", ["-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"]).then((r) => r.stdout.trim(), () => "");
+  const gitDir = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => "");
   if (gitDir) ro.push("-v", `${gitDir}:${gitDir}:ro`);
   // ponytail: runs as root; on Linux hosts files it creates in the worktree are root-owned. Add --user when that bites.
   await execFileP("docker", [

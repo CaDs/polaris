@@ -9,7 +9,7 @@ import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
 import { withStates } from "./planner.ts";
-import { SANDBOX_IMAGE } from "./sandbox.ts";
+import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
 import { applyTracker, hydrate, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
@@ -257,6 +257,7 @@ app.put("/api/settings", async (c) => {
     v[k] = b[k].trim();
   }
   if (!v.image) v.image = SANDBOX_IMAGE;
+  if (!IMAGE_REF.test(v.image)) return c.json({ error: "Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag" }, 400);
   // Cap on the context size at which a run compacts (also limited to 70% of the provider's window). Form posts send a string.
   const compact = b.compact_at_tokens === undefined || b.compact_at_tokens === "" ? 150000 : Number(b.compact_at_tokens);
   if (!Number.isInteger(compact) || compact < 1000 || compact > 100_000_000) return c.json({ error: "Compact at must be a whole number of tokens (1000 to 100000000)" }, 400);

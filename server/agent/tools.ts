@@ -1,6 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { AgentError, type ErrorKind, type ToolDef, type ToolUseBlock } from "./types.ts";
 
 // Shell execution is injected so M3 can swap the host for `docker exec` without touching the tools.
@@ -27,15 +28,30 @@ export function truncate(s: string, max = MAX_OUTPUT) {
 export function spill(ctx: ToolContext, text: string) {
   if (text.length <= SPILL_AT) return text;
   const rel = `.polaris/outputs/${ctx.turn ?? 0}-${ctx.tool ?? "tool"}-${(ctx.callId ?? "x").replace(/[^\w.-]/g, "_")}.txt`;
-  mkdirSync(join(ctx.root, ".polaris/outputs"), { recursive: true });
-  writeFileSync(join(ctx.root, rel), text);
+  writeScratch(ctx.root, rel, text);
   const lines = text.split("\n").length;
   return `[Output too long: saved to ${rel}]\nTotal: ${text.length} chars, ${lines} lines. Last ${SPILL_TAIL} chars:\n${text.slice(-SPILL_TAIL)}\n[Use read_file with offset/limit on ${rel}, or rg/tail via shell, to see the rest.]`;
 }
 
-// Resolves a model-supplied path to a real path inside root, following symlinks. Security boundary.
+// Harness writes into the run root (spilled outputs, history): the agent may have planted symlinks there, so the dir must
+// resolve inside root and the file is opened without following one.
+// ponytail: check, then open; a dir swapped in between (by a process still running in the sandbox) wins. openat if that matters.
+export function writeScratch(root: string, rel: string, text: string, append = false) {
+  const dir = resolveIn(root, dirname(rel));
+  mkdirSync(dir, { recursive: true });
+  const { O_WRONLY, O_CREAT, O_NOFOLLOW, O_APPEND, O_TRUNC } = constants;
+  const fd = openSync(join(dir, basename(rel)), O_WRONLY | O_CREAT | O_NOFOLLOW | (append ? O_APPEND : O_TRUNC), 0o644);
+  try {
+    writeFileSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Resolves a model-supplied path to a real path inside root, following symlinks. Security boundary. .native: the on-disk
+// case of every existing component (on a case-insensitive filesystem TESTS/x is tests/x).
 export function resolveIn(root: string, p: string) {
-  const realRoot = realpathSync(root);
+  const realRoot = realpathSync.native(root);
   // Models see the sandbox, where the workspace is mounted at /work: accept /work/... as workspace-relative.
   const abs = resolve(realRoot, p === "/work" || p.startsWith("/work/") ? `.${p.slice(5)}` : p);
   // Resolve the deepest entry that exists (lstat, so a dangling symlink counts and gets resolved).
@@ -50,7 +66,7 @@ export function resolveIn(root: string, p: string) {
   }
   let real: string;
   try {
-    real = join(realpathSync(probe), relative(probe, abs));
+    real = join(realpathSync.native(probe), relative(probe, abs));
   } catch {
     throw new AgentError("InvalidArguments", `cannot resolve path: ${p}`);
   }
@@ -121,14 +137,30 @@ export const hostExec: Exec = (command, { cwd, timeoutMs, signal }) => {
 export const parseProtected = (list: string) =>
   list.split(",").map((p) => p.trim().replace(/^(\.\/)+|\/+$/g, "")).filter(Boolean);
 
-// True if `rel` (repo-relative, "/"-separated) is or is under one of the (parsed) protected paths.
-export const isProtected = (rel: string, protectedPaths: string[]) => protectedPaths.some((p) => rel === p || rel.startsWith(p + "/"));
+// Case-insensitive filesystem (macOS default)? Then TESTS/ is tests/ and .GIT is .git, so path checks compare folded.
+// ponytail: probed once in tmpdir; a worktree on a volume with other case rules gets tmpdir's.
+const caseless = (() => {
+  const d = mkdtempSync(join(tmpdir(), "polaris-case-"));
+  try {
+    return existsSync(join(dirname(d), basename(d).toUpperCase()));
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+})();
+const fold = (s: string) => (caseless ? s.toLowerCase() : s);
 
-// Path for writing: inside root and not protected. Returns the real path and the repo-relative one.
+// True if `rel` (repo-relative, "/"-separated) is or is under one of the (parsed) protected paths.
+export function isProtected(rel: string, protectedPaths: string[]) {
+  const r = fold(rel);
+  return protectedPaths.map(fold).some((p) => r === p || r.startsWith(p + "/"));
+}
+
+// Path for writing: inside root, not protected, and no .git anywhere in it (a .git file or dir is what the host's git
+// reads: pointed at agent-written config, it runs commands on the host). Returns the real path.
 function writable(root: string, p: string, protectedPaths: string[]) {
   const file = resolveIn(root, p);
-  const rel = relative(realpathSync(root), file).split(sep).join("/");
-  if (isProtected(rel, protectedPaths)) throw new AgentError("InvalidArguments", `${p} is read-only (protected path)`);
+  const rel = relative(realpathSync.native(root), file).split(sep).join("/");
+  if (isProtected(rel, protectedPaths) || rel.split("/").some((s) => fold(s) === ".git")) throw new AgentError("InvalidArguments", `${p} is read-only (protected path)`);
   return file;
 }
 
@@ -337,7 +369,7 @@ const search: Tool = {
     const { root, signal } = ctx;
     const pattern = str(input, "pattern")!;
     const glob = str(input, "glob", true);
-    const target = relative(realpathSync(root), resolveIn(root, str(input, "path", true) ?? ".")) || ".";
+    const target = relative(realpathSync.native(root), resolveIn(root, str(input, "path", true) ?? ".")) || ".";
     const args = ["--line-number", "--no-heading", "--color=never", "--max-columns=300", ...(glob ? ["--glob", glob] : []), "-e", pattern, "--", target];
     return new Promise((done, fail) => {
       execFile("rg", args, { cwd: root, timeout: 30_000, maxBuffer: MAX_CAPTURE, signal }, (err, stdout, stderr) => {

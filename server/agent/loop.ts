@@ -1,7 +1,5 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { compactedTask, CONTINUE_REQUEST, historyMarkdown, readPaths, SUMMARY_REQUEST, workState } from "./context.ts";
-import { runTool, hostExec, type Exec, type Tool } from "./tools.ts";
+import { runTool, hostExec, writeScratch, type Exec, type Tool } from "./tools.ts";
 import { AgentError, type AgentEvent, type Block, type Msg, type Provider, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
 
 export type RunOptions = {
@@ -74,13 +72,12 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   async function compact() {
     const n = histories.length + 1;
     const path = `.polaris/history/${n}.md`;
-    mkdirSync(join(o.root, ".polaris/history"), { recursive: true });
-    writeFileSync(join(o.root, path), historyMarkdown(messages, n));
+    writeScratch(o.root, path, historyMarkdown(messages, n));
     const before = contextTokens;
     messages.push(user(SUMMARY_REQUEST));
     const res = await turn(); // tools stay in the request (changing them would bust the cache); any calls it makes are ignored
     const summary = res.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trim() || "(the model wrote no summary)";
-    appendFileSync(join(o.root, path), `\n## Summary written at compaction\n\n${summary}\n`);
+    writeScratch(o.root, path, `\n## Summary written at compaction\n\n${summary}\n`, true);
     histories.push(path);
     const state = await workState(ctx.exec, o.root, o.signal);
     messages = [user(compactedTask(o.task, summary, histories, state, readPaths(messages)))];

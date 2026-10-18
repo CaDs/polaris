@@ -420,7 +420,12 @@ is a 400 in a body and matches nothing in a filter).
 
 ## Guardrails
 
-- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10).
+- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
+  never writable by agent tools, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
+  file is mounted read-only in the sandbox.
+- Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
+  dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Harness writes into the worktree
+  (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
 - The harness never edits its running code; changes land through the review queue.
 - Every run has a token budget; every passing run is a commit on its own branch.
 
