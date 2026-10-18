@@ -135,11 +135,22 @@ const safe = (dir: string, path: string) => {
 
 export type PageInfo = { path: string; title: string; summary: string; line: string; sources: string[]; verified: string; updated: string; stale: string | null };
 
-// The project files among `sources` that changed between `verified` and `base`, or null (fresh). A verified sha the project
-// repo doesn't have counts as stale.
+// Why the page's `verified` or `sources` don't name what is in the project repo (a missing source never shows up in a diff),
+// or null.
+async function unknownSource(repo: string, m: Meta) {
+  const has = (spec: string) => git(repo, ["cat-file", "-e", spec]).then(() => true, () => false);
+  if (!(await has(`${m.verified}^{commit}`))) return `verified commit ${m.verified} is not in the project repo`;
+  for (const s of m.sources) if (!(await has(`${m.verified}:${s}`))) return `source ${s} does not exist at ${m.verified.slice(0, 8)}`;
+  return null;
+}
+
+// The project files among `sources` that changed between `verified` and `base`, or null (fresh). An unknown verified sha or
+// source counts as stale.
 async function changed(repo: string, base: string, m: Meta | string) {
   if (typeof m === "string") return `invalid frontmatter (${m})`;
   if (!m.sources.length) return null;
+  const unknown = await unknownSource(repo, m);
+  if (unknown) return unknown;
   try {
     const files = (await git(repo, ["--literal-pathspecs", "diff", "--name-only", m.verified, base, "--", ...m.sources])).split("\n").filter(Boolean);
     return files.length ? files.slice(0, 5).join(", ") + (files.length > 5 ? `, … (${files.length} files)` : "") : null;
@@ -165,13 +176,17 @@ export async function readPage(ws: string, path: string) {
   return show(ws, path);
 }
 
-// What the first user message carries (all roles): the index with a ⚠ flag on pages whose sources changed since they were
-// verified (computed against `base`, the commit the run starts from). "" when the wiki has no pages.
+// What the first user message carries (all roles): the index, its links as repo-root paths (.polaris/wiki/<path>, so a page
+// is never mistaken for a code file), with a ⚠ flag on pages whose sources changed since they were verified (computed against
+// `base`, the commit the run starts from). "" when the wiki has no pages.
 export async function wikiSection(ws: string, repo: string, base: string) {
   const { index, pages } = await pageList(ws, { repo, base });
   if (!pages.length) return "";
-  const flagged = new Map(pages.filter((p) => p.stale).map((p) => [p.line, ` ⚠ may be stale: ${p.stale}`]));
-  const lines = index.split("\n").filter((l) => l.trim() && !l.startsWith("# ")).map((l) => l + (flagged.get(l.trim()) ?? ""));
+  const byLine = new Map(pages.map((p) => [p.line, p]));
+  const lines = index.split("\n").filter((l) => l.trim() && !l.startsWith("# ")).map((l) => {
+    const p = byLine.get(l.trim());
+    return p ? l.replace(`](${p.path})`, `](.polaris/wiki/${p.path})`) + (p.stale ? ` ⚠ may be stale: ${p.stale}` : "") : l;
+  });
   return `# Project wiki\n\nRead the pages relevant to your task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`;
 }
 
@@ -244,11 +259,17 @@ export async function openCopy(ws: string, dest: string) {
 
 export type Finished = { problems: string[] } | { unchanged: true } | { sha: string };
 
-// Lints the clone, then commits it with `message` and the log entry (log.md is the harness's: whatever the writer did to it is
-// undone first) and fast-forwards the wiki repo. Nothing is committed when a problem is found or nothing changed.
-export async function finishCopy(ws: string, copy: string, message: string, entry: string): Promise<Finished> {
+// Lints the clone (with `repo`, the project repo, also each page's verified sha and sources), then commits it with `message`
+// and the log entry (log.md is the harness's: whatever the writer did to it is undone first) and fast-forwards the wiki repo.
+// Nothing is committed when a problem is found or nothing changed.
+export async function finishCopy(ws: string, copy: string, message: string, entry: string, repo?: string): Promise<Finished> {
   await git(copy, ["checkout", "-q", "--", "log.md"]).catch(() => {});
   const problems = lintDir(copy);
+  if (!problems.length && repo)
+    for (const [, , path] of indexLinks(readFileSync(join(copy, "index.md"), "utf8"))) {
+      const why = await unknownSource(repo, frontmatter(readFileSync(join(copy, path), "utf8")) as Meta);
+      if (why) problems.push(`${path}: ${why}`);
+    }
   if (problems.length) return { problems };
   if (!(await git(copy, ["status", "--porcelain"]))) return { unchanged: true };
   appendFileSync(join(copy, "log.md"), `\n${entry}\n`);
@@ -260,16 +281,18 @@ export async function finishCopy(ws: string, copy: string, message: string, entr
   return { sha: await git(dir, ["rev-parse", "HEAD"]) };
 }
 
-// A human edit of one existing page: same validation and commit flow as the maintainer's.
-export function editPage(ws: string, path: string, body: string, email: string) {
+// A human edit of one existing page: same validation and commit flow as the maintainer's. `base`: the page as the editor
+// opened it; a page that changed since (an ingest landed meanwhile) is refused rather than overwritten.
+export function editPage(ws: string, path: string, body: string, email: string, o: { base?: string; repo?: string } = {}) {
   return wikiSerial(ws, async () => {
     const tmp = join(dataDir(), "worktrees", `wiki-edit-${randomUUID()}`);
     try {
       await openCopy(ws, tmp);
       const file = safe(tmp, path);
       if (path === "log.md" || !existsSync(file)) throw new AgentError("InvalidArguments", path === "log.md" ? "log.md is maintained by the harness" : `no such page: ${path}`);
+      if (o.base !== undefined && readFileSync(file, "utf8").trimEnd() !== o.base.trimEnd()) throw new AgentError("InvalidArguments", `${path} changed since you opened it: reload it and edit again`);
       writeFileSync(file, body.endsWith("\n") ? body : `${body}\n`);
-      return await finishCopy(ws, tmp, `edit ${path} by ${email}`, `## [${today()}] edit | ${path} by ${email}`);
+      return await finishCopy(ws, tmp, `edit ${path} by ${email}`, `## [${today()}] edit | ${path} by ${email}`, o.repo);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

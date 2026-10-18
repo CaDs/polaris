@@ -505,12 +505,13 @@ app.get("/api/wiki/page", async (c) => {
   }
 });
 
-// A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>".
+// A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>". base: the
+// page as it was opened (refused if it changed since).
 app.put("/api/wiki/page", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (typeof b?.path !== "string" || typeof b?.body !== "string" || b.body.length > 20_000) return c.json({ error: "path and body (at most 20000 chars) are required" }, 400);
   try {
-    const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c));
+    const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
     return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
   } catch (e) {
     return wikiErr(c, e);

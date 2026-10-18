@@ -69,7 +69,7 @@ function PageView({ path, open, reload }: { path: string; open: (path: string) =
   async function save() {
     setError("");
     try {
-      await api("/api/wiki/page", "PUT", { path, body: draft });
+      await api("/api/wiki/page", "PUT", { path, body: draft, base: body });
       setBody(draft);
       setDraft(null);
       await reload();

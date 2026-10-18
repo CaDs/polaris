@@ -190,7 +190,6 @@ an Apple M4 Max:
 - **Stuck monitor.** A small decision model (System One style) checks every few turns whether the agent is stuck. An
   offline replay separated stuck runs from healthy ones cleanly; it is not wired in yet.
 - **Smaller items:**
-  - wiki index should show full `.polaris/wiki/` paths (a model confused a wiki page with a code file);
   - a separate reviewer model per workspace;
   - ticket comments and notifications;
   - formatted dates;

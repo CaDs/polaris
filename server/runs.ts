@@ -360,10 +360,12 @@ export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: s
 
 // FIFO over the whole process: start queued runs until POLARIS_CONCURRENCY (default 2) are in flight.
 // M11: ticket work (not eval cases or wiki runs) goes by ticket priority first, urgent (1) to low (4), then none (0).
+// A wiki run waits queued while another of its workspace runs (it would only wait in wikiSerial, holding a slot).
 export function pump() {
   const limit = Number(process.env.POLARIS_CONCURRENCY ?? 2);
   while (controllers.size < limit) {
     const next = db.prepare(`SELECT r.id FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.status = 'queued'
+      AND NOT (r.role = 'wiki' AND EXISTS (SELECT 1 FROM runs w JOIN tickets wt ON wt.id = w.ticket_id WHERE w.role = 'wiki' AND w.status = 'running' AND wt.workspace_id = t.workspace_id))
       ORDER BY CASE WHEN r.eval_run_id IS NULL AND r.role <> 'wiki' AND t.priority > 0 THEN t.priority ELSE 5 END, r.rowid LIMIT 1`).get() as { id: string } | undefined;
     if (!next) return;
     controllers.set(next.id, new AbortController());
@@ -843,7 +845,10 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
         entry = `## [${today()}] ingest | bootstrap from ${s.base_branch} (${sha8})`;
       } else {
         const stale = (await pageList(ws, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
-        if (!stale.length) return void log({ type: "wiki", payload: { op, unchanged: true } });
+        if (!stale.length) {
+          status = "passed"; // re-verified (or edited) since it was queued: nothing to do
+          return void log({ type: "wiki", payload: { op, unchanged: true } });
+        }
         task = wikiTask("lint", { repo, sha, index, stale });
         message = `lint: re-verify ${stale.length} stale page${stale.length === 1 ? "" : "s"} at ${sha8}`;
         entry = `## [${today()}] lint | re-verified ${stale.map((p) => p.path).join(", ")} at ${sha8}`;
@@ -863,7 +868,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
         turns += a.turns;
         ({ status, reason } = a);
         if (a.status !== "passed") return;
-        const r: Finished = await finishCopy(ws, wiki, message, entry);
+        const r: Finished = await finishCopy(ws, wiki, message, entry, s.repo_path);
         if (!("problems" in r)) return void log({ type: "wiki", payload: { op, ...("sha" in r ? { commit: r.sha } : { unchanged: true }) } });
         if (fix === WIKI_FIX_ROUNDS) {
           status = "failed";
