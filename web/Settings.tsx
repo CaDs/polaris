@@ -5,7 +5,7 @@ import { api } from "./ui.tsx";
 type WorkspaceSettings = {
   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
-  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string;
+  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number;
 };
 
 export function Settings() {
@@ -20,7 +20,7 @@ export function Settings() {
     setSaved(false);
     try {
       const f = new FormData(e.currentTarget);
-      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(f), model_review: f.has("model_review"), auto_split: f.has("auto_split") }));
+      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(f), model_review: f.has("model_review"), auto_split: f.has("auto_split"), wiki: f.has("wiki") }));
       setSaved(true);
     } catch (e) {
       setError((e as Error).message);
@@ -81,6 +81,15 @@ export function Settings() {
       <span className="hint">
         After the tests pass, the run's own model reviews the change; its findings go back to the agent to fix (up to 3 rounds) before you see it.
         Costs extra tokens per run. If the reviewer itself fails, the change goes to you anyway.
+      </span>
+
+      <h2>Project wiki</h2>
+      <label className="check">
+        <input type="checkbox" name="wiki" defaultChecked={!!s.wiki} /> Keep a project wiki
+      </label>
+      <span className="hint">
+        Every run starts with the wiki's index (pages flagged when their source files changed) and a read-only copy of its pages. After you approve
+        a ticket, a maintainer agent updates the wiki from the merged change. Off: no wiki section, no snapshot, no ingest.
       </span>
 
       <h2>Planner</h2>

@@ -5,6 +5,7 @@ import { Improvement } from "./Improvement.tsx";
 import { Settings } from "./Settings.tsx";
 import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
+import { Wiki } from "./Wiki.tsx";
 import { Dialog, api, useTheme, type Ticket, type Theme } from "./ui.tsx";
 
 export function App() {
@@ -145,6 +146,7 @@ function Dashboard({ email }: { email: string }) {
   const settings = path === "/settings";
   const usage = path === "/usage";
   const improve = path === "/improvement";
+  const wiki = path === "/wiki";
 
   return (
     <div className="shell">
@@ -154,8 +156,9 @@ function Dashboard({ email }: { email: string }) {
           <strong>{name}</strong>
         </header>
         <nav aria-label="Main">
-          <a href="/" className={number || settings || usage || improve ? "" : "active"} onClick={(e) => (e.preventDefault(), go("/"))}>Board</a>
+          <a href="/" className={number || settings || usage || improve || wiki ? "" : "active"} onClick={(e) => (e.preventDefault(), go("/"))}>Board</a>
           <a href="/usage" className={usage ? "active" : ""} onClick={(e) => (e.preventDefault(), go("/usage"))}>Usage</a>
+          <a href="/wiki" className={wiki ? "active" : ""} onClick={(e) => (e.preventDefault(), go("/wiki"))}>Wiki</a>
           <a href="/improvement" className={improve ? "active" : ""} onClick={(e) => (e.preventDefault(), go("/improvement"))}>Improvement</a>
           <a href="/settings" className={settings ? "active" : ""} onClick={(e) => (e.preventDefault(), go("/settings"))}>Settings</a>
         </nav>
@@ -176,7 +179,7 @@ function Dashboard({ email }: { email: string }) {
       </aside>
       <div className="main">
         <div className="topbar">
-          <h1>{number ? (ticket?.key ?? "Ticket") : settings ? "Settings" : usage ? "Usage" : improve ? "Improvement" : "Board"}</h1>
+          <h1>{number ? (ticket?.key ?? "Ticket") : settings ? "Settings" : usage ? "Usage" : improve ? "Improvement" : wiki ? "Wiki" : "Board"}</h1>
           <button className="btn primary" onClick={() => setCreating(true)}>New ticket</button>
         </div>
         <main>
@@ -186,6 +189,8 @@ function Dashboard({ email }: { email: string }) {
             <UsagePage />
           ) : improve ? (
             <Improvement />
+          ) : wiki ? (
+            <Wiki />
           ) : number ? (
             ticket ? <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={(n) => go(`/t/${n}`)} /> : <p className="muted pad">{tickets ? "Ticket not found." : "Loading…"}</p>
           ) : (

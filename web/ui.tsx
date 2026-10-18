@@ -17,7 +17,7 @@ export type Child = Ticket & { label: string; depends_keys: string[] };
 export type Run = {
   id: string; ticket_id: string; model: string; provider_id: string | null; auth_type: string | null; attempt: number; status: string;
   tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number; started_at: number | null; ended_at: number | null;
-  prompt_version: number | null; eval_run_id: string | null; role: "worker" | "planner";
+  prompt_version: number | null; eval_run_id: string | null; role: "worker" | "planner" | "wiki";
 };
 
 export type Provider = {

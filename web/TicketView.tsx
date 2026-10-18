@@ -80,7 +80,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   }
 
   const runs = detail?.runs ?? [];
-  const current = runs.find((r) => r.id === selected) ?? runs.at(-1);
+  const current = runs.find((r) => r.id === selected) ?? runs.findLast((r) => r.role !== "wiki") ?? runs.at(-1); // M10: a wiki ingest after approval is listed, not the default
   const running = ticket.status === "running";
   const epic = ticket.kind === "epic";
   const link = (key: string) => <button className="link mono" onClick={() => open(Number(key.split("-").at(-1)))}>{key}</button>;
@@ -133,12 +133,12 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
             <tbody>
               {runs.map((r) => (
                 <tr key={r.id} className={r.id === current?.id ? "sel" : ""}>
-                  <td><button className="link" onClick={() => setSelected(r.id)} aria-label={`Show run #${r.attempt}`}>#{r.attempt}</button></td>
+                  <td><button className="link" onClick={() => setSelected(r.id)} aria-label={r.role === "wiki" ? "Show wiki run" : `Show run #${r.attempt}`}>{r.role === "wiki" ? "wiki" : `#${r.attempt}`}</button></td>
                   <td className="mono">{r.model}</td>
                   <td><StatusIcon status={r.status === "passed" ? "review" : r.status === "cancelled" ? "todo" : r.status} /> {r.status}</td>
                   <td>{fmt(r.tokens_in)}</td><td>{fmt(r.tokens_out)}</td><td>{fmt(r.tokens_cached)}</td><td>{hitRate(r.tokens_in, r.tokens_cached)}</td>
                   <td>{cost(r.cost_usd, r.auth_type)}</td><td>{duration(r)}</td>
-                  <td>{!epic && r.status !== "queued" && r.status !== "running" && <button className="link" disabled={running} onClick={() => setRetrying(r)}>Retry with…</button>}</td>
+                  <td>{!epic && r.role !== "wiki" && r.status !== "queued" && r.status !== "running" && <button className="link" disabled={running} onClick={() => setRetrying(r)}>Retry with…</button>}</td>
                 </tr>
               ))}
             </tbody>
@@ -190,6 +190,17 @@ const compact = (input: Record<string, unknown>) => {
   return s.length > 120 ? s.slice(0, 120) + "…" : s;
 };
 
+// The run's first user message (environment, wiki index, lessons, task): in the DOM only while open.
+function Prompt({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="result" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>First message <span className="muted">{text.length.toLocaleString()} chars</span></summary>
+      {open && <pre>{text}</pre>}
+    </details>
+  );
+}
+
 export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }) {
   const [events, setEvents] = useState<Ev[]>([]);
 
@@ -220,7 +231,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
     <section className="transcript" aria-label="Transcript">
       <div className="row">
         <h3 className="grow">
-          {run.eval_run_id ? "Eval run" : run.role === "planner" ? `Planner round #${run.attempt}` : `Run #${run.attempt}`} <span className="muted">{finished ? finished.payload.status : run.status}</span>
+          {run.eval_run_id ? "Eval run" : run.role === "planner" ? `Planner round #${run.attempt}` : run.role === "wiki" ? "Wiki run" : `Run #${run.attempt}`} <span className="muted">{finished ? finished.payload.status : run.status}</span>
           {run.prompt_version && <span className="muted mono"> · prompt v{run.prompt_version}</span>}
         </h3>
         <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.in)} · out {fmt(usage.out)} · cached {fmt(usage.cached)} · cache hit {hitRate(usage.in, usage.cached)}</span>
@@ -235,6 +246,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
       )}
       {events.map((e) => {
         const p = e.payload;
+        if (e.type === "run_started") return <Prompt key={e.seq} text={p.task} />;
         if (e.type === "assistant_message")
           return p.message.content.filter((b: any) => b.type === "text" && b.text).map((b: any, i: number) => <p key={`${e.seq}-${i}`} className="msg">{b.text}</p>);
         if (e.type === "tool_call")
@@ -249,7 +261,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         if (e.type === "setup" && p.step === "worktree")
           return p.branch
             ? <p key={e.seq} className="muted">Worktree on branch <span className="mono">{p.branch}</span> from <span className="mono">{p.base_sha.slice(0, 8)}</span></p>
-            : run.role === "planner"
+            : run.role === "planner" || run.role === "wiki"
             ? <p key={e.seq} className="muted">Read-only checkout at <span className="mono">{p.base_sha.slice(0, 8)}</span></p>
             : <p key={e.seq} className="muted">Detached worktree at <span className="mono">{p.base_sha.slice(0, 8)}</span> (eval case)</p>;
         if (e.type === "setup" && p.step === "skills") return null; // shown in the header

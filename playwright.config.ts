@@ -8,7 +8,7 @@ import { join } from "node:path";
 // REAL_MODEL=<ollama model> runs only e2e/real-model.spec.ts against local Ollama (http://localhost:11434) instead of the fake provider.
 const headed = !!process.env.HEADED;
 const realModel = process.env.REAL_MODEL;
-const port = 3200;
+const port = Number(process.env.E2E_PORT ?? 3200); // another suite may hold 3200: E2E_PORT=3201 npx playwright test
 
 export default defineConfig({
   testDir: "e2e",
