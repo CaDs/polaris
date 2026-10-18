@@ -252,6 +252,25 @@ test("reject cleans up, returns to todo, and the note reaches the next run's tas
   assert.equal(branches(repo), "");
 });
 
+test("deleting a ticket while its reject note is being reflected on does not crash the server", async () => {
+  const { reject } = await import("../server/runs.ts");
+  const crashes: unknown[] = [];
+  const onCrash = (e: unknown) => crashes.push(e);
+  process.on("unhandledRejection", onCrash);
+  try {
+    const t = await ticket(alice, "reject then delete");
+    await call("POST", `/api/tickets/${t.id}/runs`, alice);
+    await waitFor(alice, t.id, "review");
+    const rejected = reject(t.id, "wrong approach"); // the reflection on the note runs in the background
+    db.prepare("DELETE FROM tickets WHERE id = ?").run(t.id); // what DELETE /api/tickets/:id does once it is done
+    await rejected;
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(crashes, []);
+  } finally {
+    process.off("unhandledRejection", onCrash);
+  }
+});
+
 test("other workspaces cannot see settings, diffs, or approve/reject", async () => {
   const t = await ticket(alice, "private review");
   await call("POST", `/api/tickets/${t.id}/runs`, alice);

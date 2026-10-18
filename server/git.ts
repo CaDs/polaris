@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { isProtected } from "./agent/tools.ts";
@@ -22,11 +23,11 @@ const env = {
 // ponytail: in memory; a restart fails every running run (recoverOrphans), so no worktree outlives it.
 const gitDirs = new Map<string, string>();
 
-export async function git(cwd: string, args: string[]) {
+export async function git(cwd: string, args: string[], extraEnv?: Record<string, string>) {
   const dir = gitDirs.get(cwd);
   try {
     // Hooks and fsmonitor off: a hooksPath inside the work tree (husky etc.) is agent-writable and would run on the host.
-    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-C", cwd, ...(dir ? [`--git-dir=${dir}`, `--work-tree=${cwd}`] : []), ...args], { env, maxBuffer: 50e6 });
+    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-C", cwd, ...(dir ? [`--git-dir=${dir}`, `--work-tree=${cwd}`] : []), ...args], { env: { ...env, ...extraEnv }, maxBuffer: 50e6 });
     return stdout.trimEnd();
   } catch (e) {
     const err = e as Error & { stderr?: string };
@@ -127,12 +128,23 @@ export async function commitAll(worktree: string, message: string) {
 
 // The worktree's content (tracked + untracked, minus scratch) as a tree id, and a reset back to one: the model review
 // snapshots before the reviewer runs and undoes anything it wrote, since its changes must never reach the commit.
-export async function snapshot(worktree: string) {
-  await git(worktree, ["add", "-A"]);
-  await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...POLARIS_SCRATCH]);
-  return git(worktree, ["write-tree"]);
+// Both work on a throwaway copy of the index with everything added, so the real one stays as the worker left it: the
+// reviewer's `git diff` shows the change and new files stay untracked.
+async function withIndex<T>(worktree: string, fn: (e: { GIT_INDEX_FILE: string }) => Promise<T>) {
+  const dir = mkdtempSync(join(tmpdir(), "polaris-index-"));
+  const e = { GIT_INDEX_FILE: join(dir, "index") };
+  try {
+    const real = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+    if (existsSync(real)) copyFileSync(real, e.GIT_INDEX_FILE);
+    await git(worktree, ["add", "-A"], e);
+    await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...POLARIS_SCRATCH], e);
+    return await fn(e);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
-export const restore = (worktree: string, tree: string) => git(worktree, ["read-tree", "--reset", "-u", tree]);
+export const snapshot = (worktree: string) => withIndex(worktree, (e) => git(worktree, ["write-tree"], e));
+export const restore = (worktree: string, tree: string) => withIndex(worktree, (e) => git(worktree, ["read-tree", "--reset", "-u", tree], e));
 
 export class MergeError extends Error {}
 

@@ -87,3 +87,40 @@ test("model_review off: no review events", async () => {
   assert.equal(t.status, "review");
   assert.equal(reviews(t.id).length, 0);
 });
+
+test("a retry is told why the previous attempt really failed: a gate failure after a review fix round is not a review failure", async () => {
+  await call("PUT", "/api/settings", me, { ...settings, model_review: true, auto_split: false });
+  const t = (await call("POST", "/api/tickets", me, { title: "REVIEW-ONCE then the gate breaks", test_command: "test ! -f fixed.txt" })).body;
+  await call("POST", `/api/tickets/${t.id}/runs`, me);
+  let ticket = t;
+  for (const end = Date.now() + 40_000; Date.now() < end && ticket.status !== "failed"; await new Promise((r) => setTimeout(r, 50))) ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;
+  assert.equal(ticket.runs.length, 3);
+  const task = JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'run_started'").get(ticket.runs[1].id) as { payload: string }).payload).task;
+  assert.match(task, /Previous attempt failed: `test ! -f fixed\.txt` exited with code 1/);
+  assert.doesNotMatch(task, /changes still requested/);
+});
+
+test("snapshot leaves the index alone: the reviewer's git diff shows the change, and restore undoes its writes", async () => {
+  const { snapshot, restore } = await import("../server/git.ts");
+  const wt = realpathSync(mkdtempSync(join(tmpdir(), "mr-snap-")));
+  const sh = (cmd: string) => execFileSync("sh", ["-c", cmd], { cwd: wt, encoding: "utf8" });
+  sh("git init -q -b main && echo a > a.txt && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init && echo changed > a.txt && echo new > new.txt");
+  const status = sh("git status --short");
+  const before = await snapshot(wt);
+  assert.match(sh("git diff"), /\+changed/); // what the reviewer runs
+  assert.equal(sh("git status --short"), status); // new.txt still untracked, a.txt unstaged
+  sh("echo junk > reviewer.txt; echo tampered > a.txt"); // the reviewer writes
+  assert.notEqual(await snapshot(wt), before);
+  await restore(wt, before);
+  assert.equal(sh("git status --short"), status);
+  assert.equal(sh("cat a.txt"), "changed\n");
+  assert.equal(await snapshot(wt), before);
+});
+
+test("the reviewer sees the worker's new file as untracked", async () => {
+  await call("PUT", "/api/settings", me, { ...settings, model_review: true });
+  const t = await ticketRun("untracked check");
+  const id = t.runs[0].id;
+  const results = (db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'tool_result' AND seq > (SELECT seq FROM events WHERE run_id = ? AND type = 'model_review_started')").all(id, id) as { payload: string }[]).map((e) => JSON.parse(e.payload).content);
+  assert.match(results.join("\n"), /\?\? notes\.txt/);
+});

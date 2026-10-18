@@ -7,7 +7,7 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
 import { withStates } from "./planner.ts";
 import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -165,8 +165,10 @@ app.patch("/api/tickets/:id", async (c) => {
   const p = await parse(c, true, t);
   if ("error" in p) return c.json(p, 400);
   const v = p.v;
-  db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
-    v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
+  const moved = v.status === undefined ? undefined : await moveTicket(t.id, v.status); // first: a refused move changes nothing
+  if (moved) return c.json(moved, 409);
+  db.prepare("UPDATE tickets SET title = ?, spec = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
+    v.title ?? t.title, v.spec ?? t.spec, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
     v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
   );
   applyTracker(t.id, v.tracker);

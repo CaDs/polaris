@@ -72,6 +72,15 @@ test("a fix round that runs out of turns falls back to a fresh attempt 2, like a
   assert.match(events(a1.id, "run_finished")[0].reason, /exited with code 1; the fix round ended: turn budget exhausted/);
 });
 
+test("one fix-round rule: a review fix round that runs out of turns retries like a gate fix round; the last attempt fails", async () => {
+  await settings({ test_command: "test -f notes.txt", model_review: true, max_turns: 10 }); // the stalling fix round scripts 130 turns
+  const t = await ticketRun("REVIEW-ONCE REVIEW-FIX-STALL change");
+  await settings({ max_turns: 120 });
+  assert.equal(t.status, "failed");
+  assert.deepEqual(t.runs.map((r: any) => r.attempt), [1, 2, 3]);
+  for (const r of t.runs) assert.equal(events(r.id, "run_finished")[0].reason, "model review requested changes; the fix round ended: turn budget exhausted (10)");
+});
+
 test("flaky: a failure that passes on an immediate re-run passes the gate, flagged, with no fix round", async () => {
   const m = marker();
   await settings({ test_command: "test -f notes.txt" });

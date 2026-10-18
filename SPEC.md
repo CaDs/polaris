@@ -205,7 +205,17 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
 ## Orchestration: the test gate
 
 After a worker's loop ends, the gate runs the ticket's test command (its own `test_command`, else the workspace's) and
-checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back).
+checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back: the
+previous run's `run_finished` reason, its failing gate output, and the last review findings when the review failed it).
+
+- **Restart.** At startup a run left `running` fails with `interrupted by server restart` (worktree and container
+  removed); a ticket attempt is then retried like a gate failure while attempts remain, else the ticket fails (a child
+  hands off, a planner round fails its epic). A task left `running` with no active run gets its latest run's outcome.
+- **Manual status.** `PATCH /api/tickets/:id {status}` (the Status select) moves only between `todo`, `done` and
+  `failed`, or `review` back to `todo` (its branch is dropped), never while a run is active; anything else is a 409
+  `{error: "invalid_transition", from, to}`. It goes through the same transition as the pipeline: a child marked done
+  starts its dependents and wakes its planner; a child put back in `todo` under a running epic starts once its
+  dependencies are done.
 
 - **Flaky re-run.** A failure that is a non-zero exit or a timeout, with no protected path touched, is run once more at
   once (the epic gate too). If that passes, the gate passes: `test_result` (`epic_gate`) gets `flaky: true` and
@@ -239,7 +249,9 @@ provider and model review the change before a human sees it (not for eval case r
   append-only), the worker fixes and finishes, the gate runs again, then the next review. At most 3 review rounds per
   attempt; if round 3 still requests changes the attempt fails with `model review: changes still requested after 3 rounds`
   and the normal retry rules apply (the next attempt's first message includes the last findings). A gate failure after a
-  fix round may use the attempt's gate fix round (see the test gate), else it fails the attempt.
+  fix round may use the attempt's gate fix round (see the test gate), else it fails the attempt. Either kind of fix round
+  that ends without finishing (budget, provider) fails the attempt as `<why>; the fix round ended: <reason>` and is
+  retried like a gate failure; a provider or environment error there is not split either.
 - **Fail-open.** A reviewer that errors, or ends without `submit_review` (budget, provider error), is logged as a
   `model_review` event with verdict `error` and the change goes to human review anyway.
 - **Events and cost.** `model_review_started {round, budget, lines}` before each reviewer, `model_review {round, verdict: approve |

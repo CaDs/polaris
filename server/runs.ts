@@ -36,7 +36,11 @@ const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
 const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
 // Eval case runs use these frozen defaults (the migration's), not the workspace's: a score must not move when someone edits Settings.
 const EVAL_WORKER = { max_turns: 120, max_minutes: 60 };
-const GATE_FIX_ROUNDS = 1; // per attempt: a failed gate resumes the worker's own conversation this many times before the attempt fails
+// FIX_ROUNDS, one rule for both kinds: a fix round resumes the worker's own conversation within the attempt, at most
+// GATE_FIX_ROUNDS times after a failed gate (counted across the whole attempt) and MAX_REVIEW_ROUNDS - 1 times after
+// review findings. One that ends without finishing (budget, provider) fails the attempt as "<why>; the fix round ended:
+// <reason>", retried fresh like a gate failure while attempts remain; its provider/environment errors are never split.
+const GATE_FIX_ROUNDS = 1;
 // A reviewer reads the whole change and a few callers: its turns grow with the changed lines (it once used 25 on a 10-line diff).
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
@@ -62,8 +66,12 @@ function setTicket(id: string, status: string, quiet = false) {
   const now = Date.now();
   const end = status === "done" || status === "failed";
   db.prepare("UPDATE tickets SET status = ?, updated_at = ?, settled_at = ? WHERE id = ?").run(status, now, end ? now : null, id);
-  if (end && !quiet) void settled(id).catch((e) => console.error("settling failed", e));
+  if (end && !quiet) background(settled(id), "settling failed");
 }
+
+// Fire-and-forget work. It can outlive its ticket (deleted meanwhile: its inserts fail on the foreign key), and an
+// unhandled rejection would end the process and every run in it.
+const background = (p: Promise<unknown>, what: string) => void p.catch((e) => console.error(what, e));
 
 // Provider from env. Throws a user-facing message when none is configured.
 function providerConfig(opts: { model?: string; baseUrl?: string }) {
@@ -155,10 +163,17 @@ function feedback(t: TicketRow, runId: string, attempt: number) {
         | undefined;
       return row && (JSON.parse(row.payload) as EventPayloads[T]);
     };
+    // The run's own reason says what failed it (a gate, the review, a fix round, a restart); the gate output and the
+    // findings only back it up.
+    const f = last("run_finished");
     const p = last("test_result");
-    if (p && !p.passed) parts.push(`Previous attempt failed: ${gateFailure(p)}\n\`\`\`\n${p.output}\n\`\`\``);
     const r = last("model_review");
-    if (r?.verdict === "request_changes") parts.push(`Previous attempt failed: model review: changes still requested after ${MAX_REVIEW_ROUNDS} rounds. The last findings:\n${findingsText(r.findings)}`);
+    if (f)
+      parts.push([
+        `Previous attempt failed: ${f.reason ?? f.status}`,
+        ...(p && !p.passed ? [`\`\`\`\n${p.output}\n\`\`\``] : []),
+        ...(r?.verdict === "request_changes" && f.reason?.startsWith("model review") ? [`The last findings:\n${findingsText(r.findings)}`] : []),
+      ].join("\n"));
   }
   return parts;
 }
@@ -507,9 +522,19 @@ async function execute(runId: string) {
       log({ type: "test_result", payload: result });
       return { result, test };
     };
-    // Returns whether the gate passed. A failure resumes the worker's own conversation once per attempt (GATE_FIX_ROUNDS,
-    // counted across the review's fix rounds too; not for eval cases, which measure the unassisted worker) and re-checks; a
-    // gate that still fails ends the attempt (and retries it).
+    // A fix round (FIX_ROUNDS): resumes the worker's own conversation with `message`; false = it ended the attempt.
+    const fixRound = async (why: string, message: string) => {
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
+      addUsage(a.usage);
+      turns += a.turns;
+      reply = finalText(a.messages);
+      if (a.status === "passed") return true;
+      [status, reason] = [a.status, `${why}; the fix round ended: ${a.reason}`];
+      retry = a.status === "failed" && run.attempt < MAX_ATTEMPTS;
+      return false;
+    };
+    // Returns whether the gate passed. A failure gets the attempt's gate fix round (not for eval cases, which measure the
+    // unassisted worker) and re-checks; a gate that still fails ends the attempt (and retries it).
     let gateFixes = 0;
     const gate = async () => {
       let { result, test } = await check();
@@ -518,14 +543,8 @@ async function execute(runId: string) {
         const why = gateFailure(result);
         log({ type: "gate_fix", payload: { reason: why } });
         const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
-        a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
-        addUsage(a.usage);
-        turns += a.turns;
-        reply = finalText(a.messages);
-        // A fix round that ends without finishing (budget, provider) falls back to the fresh retry a gate failure always got.
-        if (a.status !== "passed") {
-          [status, reason, gateOutput] = [a.status, `${why}; the fix round ended: ${a.reason}`, result.output];
-          retry = a.status === "failed" && run.attempt < MAX_ATTEMPTS;
+        if (!(await fixRound(why, message))) {
+          gateOutput = result.output;
           return false;
         }
         ({ result, test } = await check());
@@ -566,12 +585,7 @@ async function execute(runId: string) {
         return;
       }
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
-      addUsage(a.usage);
-      turns += a.turns;
-      ({ status, reason } = a);
-      reply = finalText(a.messages);
-      if (status !== "passed" || !(await gate())) return;
+      if (!(await fixRound("model review requested changes", message)) || !(await gate())) return;
     }
     if (!ev) log({ type: "commit", payload: { sha: await commitAll(worktree, `${t.key}: ${t.title}`), branch: branch! } });
   } catch (e) {
@@ -595,7 +609,7 @@ async function execute(runId: string) {
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
     else if (retry) queue(t, run.model, run.attempt + 1, run.provider_id); // same provider and model
     // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors).
-    else if (status === "failed" && s?.auto_split && canSplit(t) && !/^(ProviderError|UnexpectedEnvironment|Unknown):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
+    else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
     else {
       setTicket(t.id, TICKET_STATUS[status]);
       if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
@@ -958,12 +972,29 @@ export async function reject(ticketId: string, note: string) {
   if (r) eventLog(r.id)({ type: "review", payload: { decision: "rejected", note: note || undefined } });
   if (r && note && t.kind !== "epic") {
     const run = db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(r.id) as { provider_id: string | null; model: string };
-    void reflectOn(r.id, t.workspace_id, run, undefined, note).then((payload) => eventLog(r.id)({ type: "reflection", payload }));
+    background(reflectOn(r.id, t.workspace_id, run, undefined, note).then((payload) => eventLog(r.id)({ type: "reflection", payload })), "reflection on a reject failed");
   }
   await cleanupTicket(ticketId, t.workspace_id);
   if (!t.parent_id) return setTicket(ticketId, "todo");
   db.prepare("UPDATE tickets SET handoff = COALESCE(handoff || char(10) || char(10), '') || ? WHERE id = ?").run(`Rejected by the reviewer${note ? `: ${note}` : " (no note)"}.`, ticketId);
   setTicket(ticketId, "failed");
+}
+
+// A status change by hand (the Status select): only between the states no run owns, plus review back to todo (its
+// branch is dropped, as on a reject). Running and review belong to the pipeline: Run, Cancel, Approve, Reject.
+// Through setTicket, so a child settled by hand wakes its planner and dependents; one put back in todo starts again
+// once its dependencies are done, as when its last dependency settled.
+const MANUAL = ["todo", "done", "failed"];
+export async function moveTicket(id: string, to: string) {
+  const t = db.prepare("SELECT status, workspace_id, parent_id, depends_on FROM tickets WHERE id = ?").get(id) as { status: string; workspace_id: string; parent_id: string | null; depends_on: string };
+  if (t.status === to) return;
+  const active = db.prepare("SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki'").get(id);
+  if (active || !MANUAL.includes(to) || !(MANUAL.includes(t.status) || (t.status === "review" && to === "todo"))) return { error: "invalid_transition", from: t.status, to };
+  if (t.status === "review") await cleanupTicket(id, t.workspace_id);
+  setTicket(id, to);
+  if (to !== "todo" || !t.parent_id) return;
+  const status = (tid: string) => (db.prepare("SELECT status FROM tickets WHERE id = ?").get(tid) as { status: string } | undefined)?.status;
+  if (status(t.parent_id) === "running" && (JSON.parse(t.depends_on) as string[]).every((d) => status(d) === "done")) await startChild(id);
 }
 
 export type StartOptions = {
@@ -1007,14 +1038,22 @@ export function startRun(ticketId: string, opts: StartOptions) {
   return { runId, done };
 }
 
-// Startup: runs left running by a dead process are failed (their worktrees and containers removed); queued runs
-// stay queued and start now.
+// Startup: runs left running by a dead process fail with the reason (their worktrees and containers removed); a ticket
+// attempt is retried like a gate failure while attempts remain, else its series ends failed (a child hands off, a
+// planner round fails its epic). Queued runs stay queued and start now. A task left "running" with no active run (the
+// process died between run_finished and the ticket's transition) gets its latest run's ticket status.
 export function recoverOrphans() {
-  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, t.workspace_id, c.repo_path AS eval_repo FROM runs r
+  const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND eval_run_id IS NULL AND role <> 'wiki' ORDER BY rowid DESC LIMIT 1) AS last
+    FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
+    AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki')`).all() as { id: string; last: RunStatus | null }[];
+  for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
+  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.workspace_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {
-    id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; workspace_id: string; eval_repo: string | null;
+    id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; attempt: number; model: string; provider_id: string | null;
+    workspace_id: string; parent_id: string | null; eval_repo: string | null;
   }[];
   const dead = orphans.filter((o) => !controllers.has(o.id));
+  const retries: typeof dead = [];
   for (const o of dead) {
     const log = eventLog(o.id);
     const message = "interrupted by server restart";
@@ -1022,21 +1061,31 @@ export function recoverOrphans() {
     const r = db.prepare("SELECT tokens_in, tokens_out, tokens_cached FROM runs WHERE id = ?").get(o.id) as Record<string, number>;
     const usage = { input: r.tokens_in, output: r.tokens_out, cache_read: r.tokens_cached, cache_write: 0 };
     log({ type: "run_finished", payload: { status: "failed", reason: message, turns: 0, usage } });
+    recordCost(o.id, o.model, usage);
     if (o.eval_run_id) {
       recordEvalResult(o.id, false, 0);
-      if (o.eval_repo) void removeWorktree(o.eval_repo, o.worktree, null, dataDir());
+      if (o.eval_repo) background(removeWorktree(o.eval_repo, o.worktree, null, dataDir()), "orphan cleanup failed");
       continue;
     }
     if (o.role === "wiki") {
       const root = o.worktree;
       const ws = settingsFor(o.workspace_id);
-      if (root?.startsWith(dataDir())) void (ws ? removeWorktree(ws.repo_path, join(root, "code"), null, dataDir()) : Promise.resolve()).then(() => rmSync(root, { recursive: true, force: true }));
+      if (root?.startsWith(dataDir())) background((ws ? removeWorktree(ws.repo_path, join(root, "code"), null, dataDir()) : Promise.resolve()).then(() => rmSync(root, { recursive: true, force: true })), "orphan cleanup failed");
       continue;
     }
-    setTicket(o.ticket_id, "failed");
     const s = (o.branch || o.role === "planner") && settingsFor(o.workspace_id); // CLI runs have neither: their worktree is the user's dir
-    if (s) void removeWorktree(s.repo_path, o.worktree, o.branch, dataDir());
+    if (s) background(removeWorktree(s.repo_path, o.worktree, o.branch, dataDir()), "orphan cleanup failed");
+    if (o.role === "planner") failEpic(o.ticket_id, `A planner round failed: ${message}`);
+    else if (o.branch && o.attempt < MAX_ATTEMPTS) retries.push(o); // the ticket stays running until it is queued
+    else {
+      if (o.parent_id) db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(handoffText("", message), o.ticket_id);
+      setTicket(o.ticket_id, "failed");
+    }
   }
-  void removeStaleContainers().then(pump); // sweep first, or it could remove a fresh run's container
+  // Sweep first, or it could remove a fresh run's container.
+  background(removeStaleContainers().then(() => {
+    for (const o of retries) queue(ticketRow(o.ticket_id)!, o.model, o.attempt + 1, o.provider_id);
+    pump();
+  }), "recovery failed");
   return dead.length;
 }

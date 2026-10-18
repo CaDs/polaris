@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -167,4 +167,72 @@ test("settings accept only a plain docker image reference (it is an argument of 
   }
   for (const image of ["polaris-sandbox:1", "node:22-bookworm", "ghcr.io/org/img:v1.2", `localhost:5000/team/img@sha256:${"a".repeat(64)}`])
     assert.equal((await json("PUT", "/api/settings", dan, { repo_path: repo, image })).body.image, image);
+});
+
+test("startup recovery: an interrupted attempt is retried with the reason fed back and cleaned up; the last one fails; a finished run's ticket is unstuck", async () => {
+  const { addWorktree } = await import("../server/git.ts");
+  const orphan = async (attempt: number, title: string) => {
+    const t = (await json("POST", "/api/tickets", alice, { title })).body;
+    const id = `dead-${attempt}-${t.id}`;
+    const wt = join(process.env.POLARIS_DATA_DIR!, "worktrees", id);
+    await addWorktree(repo, "main", wt, `polaris/${id}`);
+    db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(t.id);
+    db.prepare("INSERT INTO runs (id, ticket_id, model, status, attempt, worktree, branch) VALUES (?, ?, 'demo', 'running', ?, ?, ?)").run(id, t.id, attempt, wt, `polaris/${id}`);
+    return { t, wt, branch: `polaris/${id}` };
+  };
+  const a = await orphan(1, "interrupted early");
+  const last = await orphan(3, "interrupted last");
+  const stuck = (await json("POST", "/api/tickets", alice, { title: "finished before the restart" })).body;
+  db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(stuck.id);
+  db.prepare("INSERT INTO runs (id, ticket_id, model, status) VALUES (?, ?, 'demo', 'passed')").run(`done-${stuck.id}`, stuck.id);
+  const epic = (await json("POST", "/api/tickets", alice, { title: "planning", kind: "epic" })).body;
+  db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(epic.id);
+  db.prepare("INSERT INTO runs (id, ticket_id, model, status, role) VALUES (?, ?, 'demo', 'running', 'planner')").run(`round-${epic.id}`, epic.id);
+
+  assert.equal(recoverOrphans(), 3);
+  const failedEpic = (await json("GET", `/api/tickets/${epic.id}`, alice)).body;
+  assert.deepEqual([failedEpic.status, failedEpic.handoff], ["failed", "A planner round failed: interrupted by server restart"]);
+  assert.equal((await json("GET", `/api/tickets/${stuck.id}`, alice)).body.status, "review");
+  assert.equal((await json("GET", `/api/tickets/${last.t.id}`, alice)).body.status, "failed");
+  const done = await waitFor(alice, a.t.id, "review");
+  assert.deepEqual(done.runs.map((r: any) => [r.attempt, r.status]), [[1, "failed"], [2, "passed"]]);
+  const started = db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'run_started'").get(done.runs[1].id) as { payload: string };
+  assert.match(JSON.parse(started.payload).task, /Previous attempt failed: interrupted by server restart/);
+  assert.equal((await json("GET", `/api/tickets/${last.t.id}`, alice)).body.runs.length, 1);
+  for (const o of [a, last]) {
+    assert.equal(existsSync(o.wt), false);
+    assert.equal(execFileSync("git", ["branch", "--list", o.branch], { cwd: repo, encoding: "utf8" }), "");
+  }
+});
+
+test("manual status changes: only between todo, done and failed (and review back to todo), never while a run is active", async () => {
+  const t = (await json("POST", "/api/tickets", alice, { title: "by hand" })).body;
+  const patch = (status: string) => json("PATCH", `/api/tickets/${t.id}`, alice, { status });
+  assert.deepEqual(await patch("running"), { status: 409, body: { error: "invalid_transition", from: "todo", to: "running" } });
+  assert.equal((await patch("review")).status, 409);
+  assert.equal((await patch("done")).body.status, "done");
+  assert.equal((await patch("failed")).body.status, "failed");
+  assert.equal((await patch("todo")).body.status, "todo");
+  assert.equal((await patch("todo")).status, 200); // unchanged: fine
+  await json("POST", `/api/tickets/${t.id}/runs`, alice);
+  assert.deepEqual((await patch("todo")).body, { error: "invalid_transition", from: "running", to: "todo" }); // two runs, before
+  await waitFor(alice, t.id, "review");
+  assert.equal((await patch("done")).status, 409); // done = merged: Approve
+  const back = await patch("todo"); // send back
+  assert.deepEqual([back.status, back.body.status], [200, "todo"]);
+  assert.equal((await json("PATCH", `/api/tickets/${t.id}`, alice, { status: "running", title: "renamed" })).status, 409);
+  assert.equal((await json("GET", `/api/tickets/${t.id}`, alice)).body.title, "by hand"); // a refused move changes nothing
+
+  // A child marked done by hand settles like a merged one: its dependent starts.
+  const epic = (await json("POST", "/api/tickets", alice, { title: "by hand epic", kind: "epic" })).body;
+  const a = (await json("POST", "/api/tickets", alice, { title: "child a" })).body;
+  const b = (await json("POST", "/api/tickets", alice, { title: "child b", test_command: "true" })).body;
+  db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(epic.id);
+  db.prepare("UPDATE tickets SET parent_id = ?, depends_on = ? WHERE id IN (?, ?)").run(epic.id, "[]", a.id, b.id);
+  db.prepare("UPDATE tickets SET depends_on = ? WHERE id = ?").run(JSON.stringify([a.id]), b.id);
+  assert.equal((await json("PATCH", `/api/tickets/${a.id}`, alice, { status: "done" })).status, 200);
+  assert.equal((await waitFor(alice, b.id, "review")).runs.length, 1);
+  // Put back in todo by hand (its dependency is done, its epic running): it is queued again, once.
+  assert.equal((await json("PATCH", `/api/tickets/${b.id}`, alice, { status: "todo" })).status, 200);
+  assert.equal((await waitFor(alice, b.id, "review")).runs.length, 2);
 });
