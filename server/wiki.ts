@@ -21,6 +21,8 @@ export const PAGE_MAX = 3500;
 const SPECIAL = ["SCHEMA.md", "index.md", "log.md"]; // every other .md is a content page
 const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+)\.md$/; // root .md files, modules/*.md, howto/*.md
 const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
+// edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host).
+export const WIKI_PROTECTED = ["code", "wiki/.git"];
 export const today = () => new Date().toISOString().slice(0, 10);
 
 export const wikiDir = (ws: string) => join(dataDir(), "wikis", ws);

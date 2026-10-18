@@ -14,7 +14,7 @@ process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "wiki-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
 const { runTool, wikiTools } = await import("../server/agent/tools.ts");
-const { frontmatter, lintDir, wikiDir } = await import("../server/wiki.ts");
+const { frontmatter, lintDir, wikiDir, WIKI_PROTECTED } = await import("../server/wiki.ts");
 
 const origin = "http://localhost:5173";
 const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
@@ -134,10 +134,11 @@ test("the maintainer can read the code and edit the wiki copy, never the code ch
   assert.deepEqual(wikiTools.map((t) => t.def.name), ["read_file", "edit_file", "search"]); // no shell, no apply_patch
   const root = mkdtempSync(join(tmpdir(), "wiki-root-"));
   mkdirSync(join(root, "code"));
-  mkdirSync(join(root, "wiki"));
-  const ctx = { root, exec: async () => ({ stdout: "", stderr: "", code: 0, timedOut: false }), protectedPaths: ["code"] };
+  mkdirSync(join(root, "wiki/.git"), { recursive: true });
+  const ctx = { root, exec: async () => ({ stdout: "", stderr: "", code: 0, timedOut: false }), protectedPaths: WIKI_PROTECTED };
   const edit = (path: string) => runTool(wikiTools, { type: "tool_use", id: "1", name: "edit_file", input: { path, old_string: "", new_string: "x" } }, ctx);
   assert.match((await edit("code/a.ts")).content, /read-only \(protected path\)/);
+  assert.match((await edit("wiki/.git/config")).content, /read-only \(protected path\)/); // its config could run commands on the host
   assert.match((await edit("../escape.md")).content, /outside the workspace/);
   assert.equal((await edit("wiki/index.md")).is_error, false);
 });

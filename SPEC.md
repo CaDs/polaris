@@ -289,7 +289,7 @@ bootstrap (existing pages stay readable in the UI).
   run's provider and model (else the workspace default). It goes through the normal FIFO queue and concurrency slots, and
   `wikiSerial` makes runs of one workspace (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the
   previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
-  the wiki repo). Tools: `read_file`, `search`, `edit_file` only; `code` is a protected path, so `edit_file` there fails. **No
+  the wiki repo). Tools: `read_file`, `search`, `edit_file` only; `code/` and `wiki/.git` (its config could run commands on the host) are protected paths, so `edit_file` there fails. **No
   shell**: a host shell could write anywhere, and the planner works the same way. System prompt `prompts/wiki.md` (static).
   First message: environment, ticket title and spec, the files changed, the merged diff (15,000 chars), the worker's final reply
   (which may contain a `## Wiki notes` section; worker.md asks for one when it learned something non-obvious) and the current

@@ -14,7 +14,7 @@ import { addDetached, addWorktree, commitAll, excludeScratch, git, inspectRepo, 
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
-import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
@@ -799,7 +799,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
       const common = {
         provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
-        protectedPaths: ["code"], signal, cacheKey: ws, compactAt, onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e),
+        protectedPaths: WIKI_PROTECTED, signal, cacheKey: ws, compactAt, onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e),
       };
       let a = await runAgent({ ...common, budget: WIKI_BUDGET });
       for (let fix = 0; ; fix++) {
