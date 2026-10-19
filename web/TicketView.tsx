@@ -148,7 +148,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
           </table>
         </div>
       )}
-      {current && <Transcript key={current.id} run={current} onFinish={() => (reload(), load())} />}
+      {/* Keyed on the status too: an approve or reject lands on a finished run's log, so the transcript replays it. */}
+      {current && <Transcript key={`${current.id}-${ticket.status}`} run={current} onFinish={() => (reload(), load())} />}
 
       {retrying && providers && (
         <RetryDialog run={retrying} providers={providers} close={() => setRetrying(null)} go={(c) => (setRetrying(null), run(c))} />
@@ -202,6 +203,7 @@ function Prompt({ text }: { text: string }) {
 
 export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }) {
   const [events, setEvents] = useState<Ev[]>([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const es = new EventSource(`/api/runs/${run.id}/events`);
@@ -235,9 +237,10 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         </h3>
         <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.in)} · out {fmt(usage.out)} · cached {fmt(usage.cached)} · cache hit {hitRate(usage.in, usage.cached)}</span>
         {!finished && (run.status === "running" || run.status === "queued") && (
-          <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch(() => {})}>Cancel</button>
+          <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch((e) => setError(e.message))}>Cancel</button>
         )}
       </div>
+      <Alert error={error} />
       {skills && (
         <p className="muted" aria-label="Skills offered">
           Skills offered: {skills.length ? skills.map((k: any) => <span key={k.path} className="mono" title={`${k.description} (${k.path})`}>{k.name} </span>) : "none"}
@@ -334,6 +337,17 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
               )}
             </div>
           );
+        if (e.type === "review")
+          return p.decision === "approved"
+            ? <div key={e.seq} className="note ok"><strong>Approved</strong>{p.merge_sha && <> · merged as <span className="mono">{p.merge_sha.slice(0, 8)}</span></>}</div>
+            : <div key={e.seq} className="note err"><strong>Rejected</strong>{p.note && <p className="msg">{p.note}</p>}</div>;
+        if (e.type === "wiki")
+          return p.problems ? (
+            <details key={e.seq} className="gate err" open>
+              <summary>Wiki {p.op} rejected: {p.problems.length} problem{p.problems.length === 1 ? "" : "s"}, nothing committed</summary>
+              <ul>{p.problems.map((x: string) => <li key={x}>{x}</li>)}</ul>
+            </details>
+          ) : <div key={e.seq} className="note ok"><strong>Wiki {p.op}</strong> · {p.commit ? <>committed <span className="mono">{p.commit.slice(0, 8)}</span></> : "nothing to change"}</div>;
         if (e.type === "error") return <p key={e.seq} className={p.retrying ? "warn" : "error"}>{p.kind}: {p.message}</p>;
         if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns.</p>;
         return null;

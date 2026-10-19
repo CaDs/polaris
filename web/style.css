@@ -245,6 +245,8 @@ label.check input { width: auto; margin: 0; }
 .child .icon { vertical-align: -2px; }
 .note { margin: 6px 0; padding: 4px 8px; border-left: 2px solid var(--accent); background: var(--hover); border-radius: 0 4px 4px 0; }
 .note p { margin: 2px 0 0; }
+.note.ok { border-left-color: var(--ok); }
+.note.err { border-left-color: var(--error); }
 
 /* M10: project wiki */
 .wiki { max-width: 860px; padding: 12px 16px 48px; }
