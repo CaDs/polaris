@@ -95,6 +95,10 @@ Start it:
 npm run dev       # dashboard on http://localhost:5173 (API on :3000)
 ```
 
+Or with make: `make setup` does the install and writes `.env` with fresh secrets, `make dev` starts it, `make doctor`
+checks Node, git, Docker and Ollama, `make check` runs typecheck and tests, `make e2e/headed` the browser suite. `make`
+lists everything.
+
 Or as a single process: `npm run build && npm start` (everything on http://localhost:3000; set `BETTER_AUTH_URL` and
 `WEB_ORIGIN` to that address).
 
