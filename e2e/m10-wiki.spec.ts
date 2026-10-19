@@ -20,7 +20,12 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   await runTicket("Add notes", "WIKI-NOTES");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("done");
+  const transcript = page.getByRole("region", { name: "Transcript" });
+  await expect(transcript.locator(".note.ok")).toContainText(/Approved · merged as [0-9a-f]{8}/); // the review decision is in the run's transcript
   await expect(page.getByRole("button", { name: "Show wiki run" })).toBeVisible({ timeout: 60_000 }); // listed with the ticket's runs
+  await expect(page.getByRole("row", { name: /wiki/ })).toContainText("passed", { timeout: 60_000 }); // the runs table follows the wiki run without a reload
+  await page.getByRole("button", { name: "Show wiki run" }).click();
+  await expect(transcript.locator(".note.ok")).toContainText(/Wiki ingest · committed [0-9a-f]{8}/);
 
   // The Wiki page: the maintainer's page in the index, and its commit in the history.
   await page.getByRole("link", { name: "Wiki" }).click();

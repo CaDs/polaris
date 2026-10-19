@@ -180,8 +180,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.getByRole("listitem", { name: "Beta" })).toContainText("0/1");
   await shot("project");
 
-  // Both themes render the board (screenshots in the report).
+  // A label renamed in Settings shows on the cards without a reload.
+  await page.getByRole("link", { name: "Settings" }).click();
+  await labels.getByLabel("Rename frontend").fill("ui");
+  await labels.getByLabel("Rename frontend").blur();
+  await expect(labels.locator(".chip", { hasText: /^ui$/ })).toBeVisible();
   await page.getByRole("link", { name: "Board" }).click();
+  await expect(todo.getByRole("button", { name: /Polish cart button/ }).locator(".chip")).toHaveText("ui");
+
+  // Both themes render the board (screenshots in the report).
   for (const [theme, bg] of [["Dark", "rgb(16, 16, 18)"], ["Light", "rgb(255, 255, 255)"]]) {
     await page.getByLabel("Theme").selectOption(theme);
     await expect(page.locator("body")).toHaveCSS("background-color", bg);

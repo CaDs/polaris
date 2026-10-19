@@ -26,12 +26,13 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   }, [ticket.id]);
   useEffect(() => void api<{ test_command: string }>("/api/settings").then((s) => setWorkspaceTest(s.test_command), () => {}), []);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
-  // An epic's children change while the epic itself does not.
+  // Poll what changes while the ticket itself does not: an epic's children, a wiki run after approval.
+  const busy = (ticket.kind === "epic" && ticket.status !== "done") || !!detail?.runs.some((r) => r.status === "queued" || r.status === "running");
   useEffect(() => {
-    if (ticket.kind !== "epic" || ticket.status === "done") return;
+    if (!busy) return;
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
-  }, [ticket.id, ticket.kind, ticket.status]);
+  }, [ticket.id, busy]);
 
   async function patch(body: object) {
     setError("");

@@ -48,6 +48,16 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await expect(transcript).toContainText("cancelled");
   await expect(page.getByLabel("Status")).toHaveValue("todo");
 
+  // Changed elsewhere (another tab, the CLI): the board picks it up when the window is back in front, without a reload.
+  await page.getByRole("link", { name: "Board" }).click();
+  await expect(column("todo").getByRole("button", { name: /Slow ticket/ })).toBeVisible();
+  await page.waitForLoadState("networkidle"); // the board's own fetches are done: only the focus can refresh it now
+  const slow = (await (await page.request.get("/api/tickets")).json()).find((t: { title: string }) => t.title === "Slow ticket");
+  expect((await page.request.patch(`/api/tickets/${slow.id}`, { data: { status: "failed" } })).ok()).toBe(true);
+  await page.evaluate(() => dispatchEvent(new Event("focus")));
+  await expect(column("failed").getByRole("button", { name: /Slow ticket/ })).toBeVisible();
+  await column("failed").getByRole("button", { name: /Slow ticket/ }).click();
+
   // Theme: persisted across reload.
   await page.getByLabel("Theme").selectOption("Dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -64,4 +74,5 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
   await expect(column("todo").getByRole("button")).toHaveCount(0);
+  await expect(column("failed").getByRole("button")).toHaveCount(0);
 });

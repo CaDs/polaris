@@ -124,6 +124,11 @@ function useTickets() {
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
   const reload = useCallback(() => api<Ticket[]>("/api/tickets").then(setTickets, () => {}), []);
   useEffect(() => void reload(), [reload]);
+  // Changes made elsewhere (another tab, the CLI) show up when the window is back in front.
+  useEffect(() => {
+    addEventListener("focus", reload);
+    return () => removeEventListener("focus", reload);
+  }, [reload]);
   const anyRunning = tickets?.some((t) => t.status === "running");
   useEffect(() => {
     if (!anyRunning) return;
@@ -162,6 +167,7 @@ function Dashboard({ email }: { email: string }) {
   const search = q < 0 ? "" : loc.slice(q + 1);
   const [, section = "", sub] = path.split("/");
   useEffect(reloadTracker, [path]); // pickers pick up labels/projects/cycles made elsewhere (e.g. by a planner)
+  useEffect(() => void (tracker && reload()), [tracker]); // a renamed or deleted label, project or cycle shows on the cards
   const number = section === "t" ? sub : undefined;
   const ticket = number ? tickets?.find((t) => t.number === Number(number)) : undefined;
   const page = PAGES.find(([p]) => p === section)?.[1];
