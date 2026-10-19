@@ -1,21 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 // ChatGPT OAuth against local mock servers only: nothing here talks to OpenAI.
+const { call, db, listen, user } = await import("./helpers.ts");
 const jwt = (claims: object) => ["e30", Buffer.from(JSON.stringify(claims)).toString("base64url"), "unsigned"].join(".");
 const idToken = (account: string) => jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } });
 
 const authReqs: URLSearchParams[] = [];
 const backendReqs: { url?: string; headers: Record<string, any>; body: any }[] = [];
 let issued = 0;
-const listen = async (h: Parameters<typeof createServer>[1]) => {
-  const s = createServer(h);
-  await new Promise<void>((ok) => s.listen(0, "127.0.0.1", ok));
-  return { s, url: `http://127.0.0.1:${(s.address() as AddressInfo).port}` };
-};
 const readBody = async (req: AsyncIterable<Buffer>) => {
   let b = "";
   for await (const c of req) b += c;
@@ -41,8 +36,6 @@ process.env.POLARIS_OPENAI_AUTH_URL = auth.url;
 process.env.POLARIS_CHATGPT_BASE_URL = backend.url;
 process.env.POLARIS_OAUTH_PORT = "0"; // any free port instead of 1455
 const oauth = await import("../server/oauth.ts");
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
 const { decrypt, encrypt } = await import("../server/secrets.ts");
 
 test("PKCE challenge is the S256 of the verifier; authorize URL carries the Codex parameters", () => {
@@ -74,13 +67,7 @@ test("account id comes from the id_token claims; token exchange and refresh hit 
 });
 
 test("browser login via the temporary listener, then Codex backend requests with refresh", async () => {
-  const origin = "http://localhost:5173";
-  const call = async (method: string, path: string, cookie = "", body?: unknown) => {
-    const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { body: (await res.json().catch(() => null)) as any, cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") || cookie, status: res.status };
-  };
-  const up = await call("POST", "/api/auth/sign-up/email", "", { email: "o@x.dev", password: "password-123", name: "o" });
-  const cookie = (await call("POST", "/api/auth/organization/create", up.cookie, { name: "oa", slug: "oa" })).cookie;
+  const cookie = await user("oa");
   assert.equal((await call("POST", "/api/providers", cookie, { name: "bad", kind: "openai", auth_type: "oauth", api_key: "k" })).status, 400);
   const p = (await call("POST", "/api/providers", cookie, { name: "ChatGPT", kind: "openai", auth_type: "oauth" })).body;
   assert.equal(p.has_secret, false);
@@ -131,4 +118,4 @@ test("browser login via the temporary listener, then Codex backend requests with
   assert.equal(JSON.parse(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(p.id) as any).encrypted_secret)).access, `access-${issued}`);
 });
 
-test.after(() => (auth.s.close(), backend.s.close()));
+test.after(() => (auth.srv.close(), backend.srv.close()));

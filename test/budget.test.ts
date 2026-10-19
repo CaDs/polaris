@@ -1,68 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // Worker budget settings (max_turns, max_minutes) and what uses them. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "budget-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
-const { hostExec, runTool } = await import("../server/agent/tools.ts");
-const { plannerTools } = await import("../server/planner.ts");
-
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
-
-function tempRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(dir, "README.md"), "hi\n");
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function until<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 60_000): Promise<T> {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const v = await fn();
-    if (v) return v;
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const task = (runId: string) => events(runId).find((e) => e.type === "run_started")!.p.task as string;
-const idle = (ws: string) =>
-  until("no run in flight", async () => !db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.status IN ('queued', 'running')").get(ws));
-
-async function workspace(name: string, settings: Record<string, unknown>) {
-  const { cookie: signed } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  const cookie = (await call("POST", "/api/auth/organization/create", signed, { name, slug: name })).cookie;
-  const repo = tempRepo();
-  assert.equal((await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", ...settings })).status, 200);
-  const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, cookie)).body;
-  const byKey = async (key: string) => (await call("GET", "/api/tickets", cookie)).body.find((t: any) => t.key === key);
-  const is = (id: string, status: string) => until(`${status}`, async () => ((await get(id)).status === status ? get(id) : false));
-  const create = async (body: Record<string, unknown>) => (await call("POST", "/api/tickets", cookie, body)).body;
-  return { cookie, repo, get, byKey, is, create };
-}
-
+const { call, db, events, idle, until, workspace } = await import("./helpers.ts");
 
 test("settings: max_turns / max_minutes default, round-trip, accept form strings, validate range and integers, omitted = unchanged", async () => {
   const w = await workspace("bs", { test_command: "true" });
   let s = (await call("GET", "/api/settings", w.cookie)).body;
   assert.deepEqual([s.max_turns, s.max_minutes], [120, 60]); // unconfigured
-  const base = { repo_path: w.repo, setup_command: "", test_command: "true" };
-  const put = (b: object) => call("PUT", "/api/settings", w.cookie, { ...base, ...b });
+  const put = w.settings;
   s = (await put({})).body;
   assert.deepEqual([s.max_turns, s.max_minutes], [120, 60]);
   s = (await put({ max_turns: "200", max_minutes: 90 })).body; // the web form sends strings

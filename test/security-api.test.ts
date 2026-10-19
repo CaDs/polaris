@@ -8,14 +8,7 @@ import { join } from "node:path";
 
 // Single-user defaults: sign-up closes after the first account, cookie mutations must be same-origin, the API listens on loopback.
 delete process.env.POLARIS_OPEN_SIGNUP; // npm test opens sign-up for the multi-user suites
-const { app } = await import("../server/app.ts");
-
-const origin = "http://localhost:5173";
-async function call(method: string, path: string, cookie = "", body?: unknown, headers: Record<string, string> = { origin }) {
-  const res = await app.request(path, { method, headers: { cookie, "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ") || cookie };
-}
-const signUp = (name: string) => call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
+const { call, origin, signUp } = await import("./helpers.ts");
 
 test("the first account is the owner; sign-up then closes unless POLARIS_OPEN_SIGNUP=1", async () => {
   assert.equal((await signUp("owner")).status, 200);

@@ -1,40 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // M4: encrypted provider secrets, provider API, provider/model choice per ticket and per retry.
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_RETRY_BASE_MS = "1"; // a dead provider is retried 4 times: don't wait seconds
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "prov-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, listen, reply, tempRepo, until, user } = await import("./helpers.ts");
 const { encrypt, decrypt, SecretKeyError } = await import("../server/secrets.ts");
 
-const origin = "http://localhost:5173";
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  const text = await res.text();
-  return { status: res.status, text, body: (text ? (() => { try { return JSON.parse(text); } catch { return null; } })() : null) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
 const alice = await user("alice");
 const bob = await user("bob");
 
 // Mock Anthropic-compatible server (also Ollama's /api/tags). Turn 1 of a task calls the shell tool, then it answers.
 // A task that mentions a previous failed attempt also creates ok.txt. mode "plain" never calls a tool.
 const ollama = { models: ["mock-a", "mock-b"], plain: false, models_seen: [] as string[] };
-const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
-const srv = createServer(async (req, res) => {
+const { srv, url: mock } = await listen(async (req, res) => {
   if (req.url === "/api/tags") return void res.end(JSON.stringify({ models: ollama.models.map((name) => ({ name })) }));
   if (req.url!.startsWith("/api/")) return void res.writeHead(404).end(); // /api/ps, /api/show: no window info, run falls back
   let raw = "";
@@ -44,26 +23,11 @@ const srv = createServer(async (req, res) => {
   const last = b.messages.at(-1).content[0];
   const task: string = b.messages[0].content[0].text;
   const tool = last.type !== "tool_result" && !ollama.plain && !!b.tools; // no tools: an M6 reflection
+  const echo = tool && b.tools[0].name === "echo";
   const input = JSON.stringify({ command: task.includes("Previous attempt failed") ? "touch ok.txt" : "true" });
   res.writeHead(200, { "content-type": "text/event-stream" });
-  res.end(sse([
-    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
-    ...(tool
-      ? [
-          { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: b.tools[0].name === "echo" ? "echo" : "shell", input: {} } },
-          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: b.tools[0].name === "echo" ? '{"text":"ping"}' : input } },
-          { type: "content_block_stop", index: 0 },
-        ]
-      : [
-          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "All done." } },
-          { type: "content_block_stop", index: 0 },
-        ]),
-    { type: "message_delta", delta: { stop_reason: tool ? "tool_use" : "end_turn" }, usage: { output_tokens: 5 } },
-  ]));
+  res.end(reply(tool ? { tool: echo ? "echo" : "shell", input: echo ? '{"text":"ping"}' : input } : { text: "All done." }));
 });
-await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
-const mock = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
 
 test("encryption round-trips and detects tampering, wrong keys and a missing key", () => {
   const c = encrypt("sk-secret-1234");
@@ -153,21 +117,16 @@ test("models and the tool-calling smoke test", async () => {
 });
 
 test("runs record the chosen provider/model; retry-with picks another; gate retries keep it", async () => {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(repo, "README.md"), "hi\n");
-  execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
-  assert.equal((await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt" })).status, 200);
+  assert.equal((await call("PUT", "/api/settings", alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f ok.txt" })).status, 200);
   const providers = (await call("GET", "/api/providers", alice)).body;
   const local = providers.find((p: any) => p.name === "Ollama").id;
   const claude = providers.find((p: any) => p.name === "C").id;
 
-  const waitRuns = async (ticketId: string, n: number, status: string) => {
-    for (const end = Date.now() + 20_000; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
+  const waitRuns = (ticketId: string, n: number, status: string) =>
+    until(`${status} with ${n} runs`, async () => {
       const t = (await call("GET", `/api/tickets/${ticketId}`, alice)).body;
-      if (t.runs.length >= n && t.status === status) return t;
-    }
-    assert.fail(`ticket never reached ${status} with ${n} runs`);
-  };
+      return t.runs.length >= n && t.status === status && t;
+    });
 
   ollama.models_seen.length = 0;
   // Ticket-level choice. Attempt 1 fails the gate (ok.txt missing), the automatic retry keeps provider and model.
@@ -211,15 +170,13 @@ test.after(() => srv.close());
 test("ollama context window: /api/ps beats /api/show, show when not loaded, setting wins, failure falls back", async () => {
   const { runWindow } = await import("../server/runs.ts");
   const o = { ps: [{ name: "m1", context_length: 262_144 }] as object[], show: { "qwen.context_length": 131_072 } as object | undefined, status: 200 };
-  const s = createServer((req, res) => {
+  const { srv: s, url: base_url } = await listen((req, res) => {
     res.statusCode = o.status;
     if (req.url === "/api/ps") return void res.end(JSON.stringify({ models: o.ps }));
     if (req.url === "/api/show" && o.show) return void res.end(JSON.stringify({ model_info: o.show }));
     res.statusCode = 404;
     res.end("{}");
-  }).listen(0);
-  await new Promise((r) => s.once("listening", r));
-  const base_url = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+  });
   const row = (context_window: number) => ({ kind: "ollama", base_url, context_window }) as any;
   try {
     assert.deepEqual(await runWindow(row(32_768), "m1"), { window: 262_144, source: "ollama /api/ps" });

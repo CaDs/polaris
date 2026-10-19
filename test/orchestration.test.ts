@@ -1,53 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M3 pipeline without docker: POLARIS_SANDBOX=host runs setup/test/shell commands in the worktree on the host.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "orch-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, events, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
 const { addWorktree, protectedChanges, removeWorktree } = await import("../server/git.ts");
 const { parseProtected } = await import("../server/agent/tools.ts");
 const { parseTasks, seedTasks } = await import("../server/cli/seed-tasks.ts");
 
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
-
-function tempRepo(files: Record<string, string> = { "README.md": "hi\n" }) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  for (const [f, body] of Object.entries(files)) {
-    mkdirSync(join(dir, f, ".."), { recursive: true });
-    writeFileSync(join(dir, f), body);
-  }
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  return dir;
-}
-
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
-async function waitFor(cookie: string, ticketId: string, status: string, ms = 20_000) {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const t = await call("GET", `/api/tickets/${ticketId}`, cookie);
-    if (t.body.status === status) return t.body;
-  }
-  assert.fail(`ticket never reached ${status}`);
-}
 const ticket = async (cookie: string, title: string, spec = "") => (await call("POST", "/api/tickets", cookie, { title, spec })).body;
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
 const branches = (repo: string) => sh(repo, "git for-each-ref --format='%(refname:short)' refs/heads/polaris");
 
 const alice = await user("alice");
@@ -288,7 +253,7 @@ test("seed-tasks: one ticket per unchecked milestone item, idempotent", async ()
     { title: "M4: A", spec: "M4 — Providers\n\n- A" },
     { title: "M4: B", spec: "M4 — Providers\n\n- B" },
   ]);
-  const ws = (db.prepare("SELECT id FROM organization WHERE slug = 'bob'").get() as { id: string }).id;
+  const ws = wsOf("bob");
   assert.equal(seedTasks(ws, md), 3);
   assert.equal(seedTasks(ws, md), 0);
   const titles = (await call("GET", "/api/tickets", bob)).body.map((t: any) => t.title);

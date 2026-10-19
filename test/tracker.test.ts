@@ -1,34 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // M11 tracker: labels, ticket fields, filters, search, views, projects, cycles, parent epics, priority queue, planner.
 // POLARIS_SANDBOX=host and the demo provider for the runs; one slot so the queue order is observable.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "1";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "tracker-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, task, tempRepo, until, user, wsOf } = await import("./helpers.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { plannerTools } = await import("../server/planner.ts");
 const { today } = await import("../server/tracker.ts");
 
-const origin = "http://localhost:5173";
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string, workspace = true) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return workspace ? (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie : cookie;
-}
 const userId = (name: string) => (db.prepare("SELECT id FROM user WHERE email = ?").get(`${name}@x.dev`) as { id: string }).id;
-const wsOf = (name: string) => (db.prepare("SELECT organizationId AS id FROM member WHERE userId = ?").get(userId(name)) as { id: string }).id;
 const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
 
 const alice = await user("alice");
@@ -311,20 +294,15 @@ test("parent epic set by hand: only a todo task without runs, into an open epic,
 });
 
 // Polls until the run's ticket settles.
-async function settled(cookie: string, ticketId: string) {
-  for (const end = Date.now() + 30_000; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
+const settled = (cookie: string, ticketId: string) =>
+  until("ticket settled", async () => {
     const t = (await call("GET", `/api/tickets/${ticketId}`, cookie)).body;
-    if (t.status !== "running") return t;
-  }
-  assert.fail("ticket never settled");
-}
+    return t.status !== "running" && t;
+  });
 
 test("run queue: urgent first, then FIFO, no priority last; the worker sees priority, labels, project and due date", async () => {
   const w = await user("que");
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(repo, "README.md"), "hi\n");
-  execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
-  await call("PUT", "/api/settings", w, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false, wiki: false });
+  await call("PUT", "/api/settings", w, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false, wiki: false });
   const bug = (await post(w, "/api/labels", { name: "bug", color: "red" })).body.id;
   const p = (await post(w, "/api/projects", { name: "Core" })).body;
   const ms = (await post(w, `/api/projects/${p.id}/milestones`, { name: "v1" })).body.milestones[0].id;
@@ -342,7 +320,6 @@ test("run queue: urgent first, then FIFO, no priority last; the worker sees prio
   const started = Object.entries(runs).map(([title, id]) => [title, (db.prepare("SELECT rowid, started_at FROM runs WHERE id = ?").get(id) as { started_at: number }).started_at] as const);
   assert.deepEqual(started.sort((a, b) => a[1] - b[1]).map(([t]) => t), ["urgent", "urgent 2", "medium", "low", "none"]);
 
-  const task = (id: string) => JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'run_started'").get(id) as { payload: string }).payload).task as string;
   assert.match(task(runs.urgent), /# Task\n\n# urgent\n\nPriority: Urgent · Labels: bug · Project: Core › v1 · Due: 2026-11-30$/);
   assert.match(task(runs.none), /# Task\n\nnone$/); // nothing set: unchanged
 });

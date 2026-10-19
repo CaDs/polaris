@@ -1,38 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M8 model review, with the demo provider playing worker and reviewer.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "mr-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, tempRepo, until, user, waitFor } = await import("./helpers.ts");
 
-const origin = "http://localhost:5173";
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-const { cookie: signed } = await call("POST", "/api/auth/sign-up/email", "", { email: "mr@x.dev", password: "password-123", name: "mr" });
-const me = (await call("POST", "/api/auth/organization/create", signed, { name: "Mr", slug: "mr" })).cookie;
-
-const repo = realpathSync(mkdtempSync(join(tmpdir(), "mr-repo-")));
-writeFileSync(join(repo, "README.md"), "hi\n");
-execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
+const me = await user("mr");
+const repo = tempRepo();
 const settings = { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" };
 
 async function ticketRun(title: string) {
   const t = (await call("POST", "/api/tickets", me, { title })).body;
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, me)).status, 201);
-  let ticket = t;
-  for (const end = Date.now() + 30_000; Date.now() < end && !["review", "failed"].includes(ticket.status); await new Promise((r) => setTimeout(r, 50)))
-    ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;
-  return ticket;
+  return until("review or failed", async () => {
+    const ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;
+    return ["review", "failed"].includes(ticket.status) && ticket;
+  });
 }
 const reviews = (ticketId: string) =>
   (db.prepare("SELECT r.id AS run_id, r.attempt, e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.ticket_id = ? AND e.type = 'model_review' ORDER BY r.rowid, e.seq").all(ticketId) as { run_id: string; attempt: number; payload: string }[])
@@ -92,8 +79,7 @@ test("a retry is told why the previous attempt really failed: a gate failure aft
   await call("PUT", "/api/settings", me, { ...settings, model_review: true, auto_split: false });
   const t = (await call("POST", "/api/tickets", me, { title: "REVIEW-ONCE then the gate breaks", test_command: "test ! -f fixed.txt" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, me);
-  let ticket = t;
-  for (const end = Date.now() + 40_000; Date.now() < end && ticket.status !== "failed"; await new Promise((r) => setTimeout(r, 50))) ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;
+  const ticket = await waitFor(me, t.id, "failed");
   assert.equal(ticket.runs.length, 3);
   const task = JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'run_started'").get(ticket.runs[1].id) as { payload: string }).payload).task;
   assert.match(task, /Previous attempt failed: `test ! -f fixed\.txt` exited with code 1/);

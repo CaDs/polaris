@@ -1,19 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M5: spilled tool output, compaction, skills, cache-friendly prefix, usage API, reliability fixes.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "ctx-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, events, listen, reply, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
 const { runAgent } = await import("../server/agent/loop.ts");
 const { fakeProvider } = await import("../server/agent/providers/fake.ts");
 const { listSkills, skillsText } = await import("../server/agent/context.ts");
@@ -22,39 +16,8 @@ const { addWorktree, commitAll, protectedChanges } = await import("../server/git
 const { compactThreshold } = await import("../server/runs.ts");
 import type { AgentEvent, Block, ToolUseBlock, Usage } from "../server/agent/types.ts";
 
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
 const text = (t: string): Block => ({ type: "text", text: t });
-
-function tempRepo(files: Record<string, string> = { "README.md": "hi\n" }) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  for (const [f, body] of Object.entries(files)) {
-    mkdirSync(join(dir, f, ".."), { recursive: true });
-    writeFileSync(join(dir, f), body);
-  }
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
-async function waitFor(cookie: string, ticketId: string, status: string, ms = 20_000) {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const t = await call("GET", `/api/tickets/${ticketId}`, cookie);
-    if (t.body.status === status) return t.body;
-  }
-  const runs = db.prepare("SELECT id FROM runs WHERE ticket_id = ?").all(ticketId) as { id: string }[];
-  assert.fail(`ticket never reached ${status}: ${JSON.stringify(runs.flatMap((r) => events(r.id).filter((e) => e.type === "error" || e.type === "run_finished").map((e) => e.p)))}`);
-}
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
 
 // Loop with a scripted provider whose reported usage grows with the conversation: 400 tokens per message (100 uncached, 300 cached).
 function loop(script: Parameters<typeof fakeProvider>[0], o: Partial<Parameters<typeof runAgent>[0]> = {}) {
@@ -314,28 +277,15 @@ test("provider/workspace context settings: defaults per kind, editable, validate
 test("system prompt and tools are byte-identical across repos and runs; per-run context is in the first user message", async () => {
   // Mock Anthropic: one shell call, then done. Records every request body.
   const bodies: any[] = [];
-  const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
-  const srv = createServer(async (req, res) => {
+  const { srv, url: mock } = await listen(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
     const b = JSON.parse(raw);
     bodies.push(b);
     const tool = b.messages.at(-1).content[0].type !== "tool_result";
     res.writeHead(200, { "content-type": "text/event-stream" });
-    res.end(sse([
-      { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
-      ...(tool
-        ? [
-            { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: "shell", input: {} } },
-            { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"true"}' } },
-            { type: "content_block_stop", index: 0 },
-          ]
-        : [{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } }, { type: "content_block_stop", index: 0 }]),
-      { type: "message_delta", delta: { stop_reason: tool ? "tool_use" : "end_turn" }, usage: { output_tokens: 5 } },
-    ]));
+    res.end(reply(tool ? { tool: "shell", input: '{"command":"true"}' } : { text: "ok" }));
   });
-  await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
-  const mock = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
 
   const skill = "---\nname: deploy\ndescription: Deploy the thing\n---\nSTEP-ONE\n";
   const setup = async (name: string, files: Record<string, string>) => {
@@ -414,8 +364,7 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
 test("GET /api/usage: totals, 14 days, models, top tickets, hit rate; isolated per workspace", async () => {
   const gina = await user("gina");
   const hank = await user("hank");
-  const ws = (slug: string) => (db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string }).id;
-  const ticket = (slug: string, id: string, title: string) => db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES (?, ?, ?)").run(id, ws(slug), title);
+  const ticket = (slug: string, id: string, title: string) => db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES (?, ?, ?)").run(id, wsOf(slug), title);
   ticket("gina", "ug1", "big one");
   ticket("gina", "ug2", "small one");
   ticket("hank", "uh1", "hank's");

@@ -1,72 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 // M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "planner-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, events, idle, sh, task, until, user, workspace: base } = await import("./helpers.ts");
 const { createRun, subscribe } = await import("../server/agent/events.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { extractHandoff, handoffText, plannerTools, MAX_CHILDREN } = await import("../server/planner.ts");
 const { pump, wake } = await import("../server/runs.ts");
 
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
 const repos: string[] = [];
-
-function tempRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(dir, "README.md"), "hi\n");
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  repos.push(dir);
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
-async function until<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 30_000): Promise<T> {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const v = await fn();
-    if (v) return v;
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const task = (runId: string) => events(runId).find((e) => e.type === "run_started")!.p.task as string;
 
 // A workspace with a repo whose gate passes once a.txt or b.txt exists (protected paths: tests/, evals/).
 async function workspace(name: string, auto = false, extra = {}) {
-  const cookie = await user(name);
-  const repo = tempRepo();
-  await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", test_command: "test -f a.txt || test -f b.txt", auto_approve_children: auto, ...extra });
-  const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, cookie)).body;
+  const w = await base(name, { test_command: "test -f a.txt || test -f b.txt", auto_approve_children: auto, ...extra });
+  repos.push(w.repo);
   const epic = async (title: string, spec = "") => {
-    const e = (await call("POST", "/api/tickets", cookie, { title, spec, kind: "epic" })).body;
-    assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, cookie)).status, 201);
+    const e = (await call("POST", "/api/tickets", w.cookie, { title, spec, kind: "epic" })).body;
+    assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, w.cookie)).status, 201);
     return e;
   };
   // Waits until the epic's child with this title is in that state; returns the epic detail.
   const childIs = (epicId: string, title: string, status: string) =>
     until(`${title} ${status}`, async () => {
-      const d = await get(epicId);
+      const d = await w.get(epicId);
       return d.children.find((c: any) => c.title === title)?.status === status && d;
     });
-  const is = (id: string, status: string) => until(`${status}`, async () => ((await get(id)).status === status ? get(id) : false));
-  return { cookie, repo, get, epic, childIs, is };
+  return { ...w, epic, childIs };
 }
 
 const bob = await user("bob");
@@ -250,7 +213,7 @@ test("auto-approve: passing children are merged without clicks and the epic reac
 test("failure path: B fails the gate on every attempt → a round creates a follow-up → the epic completes after it", async () => {
   const w = await workspace("fal", true, { auto_split: false }); // on, B would be split instead (test/split.test.ts)
   const e = await w.epic("Two files", "FAIL-GATE");
-  const d = await until("epic review", async () => ((await w.get(e.id)).status === "review" ? w.get(e.id) : false), 60_000);
+  const d = await w.is(e.id, "review");
   const [A, B, F] = d.children;
   assert.deepEqual(d.children.map((c: any) => [c.title, c.status]), [["Create a.txt", "done"], ["Create b.txt", "failed"], ["Follow-up: Create b.txt", "done"]]);
   assert.equal(A.handoff.startsWith("- Results: created a.txt"), true);
@@ -307,9 +270,6 @@ test("rounds start when the planner has something to do: 10 children settling on
     db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id);
   }
 });
-
-const idle = (ws: string) =>
-  until("no run in flight", async () => !db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.status IN ('queued', 'running')").get(ws));
 
 test("deleting a child: its dependents are blocked and its epic's planner replans or completes; eval cases of children block deleting the epic", async () => {
   const w = await workspace("del", false, { wiki: false, test_command: "true" });
@@ -374,7 +334,7 @@ test("create_ticket: children inherit the epic's test command, nothing is create
 
 test("a crashed planner round is retried once with a fresh round; a second crash in a row fails the epic", async () => {
   const w = await workspace("cra", true, { wiki: false, test_command: "true" });
-  const ws = (db.prepare("SELECT id FROM organization WHERE slug = 'cra'").get() as { id: string }).id;
+  const ws = w.ws;
   db.prepare("INSERT INTO providers (id, workspace_id, name, kind, auth_type) VALUES ('cra-broken', ?, 'Broken', 'anthropic', 'api_key')").run(ws); // no key: every round throws
   const epic = async (title: string) => (await call("POST", "/api/tickets", w.cookie, { title, spec: "PARALLEL", kind: "epic", provider_id: "cra-broken", model: "m" })).body;
 

@@ -1,55 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 
 // M6: reflection → lessons, eval cases + eval runs, prompt versions with eval-gated promotion. POLARIS_SANDBOX=host (no docker).
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "improve-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf } = await import("./helpers.ts");
 const { activePrompt, addPrompt, promote, promotion, REFLECT_SYSTEM, seriesDigest, LESSONS_MAX } = await import("../server/improve.ts");
 
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
 const worker = readFileSync(new URL("../server/agent/prompts/worker.md", import.meta.url), "utf8");
-
-function tempRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(dir, "README.md"), "hi\n");
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
-async function until<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 20_000): Promise<T> {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const v = await fn();
-    if (v) return v;
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-const waitFor = (cookie: string, id: string, status: string) =>
-  until(`ticket ${status}`, async () => {
-    const t = (await call("GET", `/api/tickets/${id}`, cookie)).body;
-    return t.status === status && t;
-  });
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const wsOf = (slug: string) => (db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string }).id;
 const runRow = (id: string) => db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as Record<string, any>;
 const evalDone = (cookie: string, id: string) =>
   until("eval run done", async () => (await call("GET", "/api/evals", cookie)).body.runs.find((r: any) => r.id === id && r.status === "done"));
@@ -57,8 +16,7 @@ const evalDone = (cookie: string, id: string) =>
 // Mock Anthropic: no tools = reflection (answers mock.reflection); a task mentioning "hold" makes one shell call whose answer
 // waits for mock.release(); everything else answers "done" at once. Records every request body.
 const mock = { bodies: [] as any[], reflection: "- MOCK-LESSON", gate: Promise.resolve(), release: () => {} };
-const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
-const srv = createServer(async (req, res) => {
+const { srv, url: mockUrl } = await listen(async (req, res) => {
   let raw = "";
   for await (const c of req) raw += c;
   const b = JSON.parse(raw);
@@ -66,22 +24,9 @@ const srv = createServer(async (req, res) => {
   const first: string = b.messages[0].content[0].text;
   const tool = b.tools && first.includes("hold") && b.messages.at(-1).content[0].type !== "tool_result";
   if (tool) await mock.gate;
-  const text = b.tools ? "done" : mock.reflection;
   res.writeHead(200, { "content-type": "text/event-stream" });
-  res.end(sse([
-    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
-    ...(tool
-      ? [
-          { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: "shell", input: {} } },
-          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"true"}' } },
-        ]
-      : [{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }]),
-    { type: "content_block_stop", index: 0 },
-    { type: "message_delta", delta: { stop_reason: tool ? "tool_use" : "end_turn" }, usage: { output_tokens: 5 } },
-  ]));
+  res.end(reply(tool ? { tool: "shell", input: '{"command":"true"}' } : { text: b.tools ? "done" : mock.reflection }));
 });
-await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
-const mockUrl = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
 test.after(() => srv.close());
 
 // A workspace whose runs use the mock (repo with no setup/test command).

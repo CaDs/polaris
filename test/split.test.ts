@@ -1,68 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // M9 automatic splitting: escalation of failed tasks into "Split:" epics, per-child test commands, the epic gate, triage.
 // POLARIS_SANDBOX=host (no docker), demo provider (SPLIT-ME, SPLIT-CHILD, EPIC-GATE-FAIL).
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "2";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "split-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, events, idle, listen, sh, task, until, workspace } = await import("./helpers.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { plannerTools } = await import("../server/planner.ts");
-
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
-
-function tempRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(dir, "README.md"), "hi\n");
-  sh(dir, "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init");
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function until<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 60_000): Promise<T> {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const v = await fn();
-    if (v) return v;
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const task = (runId: string) => events(runId).find((e) => e.type === "run_started")!.p.task as string;
-const idle = (ws: string) =>
-  until("no run in flight", async () => !db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.status IN ('queued', 'running')").get(ws));
-
-async function workspace(name: string, settings: Record<string, unknown>) {
-  const { cookie: signed } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  const cookie = (await call("POST", "/api/auth/organization/create", signed, { name, slug: name })).cookie;
-  const repo = tempRepo();
-  assert.equal((await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", ...settings })).status, 200);
-  const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, cookie)).body;
-  const byKey = async (key: string) => (await call("GET", "/api/tickets", cookie)).body.find((t: any) => t.key === key);
-  const is = (id: string, status: string) => until(`${status}`, async () => ((await get(id)).status === status ? get(id) : false));
-  const create = async (body: Record<string, unknown>) => (await call("POST", "/api/tickets", cookie, body)).body;
-  return { cookie, repo, get, byKey, is, create };
-}
 
 test("settings: auto_split defaults on and round-trips; size hint and triage model are stored and validated", async () => {
   const w = await workspace("set", { test_command: "true" });
   const d = (await call("GET", "/api/settings", w.cookie)).body;
   assert.deepEqual([d.auto_split, d.child_size_hint, d.triage_model], [1, "at most 3 files and about 60 changed lines, finishable in 20 agent turns", ""]);
-  const base = { repo_path: w.repo, setup_command: "", test_command: "true" };
-  const put = async (b: object) => (await call("PUT", "/api/settings", w.cookie, { ...base, ...b })).body;
+  const put = async (b: object) => (await w.settings(b)).body;
   await put({ auto_split: false, child_size_hint: " one file ", triage_model: "d1" });
   let s = (await call("GET", "/api/settings", w.cookie)).body;
   assert.deepEqual([s.auto_split, s.child_size_hint, s.triage_model], [0, "one file", "d1"]);
@@ -72,8 +23,8 @@ test("settings: auto_split defaults on and round-trips; size hint and triage mod
   assert.deepEqual([s.child_size_hint, s.triage_model], ["one file", "d1"]); // omitted = unchanged, like every field
   s = await put({ child_size_hint: null, triage_model: null });
   assert.deepEqual([s.child_size_hint, s.triage_model], ["at most 3 files and about 60 changed lines, finishable in 20 agent turns", ""]); // null = default
-  assert.equal((await call("PUT", "/api/settings", w.cookie, { ...base, child_size_hint: "x".repeat(2001) })).status, 400);
-  assert.equal((await call("PUT", "/api/settings", w.cookie, { ...base, triage_model: 5 })).status, 400);
+  assert.equal((await w.settings({ child_size_hint: "x".repeat(2001) })).status, 400);
+  assert.equal((await w.settings({ triage_model: 5 })).status, 400);
 });
 
 test("create_ticket test_command: validated like the API, stored on the child, shown to the planner", async () => {
@@ -205,7 +156,7 @@ test("epic gate: a failing workspace test command refuses complete_epic; the pla
 
 test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error runs directly; only first runs of top-level tasks", async () => {
   const seen: any[] = [];
-  const srv = createServer(async (req, res) => {
+  const { srv, url } = await listen(async (req, res) => {
     let raw = "";
     for await (const c of req) raw += c;
     if (req.method !== "POST" || req.url !== "/v1/systemone") return void res.writeHead(404).end();
@@ -215,10 +166,9 @@ test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error run
     const score = b.state.includes("huge") ? 3.4 : 0.8;
     res.end(JSON.stringify({ answers: { size: { score, probabilities: { "0": 0.1, "4": score > 3 ? 0.6 : 0 }, confidence: 0.7 } } }));
   });
-  await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
   try {
     const w = await workspace("tri", { test_command: "true" });
-    const p = (await call("POST", "/api/providers", w.cookie, { name: "Local", kind: "ollama", base_url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}/` })).body;
+    const p = (await call("POST", "/api/providers", w.cookie, { name: "Local", kind: "ollama", base_url: `${url}/` })).body;
     assert.equal((await call("PUT", "/api/settings/default-provider", w.cookie, { provider_id: p.id, model: "qwen" })).status, 200);
     await call("PUT", "/api/settings", w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", triage_model: "d1", model_review: false });
     // model "demo" on the ticket: its runs use the demo provider, while triage asks the workspace's default Ollama provider.
@@ -266,7 +216,7 @@ test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error run
 
 test("escalation: the Split epic copies the ticket's tracker fields; its children inherit them as the planner's do", async () => {
   const w = await workspace("trk", { test_command: "test -f part1.txt && test -f part2.txt", auto_approve_children: true });
-  const ws = (db.prepare("SELECT id FROM organization WHERE slug = 'trk'").get() as { id: string }).id;
+  const ws = w.ws;
   const me = (db.prepare("SELECT userId FROM member WHERE organizationId = ?").get(ws) as { userId: string }).userId;
   db.prepare("INSERT INTO labels (id, workspace_id, name, color) VALUES ('l1', ?, 'bug', 'red'), ('l2', ?, 'ui', 'blue')").run(ws, ws);
   db.prepare("INSERT INTO projects (id, workspace_id, name) VALUES ('p1', ?, 'Proj')").run(ws);

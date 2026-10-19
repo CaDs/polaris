@@ -1,58 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // M10: the per-project wiki: lint, snapshot + staleness in every run, serialized ingest after approve, bootstrap/lint runs,
 // human edits, the wiki setting. POLARIS_SANDBOX=host (no docker), demo provider as the maintainer.
 process.env.POLARIS_PROVIDER = "fake";
-process.env.POLARIS_SANDBOX = "host";
 process.env.POLARIS_CONCURRENCY = "3";
-process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "wiki-data-"));
-const { app } = await import("../server/app.ts");
-const { db } = await import("../server/db.ts");
+const { call, db, events, idle, sh, task, tempRepo, until, user, waitFor, workspace: base, wsOf } = await import("./helpers.ts");
 const { runTool, wikiTools } = await import("../server/agent/tools.ts");
 const { ensureWiki, finishCopy, frontmatter, lintDir, openCopy, wikiDir, wikiSerial, WIKI_PROTECTED } = await import("../server/wiki.ts");
 
-const origin = "http://localhost:5173";
-const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
 const GIT = "git -c user.name=t -c user.email=t@t";
-
-function tempRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "repo-")));
-  writeFileSync(join(dir, "README.md"), "hi\n");
-  sh(dir, `git init -q -b main && git add -A && ${GIT} commit -q -m init`);
-  return dir;
-}
-async function call(method: string, path: string, cookie = "", body?: unknown) {
-  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
-}
-async function user(name: string) {
-  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
-  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
-}
-async function until<T>(what: string, fn: () => Promise<T | undefined | false> | T | undefined | false, ms = 30_000): Promise<T> {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
-    const v = await fn();
-    if (v) return v;
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-const events = (runId: string) =>
-  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
-const task = (runId: string) => events(runId).find((e) => e.type === "run_started")!.p.task as string;
-const wsOf = (slug: string) => (db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string }).id;
 
 // A workspace whose gate passes without a command (the demo worker writes notes.txt, identical in every ticket).
 async function workspace(name: string, extra = {}) {
-  const cookie = await user(name);
-  const repo = tempRepo();
-  assert.equal((await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", test_command: "", model_review: false, auto_split: false, ...extra })).status, 200);
-  const ws = wsOf(name);
+  const { cookie, repo, ws, get } = await base(name, { test_command: "", model_review: false, auto_split: false, ...extra });
   const wikiLog = () => {
     try {
       return sh(wikiDir(ws), "git log --format=%s").split("\n").filter(Boolean).reverse(); // oldest first
@@ -61,19 +25,17 @@ async function workspace(name: string, extra = {}) {
     }
   };
   const wikiFile = (p: string) => sh(wikiDir(ws), `git show HEAD:${p}`);
-  const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, cookie)).body;
   // Creates a ticket, runs it to review.
   const ticket = async (title: string, spec = "") => {
     const t = (await call("POST", "/api/tickets", cookie, { title, spec })).body;
     await call("POST", `/api/tickets/${t.id}/runs`, cookie);
-    const done = await until("review", async () => (await get(t.id)).status === "review" && (await get(t.id)));
+    const done = await waitFor(cookie, t.id, "review");
     return { t, run: done.runs[0] };
   };
   const approve = async (id: string) => assert.equal((await call("POST", `/api/tickets/${id}/approve`, cookie)).status, 200);
   // Waits until the wiki repo has n commits (the initial one included).
-  const commits = (n: number) => until(`${n} wiki commits`, () => (existsSync(wikiDir(ws)) && wikiLog().length >= n) || undefined, 30_000);
-  const idle = () => until("no active runs", () => !db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.status IN ('queued', 'running')").get(ws) || undefined);
-  return { cookie, repo, ws, wikiLog, wikiFile, get, ticket, approve, commits, idle };
+  const commits = (n: number) => until(`${n} wiki commits`, () => existsSync(wikiDir(ws)) && wikiLog().length >= n);
+  return { cookie, repo, ws, wikiLog, wikiFile, get, ticket, approve, commits, idle: () => idle(ws) };
 }
 
 const page = (o: { title?: string; sources?: string; verified?: string } = {}) =>
