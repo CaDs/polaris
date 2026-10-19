@@ -214,7 +214,7 @@ an Apple M4 Max:
   - ticket comments and notifications;
   - formatted dates.
 - **Hardening:**
-  - containers run as root, with network access;
+  - containers have network access;
   - no spending caps per epic or workspace;
   - the Anthropic and OpenAI APIs and the ChatGPT sign-in are tested only against mocks, not with real keys.
 - **Not in scope yet:** multi-user deployment, hosting, backups.
@@ -243,7 +243,11 @@ tasks.md          milestone checklist
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.
-- **Agents.** Workers and reviewers run in Docker containers limited to 2 CPUs and 2 GB, as root, with network access.
+- **Agents.** Workers and reviewers run in Docker containers limited to 2 CPUs, 2 GB and 512 processes, with network
+  access, as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
+  gid, so files agents create in the worktree are yours; under Docker Desktop it is the image's `polaris` (1000:1000),
+  and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid, so it needs a writable `HOME`.
+  The built-in image is rebuilt when its `polaris.image.version` label is older than the harness expects.
   Your protected paths, the worktree's `.git` file and the repo's git dir are mounted read-only. The file tools never
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.

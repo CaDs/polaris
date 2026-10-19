@@ -493,6 +493,11 @@ is a 400 in a body and matches nothing in a filter).
 - `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
   never writable by agent tools, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
   file is mounted read-only in the sandbox.
+- Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;
+  the image's `polaris` 1000:1000 under Docker Desktop, which maps bind-mount ownership), with `--cap-drop ALL`,
+  `--security-opt no-new-privileges`, `--pids-limit 512`, 2 CPUs and 2 GB. The built-in image is built with that uid:gid,
+  labelled `polaris.image.version`, and rebuilt when the label is missing or older than `IMAGE_VERSION` (bump it with the
+  Dockerfile); the shared npm cache volume is chowned to the sandbox user once per harness start if it isn't theirs.
 - Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
   dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Harness writes into the worktree
   (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
