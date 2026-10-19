@@ -3,6 +3,7 @@ import { Board } from "./Board.tsx";
 import { GROUPS, List, type Group } from "./List.tsx";
 import { Alert, COLUMNS, Dialog, api, type Ticket } from "./ui.tsx";
 import { cycleName, PRIORITIES, useTracker, type Tracker } from "./tracker.tsx";
+import type { View } from "./Views.tsx";
 
 // Board/list with a filter bar. All state lives in the URL query (shareable, bookmarkable, a saved view is just a query):
 // the API's filter params plus sort, layout and group, which the API ignores.
@@ -21,7 +22,7 @@ const FIELDS: Field[] = [
   { key: "due_after", name: "Due after", date: true },
 ];
 const SORTS: [string, string][] = [["manual", "Manual"], ["priority", "Priority"], ["updated", "Last updated"], ["created", "Created"], ["due", "Due date"]];
-const VIEW_ONLY = ["sort", "layout", "group"];
+const VIEW_ONLY = ["sort", "layout", "group", "view", "edit"]; // view: the saved view this came from; edit: open its dialog
 
 export function Issues({ search, go, all, open }: { search: string; go: (to: string, replace?: boolean) => void; all: Ticket[] | null; open: (n: number) => void }) {
   const params = new URLSearchParams(search);
@@ -29,7 +30,7 @@ export function Issues({ search, go, all, open }: { search: string; go: (to: str
   const [error, setError] = useState("");
   const layout = params.get("layout") === "list" ? "list" : "board";
   const group = (GROUPS as readonly string[]).includes(params.get("group") ?? "") ? (params.get("group") as Group) : "status";
-  const filtered = [...params.keys()].some((k) => !["layout", "group"].includes(k));
+  const filtered = [...params.keys()].some((k) => !["layout", "group", "view", "edit"].includes(k));
 
   // Re-fetch when the query changes and whenever the full list does (it polls while runs are active).
   useEffect(() => {
@@ -66,7 +67,13 @@ function FilterBar({ params, set, all, open, error }: {
 }) {
   const { tracker } = useTracker();
   const [menu, setMenu] = useState<string | null>(null); // "fields" or a field key
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(params.has("edit"));
+  const viewId = params.get("view");
+  const [savedView, setSavedView] = useState<View | null | undefined>(null); // undefined: loading
+  useEffect(() => {
+    setSavedView(viewId ? undefined : null);
+    if (viewId) api<View>(`/api/views/${viewId}`).then(setSavedView, () => setSavedView(null));
+  }, [viewId]);
   const [q, setQ] = useState(params.get("q") ?? "");
   const searchRef = useRef<HTMLInputElement>(null);
   const qParam = params.get("q") ?? "";
@@ -152,9 +159,12 @@ function FilterBar({ params, set, all, open, error }: {
           {GROUPS.map((g) => <option key={g} value={g}>Group: {g}</option>)}
         </select>
       )}
-      <button className="btn" onClick={() => setSaving(true)}>Save view</button>
+      <button className="btn" onClick={() => setSaving(true)}>{savedView?.mine ? `Edit view: ${savedView.name}` : "Save view"}</button>
       <Alert error={error} />
-      {saving && <SaveView params={params} close={() => setSaving(false)} />}
+      {saving && savedView !== undefined && (
+        <SaveView params={params} view={savedView?.mine ? savedView : null} close={() => (setSaving(false), params.has("edit") && set((p) => p.delete("edit"), true))}
+          saved={(v) => (setSaving(false), setSavedView(v), set((p) => (p.set("view", v.id), p.delete("edit")), true))} />
+      )}
     </div>
   );
 }
@@ -196,31 +206,34 @@ export function Popover({ close, children }: { close: () => void; children: Reac
   return <div ref={ref} className="popover">{children}</div>;
 }
 
-function SaveView({ params, close }: { params: URLSearchParams; close: () => void }) {
+// New view, or (view: one of mine this board came from) update it in place: name, sharing, and the board's current query.
+function SaveView({ params, view, saved, close }: { params: URLSearchParams; view: View | null; saved: (v: View) => void; close: () => void }) {
   const [error, setError] = useState("");
-  async function submit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const f = new FormData(e.currentTarget);
-    const filters = Object.fromEntries([...params].filter(([k]) => k !== "sort" && k !== "layout"));
+  async function save(form: HTMLFormElement, asNew: boolean) {
+    if (!form.reportValidity()) return;
+    const f = new FormData(form);
+    const update = view && !asNew;
+    const filters = Object.fromEntries([...params].filter(([k]) => !["sort", "layout", "view", "edit"].includes(k)));
     try {
-      await api("/api/views", "POST", { name: f.get("name"), filters, sort: params.get("sort") ?? "manual", layout: params.get("layout") ?? "board", shared: f.has("shared") });
-      close();
+      const body = { name: f.get("name"), filters, sort: params.get("sort") ?? "manual", layout: params.get("layout") ?? "board", shared: f.has("shared") };
+      saved(await api<View>(update ? `/api/views/${view.id}` : "/api/views", update ? "PATCH" : "POST", body));
     } catch (e) {
       setError((e as Error).message);
     }
   }
   return (
-    <Dialog title="Save view" onClose={close}>
-      <form onSubmit={submit}>
+    <Dialog title={view ? "Edit view" : "Save view"} onClose={close}>
+      <form onSubmit={(e) => (e.preventDefault(), save(e.currentTarget, false))}>
         <label>
-          View name <input name="name" required maxLength={100} autoFocus />
+          View name <input name="name" required maxLength={100} autoFocus defaultValue={view?.name} />
         </label>
-        <label className="check"><input type="checkbox" name="shared" /> Share with the workspace</label>
-        <p className="muted">Saves the current filters, search, sort and layout. Open it from Views.</p>
+        <label className="check"><input type="checkbox" name="shared" defaultChecked={view?.shared} /> Share with the workspace</label>
+        <p className="muted">{view ? "Saves the current filters, search, sort and layout into this view." : "Saves the current filters, search, sort and layout. Open it from Views."}</p>
         <Alert error={error} />
         <div className="row end">
           <button type="button" className="btn" onClick={close}>Cancel</button>
-          <button className="btn primary">Save</button>
+          {view && <button type="button" className="btn" onClick={(e) => save(e.currentTarget.form!, true)}>Save as new view</button>}
+          <button className="btn primary">{view ? "Update view" : "Save"}</button>
         </div>
       </form>
     </Dialog>

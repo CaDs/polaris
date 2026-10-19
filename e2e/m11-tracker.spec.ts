@@ -65,6 +65,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await page.getByRole("button", { name: "Create cycle" }).click();
   await expect(page.getByRole("region", { name: "Current" })).toContainText("Cycle 1");
   await expect(page.getByRole("link", { name: "Current cycle" })).toBeVisible();
+  // A second (upcoming) cycle is deleted after a confirmation.
+  await page.getByRole("button", { name: "Create cycle" }).click();
+  await page.getByRole("region", { name: "Upcoming" }).getByRole("button", { name: "Cycle 2" }).click();
+  await page.getByRole("button", { name: "Delete cycle" }).click();
+  await expect(page.getByRole("dialog", { name: "Delete cycle?" })).toContainText("Its 0 tickets stay, without a cycle.");
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await expect(page).toHaveURL(/\/cycles$/);
+  await expect(page.getByRole("region", { name: "Current" })).toContainText("Cycle 1");
+  await expect(page.getByRole("region", { name: "Upcoming" })).toHaveCount(0);
 
   // Tickets with properties from the dialog; cards show them.
   await page.getByRole("link", { name: "Board" }).click();
@@ -188,6 +197,33 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page).toHaveURL(/layout=list/);
   await expect(page).toHaveURL(/group=priority/);
   await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/]);
+
+  // Edit the view: regroup the board, then rename and update it in place from the filter bar.
+  await expect(page).toHaveURL(/view=/);
+  await page.getByLabel("Group by").selectOption("label");
+  await page.getByRole("button", { name: "Edit view: Checkout by priority" }).click();
+  const edit = page.getByRole("dialog", { name: "Edit view" });
+  await expect(edit.getByLabel("View name")).toHaveValue("Checkout by priority");
+  await edit.getByLabel("View name").fill("Checkout by label");
+  await edit.getByRole("button", { name: "Update view" }).click();
+  await expect(edit).toBeHidden();
+  await expect(page.getByRole("button", { name: "Edit view: Checkout by label" })).toBeVisible();
+  await page.getByRole("link", { name: "Views" }).click();
+  const saved = page.getByRole("listitem", { name: "Checkout by label" });
+  await expect(saved).toContainText("group=label");
+  await expect(page.getByRole("listitem", { name: "Checkout by priority" })).toHaveCount(0);
+  // Edit from the Views page opens the same dialog on the board; Cancel leaves the view as it was.
+  await saved.getByRole("button", { name: "Edit view Checkout by label" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit view" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await expect(page).not.toHaveURL(/edit=1/);
+  await expect(page.locator(".list h2").first()).toHaveText(/bug|regression|No labels/);
+  // Delete asks first.
+  await page.getByRole("link", { name: "Views" }).click();
+  await saved.getByRole("button", { name: "Delete view Checkout by label" }).click();
+  await expect(page.getByRole("dialog", { name: "Delete view?" })).toContainText("Tickets are not changed.");
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText("No saved views.")).toBeVisible();
 
   // Cycle and project pages show progress.
   await page.getByRole("link", { name: "Current cycle" }).click();

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { Alert, DateField, Loading, api, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, DateField, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type Progress } from "./tracker.tsx";
 
 type Cycle = CycleRef & { progress: Progress; added_after_start: number };
@@ -16,11 +16,8 @@ function Scope({ c }: { c: Cycle }) {
 }
 
 export function Cycles({ go }: { go: (to: string) => void }) {
-  const [cycles, setCycles] = useState<Cycle[] | null>(null);
-  const [error, setError] = useState("");
+  const { data: cycles, error, setError, reload } = useApi<Cycle[]>("/api/cycles");
   const { reload: reloadTracker } = useTracker();
-  const reload = useCallback(() => api<Cycle[]>("/api/cycles").then(setCycles, (e) => setError(e.message)), []);
-  useEffect(() => void reload(), [reload]);
   // Defaults: two weeks starting the day after the last cycle ends (or today).
   const last = cycles?.at(-1)?.ends_at;
   const today = new Date().toISOString().slice(0, 10);
@@ -75,10 +72,11 @@ export function Cycles({ go }: { go: (to: string) => void }) {
 }
 
 // One cycle ("current" = whichever cycle includes today): progress, scope, its tickets, and moving what is unfinished on.
-export function CyclePage({ id, open, tick }: { id: string; open: (n: number) => void; tick: unknown }) {
+export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string) => void; open: (n: number) => void; tick: unknown }) {
   const [c, setC] = useState<Cycle | null | undefined>(undefined);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
   const { reload: reloadTracker } = useTracker();
   const reload = useCallback(() => api<Cycle>(`/api/cycles/${id}`).then(setC, () => setC(null)), [id]);
   useEffect(() => void reload(), [reload, tick]);
@@ -118,11 +116,17 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
         {c.state !== "upcoming" && (
           <button className="btn" disabled={!unfinished} onClick={moveUnfinished}>Move unfinished to next cycle</button>
         )}
+        <button className="btn danger" onClick={() => setConfirming(true)}>Delete cycle</button>
       </section>
       {msg && <p className="muted">{msg}</p>}
       <Alert error={error} />
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
+      {confirming && (
+        <Confirm title="Delete cycle?" onConfirm={() => call(`/api/cycles/${c.id}`, "DELETE").then(() => go("/cycles"))} onClose={() => setConfirming(false)}>
+          {cycleName(c)} ({c.starts_at} → {c.ends_at}) is deleted. Its {c.progress.total} {c.progress.total === 1 ? "ticket stays" : "tickets stay"}, without a cycle.
+        </Confirm>
+      )}
     </div>
   );
 }

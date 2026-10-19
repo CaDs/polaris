@@ -226,7 +226,7 @@ function Dashboard({ email }: { email: string }) {
           ) : section === "projects" ? (
             sub ? <ProjectPage id={sub} go={go} open={open} tick={tickets} /> : <Projects go={go} />
           ) : section === "cycles" ? (
-            sub ? <CyclePage id={sub} open={open} tick={tickets} /> : <Cycles go={go} />
+            sub ? <CyclePage id={sub} go={go} open={open} tick={tickets} /> : <Cycles go={go} />
           ) : section === "views" ? (
             <Views go={go} />
           ) : number ? (

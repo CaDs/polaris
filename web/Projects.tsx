@@ -62,6 +62,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
   const { tracker, reload: reloadTracker } = useTracker();
   const tickets = useTicketList(`project=${id}`, tick);
   const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState<Milestone | null>(null);
   useEffect(() => void reload(), [tick]); // progress follows ticket changes
 
   const call = async (path: string, method: string, body?: object) => {
@@ -124,7 +125,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
             <Bar p={m.progress} />
             <button className="btn" aria-label={`Move ${m.name} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
             <button className="btn" aria-label={`Move ${m.name} down`} disabled={i === p.milestones.length - 1} onClick={() => move(i, 1)}>↓</button>
-            <button className="btn danger" aria-label={`Delete milestone ${m.name}`} onClick={() => call(`/api/milestones/${m.id}`, "DELETE")}>Delete</button>
+            <button className="btn danger" aria-label={`Delete milestone ${m.name}`} onClick={() => setDeleting(m)}>Delete</button>
           </li>
         ))}
       </ul>
@@ -136,6 +137,11 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
 
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
+      {deleting && (
+        <Confirm title="Delete milestone?" onConfirm={() => (setDeleting(null), call(`/api/milestones/${deleting.id}`, "DELETE"))} onClose={() => setDeleting(null)}>
+          The milestone {deleting.name} is deleted. Its tickets stay in {p.name}, without a milestone.
+        </Confirm>
+      )}
       {confirming && (
         <Confirm title="Delete project?" onConfirm={() => call(`/api/projects/${id}`, "DELETE").then(() => go("/projects"))} onClose={() => setConfirming(false)}>
           {p.name} and its milestones are deleted. Its tickets stay, without a project.

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent } from "react";
-import { Alert, api } from "./ui.tsx";
+import { Alert, Confirm, api } from "./ui.tsx";
 
 // M11 tracker: shared types, the picker data (one GET /api/tracker), and the small pieces every tracker view uses.
 
@@ -73,6 +73,7 @@ export const ByStatus = ({ p }: { p: Progress }) => (
 export function LabelSettings() {
   const { tracker, reload } = useTracker();
   const [error, setError] = useState("");
+  const [deleting, setDeleting] = useState<Label | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => (setError(""), reload()), (e) => setError(e.message));
   async function add(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -90,7 +91,7 @@ export function LabelSettings() {
             <LabelChip label={l} />
             <input aria-label={`Rename ${l.name}`} defaultValue={l.name} maxLength={40} className="grow narrow" onBlur={(e) => e.target.value.trim() !== l.name && run(api(`/api/labels/${l.id}`, "PATCH", { name: e.target.value }))} />
             <ColorSelect value={l.color} label={`Color of ${l.name}`} onChange={(color) => run(api(`/api/labels/${l.id}`, "PATCH", { color }))} />
-            <button className="btn danger" aria-label={`Delete label ${l.name}`} onClick={() => run(api(`/api/labels/${l.id}`, "DELETE"))}>Delete</button>
+            <button className="btn danger" aria-label={`Delete label ${l.name}`} onClick={() => setDeleting(l)}>Delete</button>
           </li>
         ))}
       </ul>
@@ -100,6 +101,11 @@ export function LabelSettings() {
         <button className="btn">Add label</button>
       </form>
       <Alert error={error} />
+      {deleting && (
+        <Confirm title="Delete label?" onConfirm={() => (setDeleting(null), run(api(`/api/labels/${deleting.id}`, "DELETE")))} onClose={() => setDeleting(null)}>
+          The label {deleting.name} is deleted and taken off every ticket that has it.
+        </Confirm>
+      )}
     </section>
   );
 }
