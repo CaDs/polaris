@@ -11,7 +11,10 @@ import { applyTracker, ESTIMATES, Invalid, labelIds, trackerHeader } from "./tra
 // worker hands back one "## Handoff". The orchestration (queueing, rounds, settling) lives in runs.ts.
 
 export const MAX_CHILDREN = 12; // per epic, including failed ones
-export const MAX_ROUNDS = 8; // planner rounds per epic
+// Planner rounds per epic. A round starts only when the planner has something to act on (runs.ts wake): a child failed
+// (or was deleted), or no child is open any more. A child that is done while siblings are still open starts none: the
+// harness queues its dependents, and the next round reads its handoff, marked new. So rounds grow with failures, not children.
+export const MAX_ROUNDS = 8;
 const HANDOFF_MAX = 4000; // chars
 // Not versioned like the worker prompt: there is no eval loop that could score planning yet, so a file is enough.
 export const PLANNER_PROMPT = readFileSync(new URL("./agent/prompts/planner.md", import.meta.url), "utf8");
@@ -45,19 +48,22 @@ export type Child = {
   test_command: string | null; escalated_to: string | null; run_count: number; run_status: string | null; attempt: number | null; model: string | null; tokens: number;
 };
 
+// A ticket's own runs: not eval case runs (M6) or wiki runs (M10), which hang off a ticket but never change its state or totals.
+export const OWN_RUNS = "eval_run_id IS NULL AND role <> 'wiki'";
+
 export const childrenOf = (epicId: string) =>
   db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
-      (SELECT COUNT(*) FROM runs WHERE ticket_id = t.id AND eval_run_id IS NULL) AS run_count,
+      (SELECT COUNT(*) FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS}) AS run_count,
       r.status AS run_status, r.attempt, r.model, COALESCE(r.tokens_in + r.tokens_out, 0) AS tokens
     FROM tickets t JOIN organization o ON o.id = t.workspace_id
-    LEFT JOIN runs r ON r.id = (SELECT id FROM runs WHERE ticket_id = t.id AND eval_run_id IS NULL ORDER BY rowid DESC LIMIT 1)
+    LEFT JOIN runs r ON r.id = (SELECT id FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1)
     WHERE t.parent_id = ? ORDER BY t.number`).all(epicId) as Child[];
 
 type State = { label: string; open: boolean };
 type Sibling = { id: string; key: string; status: string; depends_on: string; run_status: string | null; run_count: number; escalated_to: string | null };
 
 // What each sibling is doing, as the planner and the epic view show it. Open children keep the epic from completing.
-// A todo child whose dependency failed (or is itself blocked) is blocked: it never starts on its own, so it is not open.
+// A todo child whose dependency failed, was deleted or is itself blocked is blocked: it never starts on its own, so it is not open.
 // A child replaced by a "Split:" epic (M9) is not open either; its dependents were moved to that epic.
 export function childStates(kids: Sibling[]) {
   const byId = new Map(kids.map((k) => [k.id, k]));
@@ -71,10 +77,12 @@ export function childStates(kids: Sibling[]) {
     else if (k.status === "review") s = { label: "in review (passed the gate, waiting to be merged)", open: true };
     else if (k.status === "running") s = { label: k.run_status === "queued" ? "queued" : "running", open: true };
     else {
-      const deps = (JSON.parse(k.depends_on) as string[]).flatMap((id) => byId.get(id) ?? []);
+      const ids = JSON.parse(k.depends_on) as string[];
+      const deps = ids.flatMap((id) => byId.get(id) ?? []);
       const dead = deps.find((d) => d.status === "failed" || (d.status !== "done" && !state(d).open));
       const waiting = deps.filter((d) => d.status !== "done");
-      if (dead) s = { label: `blocked (dependency ${dead.key} ${dead.status === "failed" ? "failed" : "is blocked"})`, open: false };
+      if (deps.length < ids.length) s = { label: "blocked (dependency deleted)", open: false };
+      else if (dead) s = { label: `blocked (dependency ${dead.key} ${dead.status === "failed" ? "failed" : "is blocked"})`, open: false };
       else if (waiting.length) s = { label: `waiting on ${waiting.map((d) => d.key).join(", ")}`, open: true };
       else s = { label: k.run_count ? "todo (stopped; a human must run it again)" : "todo", open: true };
     }
@@ -120,14 +128,14 @@ export function childrenText(epicId: string, since: number) {
 type Epic = { id: string; workspace_id: string; key: string; title: string; spec: string; parent_id: string | null; provider_id: string | null; model: string | null };
 
 export function plannerTask(epic: Epic, o: {
-  repo: string; base: string; sha: string; test: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string; round: number;
+  repo: string; base: string; sha: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string; round: number;
   notes: { round: number; notes: string }[]; review?: string; since: number;
 }) {
   const parts = [
     [
       "# Environment",
       `- Repository: ${o.repo}; read_file and search see a read-only checkout of ${o.base} at ${o.sha.slice(0, 8)} (it includes the merged work of done children)`,
-      `- Test gate for every child ticket: ${o.test.trim() ? `\`${o.test}\` must exit 0` : "no test command"}${o.protectedPaths.length ? `, and changes under ${o.protectedPaths.join(", ")} fail it` : ""}; a child's own test_command replaces the command`,
+      `- Test gate for every child ticket: ${o.gate.trim() ? `\`${o.gate}\` must exit 0` : "no test command"}${o.protectedPaths.length ? `, and changes under ${o.protectedPaths.join(", ")} fail it` : ""}; a child's own test_command replaces the command`,
       `- Epic gate: ${o.gate.trim() ? `complete_epic first runs \`${o.gate}\` on ${o.base} as it is then, and is refused unless it exits 0` : "none (no test command)"}`,
       ...(o.sizeHint.trim() ? [`- Child size: the worker model reliably finishes tickets of this size: ${o.sizeHint.trim()}; make every child at most that size`] : []),
       `- Failed children: ${o.autoSplit && !epic.parent_id ? 'a child task that fails every attempt is split automatically (a "Split:" epic replaces it)' : "not split automatically (create smaller follow-up tickets)"}`,
@@ -172,7 +180,7 @@ export function plannerTools(
           spec: { type: "string", description: "Self-contained task: goal, files/areas, conventions, acceptance criteria in terms of what the test gate checks" },
           depends_on: { type: "array", items: { type: "string" }, description: "Keys of tickets in this epic that must be merged first" },
           kind: { type: "string", enum: ["task", "epic"], description: "epic = a sub-planner owns this slice (default task)" },
-          test_command: { type: "string", description: "This ticket's own test gate (an epic: its epic gate) instead of the workspace test command, e.g. one test file, a --test-name-pattern, or `npx tsc --noEmit`, when the full suite can't pass until later tickets land" },
+          test_command: { type: "string", description: "This ticket's own test gate (an epic: its epic gate) instead of the test gate in the first message (the default), e.g. one test file, a --test-name-pattern, or `npx tsc --noEmit`, when the full suite can't pass until later tickets land" },
           labels: { type: "array", items: { type: "string" }, description: "Label names (unknown ones are created)" },
           priority: { type: "integer", enum: [0, 1, 2, 3, 4], description: "0 none, 1 urgent, 2 high, 3 medium, 4 low (default: the epic's). Queued work starts by priority" },
           estimate: { type: "integer", enum: ESTIMATES, description: "Size in points" },
@@ -181,6 +189,9 @@ export function plannerTools(
       },
     },
     async run(input) {
+      // Calls after finish_round/complete_epic in the same turn still run: a child created then would be queued under a completed epic.
+      if (outcome.notes !== undefined || outcome.summary !== undefined)
+        throw new AgentError("InvalidArguments", "this round has ended (finish_round or complete_epic came earlier in this turn), so no ticket was created.");
       const title = text(input, "title", 200);
       const spec = text(input, "spec", 20_000);
       const kind = input.kind ?? "task";
@@ -210,8 +221,8 @@ export function plannerTools(
       }
       const id = randomUUID();
       db.prepare(`INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, depends_on, provider_id, model, test_command, project_id, milestone_id, cycle_id, cycle_added_at)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, project_id, milestone_id, cycle_id, iif(cycle_id IS NULL, NULL, ?) FROM tickets WHERE id = ?`).run(
-        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, test_command), project_id, milestone_id, cycle_id, iif(cycle_id IS NULL, NULL, ?) FROM tickets WHERE id = ?`).run(
+        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice and test command
       );
       applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
       const key = `${epic.key.split("-")[0]}-${(db.prepare("SELECT number FROM tickets WHERE id = ?").get(id) as { number: number }).number}`;
@@ -235,7 +246,7 @@ export function plannerTools(
       const notes = text(input, "notes", 10_000);
       if (!openChildren(childrenOf(epic.id)).length) throw new AgentError("InvalidArguments", "no child ticket is open (children may have settled during this round), so nothing would start another round. Call list_children for their current state, then create tickets or call complete_epic.");
       outcome.notes = notes;
-      return "Round finished. The next round starts when a child settles.";
+      return "Round finished. The next round starts when a child fails or no child is open any more.";
     },
   };
   const completeEpic: Tool = {

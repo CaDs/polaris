@@ -633,7 +633,7 @@ async function autoApprove(ticketId: string, runId: string) {
 
 // A planner round (M7): a detached checkout of the base branch's current commit, read only through read_file/search on the
 // host (no sandbox, no write tool), the planner.md system prompt and the planner tools; a fresh conversation per round.
-// No gate, commit, review, retry or reflection; the checkout is always removed. afterRound decides what the epic does next.
+// No gate, commit, review or reflection; the checkout is always removed. afterRound decides what the epic does next (a retry too).
 async function plan(runId: string, run: RunRow, t: TicketRow) {
   const s = settingsFor(t.workspace_id);
   const signal = controllers.get(runId)!.signal;
@@ -671,8 +671,9 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     const notes = (db.prepare(`SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.ticket_id = ? AND e.type = 'round_finished'
       ORDER BY r.rowid, e.seq`).all(t.id) as { payload: string }[]).map((e) => JSON.parse(e.payload) as EventPayloads["round_finished"]);
     const gateCommand = t.test_command ?? s.test_command; // a split epic keeps the command of the ticket it replaced
+    await startReady(t.id); // children moved in while the epic was not running
     const task = plannerTask(t, {
-      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, test: s.test_command, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
+      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
       lessons: lessons?.body, wiki, round: run.attempt, notes, review: reviewNote(t.id), since,
     });
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
@@ -700,15 +701,21 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     log({ type: "run_finished", payload: { status, reason, turns, usage } });
     recordCost(runId, run.model, usage);
     if (s) await removeWorktree(s.repo_path, worktree, null, dataDir());
-    await afterRound(t, status, reason, outcome.summary);
+    await afterRound(t, runId, status, reason, outcome.summary);
   }
 }
 
-// Cancelled → epic todo (Run planner starts the next round); failed → epic failed; complete_epic → review (a sub-epic
-// with auto-approve on → done at once); otherwise the epic keeps waiting for children (wake).
-async function afterRound(t: TicketRow, status: RunStatus, reason: string | undefined, summary?: string) {
+// Cancelled → epic todo (Run planner starts the next round); failed (provider error, budget, crash) → a fresh round
+// retries it once, then the epic fails; complete_epic → review (a sub-epic with auto-approve on → done at once);
+// otherwise the epic keeps waiting for children (wake).
+async function afterRound(t: TicketRow, runId: string, status: RunStatus, reason: string | undefined, summary?: string) {
   if (status === "cancelled") return setTicket(t.id, "todo");
-  if (status !== "passed") return failEpic(t.id, `A planner round failed: ${reason}`);
+  if (status !== "passed") {
+    const [last, prev] = rounds(t.id, 2);
+    if (prev?.status === "failed" || last.attempt >= MAX_ROUNDS) return failEpic(t.id, `A planner round failed${prev?.status === "failed" ? " twice in a row" : ""}: ${reason}`);
+    eventLog(runId)({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `The planner round failed (${reason}); retrying with a fresh round.` } });
+    return void queue(t, last.model, last.attempt + 1, last.provider_id, true);
+  }
   if (summary === undefined) return wake(t.id);
   db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(summary, t.id);
   setTicket(t.id, "review");
@@ -748,20 +755,34 @@ async function settled(id: string) {
   wake(t.parent_id);
 }
 
-// Starts the epic's next planner round if a child settled after the latest round started. Rounds never overlap: children
-// that settle while a round is queued or running are seen by it, or by the next round, which then starts as soon as that
-// one ends, so one round handles every child that settled meanwhile.
-export function wake(epicId: string) {
-  if ((db.prepare("SELECT status FROM tickets WHERE id = ?").get(epicId) as { status: string } | undefined)?.status !== "running") return;
-  const last = db.prepare("SELECT status, started_at, attempt, model, provider_id FROM runs WHERE ticket_id = ? AND role = 'planner' ORDER BY rowid DESC LIMIT 1").get(epicId) as
-    | { status: string; started_at: number | null; attempt: number; model: string; provider_id: string | null }
-    | undefined;
+// While an epic is running, a todo child without runs whose dependencies are all done is queued: one moved into the epic
+// by hand, or one already there when a round starts.
+export async function startReady(epicId: string) {
+  if (!isRunning(epicId)) return;
+  const kids = childrenOf(epicId);
+  const done = new Set(kids.filter((k) => k.status === "done").map((k) => k.id));
+  for (const k of kids) if (k.status === "todo" && !k.run_count && (JSON.parse(k.depends_on) as string[]).every((d) => done.has(d))) await startChild(k.id);
+}
+
+type Round = { status: string; started_at: number | null; attempt: number; model: string; provider_id: string | null };
+const rounds = (epicId: string, n = 1) =>
+  db.prepare("SELECT status, started_at, attempt, model, provider_id FROM runs WHERE ticket_id = ? AND role = 'planner' ORDER BY rowid DESC LIMIT ?").all(epicId, n) as Round[];
+const isRunning = (id: string) => (db.prepare("SELECT status FROM tickets WHERE id = ?").get(id) as { status: string } | undefined)?.status === "running";
+
+// Starts the epic's next planner round when the planner has something to act on (see MAX_ROUNDS): a child failed since
+// the latest round started, or no child is open. removed: a child was deleted (its dependents are blocked now). Rounds
+// never overlap: children that settle while a round is queued or running are seen by it, or by the next round, which then
+// starts as soon as that one ends, so one round handles every child that settled meanwhile.
+export function wake(epicId: string, removed = false) {
+  if (!isRunning(epicId)) return;
+  const [last] = rounds(epicId);
   if (!last || last.status === "queued" || last.status === "running") return;
   const kids = childrenOf(epicId);
-  if (!kids.some((k) => (k.settled_at ?? 0) > (last.started_at ?? 0))) {
-    if (!openChildren(kids).length) failEpic(epicId, "The planner ended a round without complete_epic while no child ticket was open, so nothing would start another round.");
-    return;
-  }
+  const fresh = kids.filter((k) => (k.settled_at ?? 0) > (last.started_at ?? 0));
+  if (openChildren(kids).length) {
+    if (!removed && !fresh.some((k) => k.status === "failed" && !k.escalated_to)) return; // done children wait for the next round
+  } else if (!removed && !fresh.length)
+    return failEpic(epicId, "The planner ended a round without complete_epic while no child ticket was open, so nothing would start another round.");
   if (last.attempt >= MAX_ROUNDS) return failEpic(epicId, `Planner round limit reached (${MAX_ROUNDS} rounds) before the epic was completed.`);
   queue(ticketRow(epicId)!, last.model, last.attempt + 1, last.provider_id, true); // same provider and model as the last round
 }

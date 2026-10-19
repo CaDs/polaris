@@ -12,7 +12,7 @@ process.env.POLARIS_CONCURRENCY = "2";
 process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "planner-data-"));
 const { app } = await import("../server/app.ts");
 const { db } = await import("../server/db.ts");
-const { createRun } = await import("../server/agent/events.ts");
+const { createRun, subscribe } = await import("../server/agent/events.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { extractHandoff, handoffText, plannerTools, MAX_CHILDREN } = await import("../server/planner.ts");
 const { pump, wake } = await import("../server/runs.ts");
@@ -83,7 +83,7 @@ test("handoff: text after a Handoff heading, else the whole reply; failures appe
 
 let pam: { epic: any; cookie: string; rounds: string[] };
 
-test("epic: read-only planner round, B waits for A, approve A → B from the updated base, rounds on settle, review → done", async () => {
+test("epic: read-only planner round, B waits for A, approve A → B from the updated base, round 2 once nothing is open, review → done", async () => {
   const w = await workspace("pam");
   const init = sh(w.repo, "git rev-parse main");
   const e = await w.epic("Two files", "Add a.txt and b.txt.");
@@ -114,33 +114,31 @@ test("epic: read-only planner round, B waits for A, approve A → B from the upd
   assert.equal((await w.get(A.id)).handoff, handoff);
   assert.equal(events(a.id).find((x) => x.type === "handoff")!.p.text, handoff);
 
-  // Approve A: B is queued and branches from main with A merged; A settling starts round 2.
+  // Approve A: B is queued and branches from main with A merged; A is done while B is open, so no round starts.
   assert.equal((await call("POST", `/api/tickets/${A.id}/approve`, w.cookie)).status, 200);
   d = await w.childIs(e.id, "Create b.txt", "review");
   const b = (await w.get(B.id)).runs[0];
   assert.equal(b.base_sha, sh(w.repo, "git rev-parse main"));
   assert.equal(sh(w.repo, `git show ${b.branch}:a.txt`), "a");
-  d = await until("round 2 finished", async () => {
-    const x = await w.get(e.id);
-    return x.runs[1]?.status === "passed" && x;
-  });
-  assert.match(task(d.runs[1].id), /## PAM-2 Create a\.txt — done \(new since your last round\)\nKind: task · latest run: #1 passed, demo, \d+ tokens\nHandoff:\n- Results: created a\.txt/);
-  assert.match(task(d.runs[1].id), /## PAM-3 Create b\.txt — (queued|running|in review[^\n]*)\nKind: task · depends on PAM-2/);
-  assert.match(task(d.runs[1].id), /# Your notes from earlier rounds\n\n## Round 1\nCreated a\.txt and b\.txt tickets/);
+  assert.equal(d.runs.length, 1);
 
-  // Approve B → round 3 completes the epic → review with the summary; approving it marks it done (no merge).
+  // Approve B → nothing is open: round 2 reads both handoffs and completes the epic → review with the summary; approving
+  // it marks it done (no merge).
   await call("POST", `/api/tickets/${B.id}/approve`, w.cookie);
   d = await w.is(e.id, "review");
+  assert.match(task(d.runs[1].id), /## PAM-2 Create a\.txt — done \(new since your last round\)\nKind: task · latest run: #1 passed, demo, \d+ tokens\nHandoff:\n- Results: created a\.txt/);
+  assert.match(task(d.runs[1].id), /## PAM-3 Create b\.txt — done \(new since your last round\)\nKind: task · depends on PAM-2/);
+  assert.match(task(d.runs[1].id), /# Your notes from earlier rounds\n\n## Round 1\nCreated a\.txt and b\.txt tickets/);
   assert.equal(d.handoff, "Done: PAM-2 Create a.txt; PAM-3 Create b.txt.");
-  assert.deepEqual(d.runs.map((r: any) => [r.attempt, r.status]), [[1, "passed"], [2, "passed"], [3, "passed"]]);
-  assert.equal(events(d.runs[2].id).find((x) => x.type === "round_finished")!.p.completed, true);
+  assert.deepEqual(d.runs.map((r: any) => [r.attempt, r.status]), [[1, "passed"], [2, "passed"]]);
+  assert.equal(events(d.runs[1].id).find((x) => x.type === "round_finished")!.p.completed, true);
   const before = sh(w.repo, "git rev-parse main");
   assert.equal((await call("GET", `/api/tickets/${e.id}/diff`, w.cookie)).status, 404);
   const ok = await call("POST", `/api/tickets/${e.id}/approve`, w.cookie);
   assert.deepEqual([ok.status, ok.body.status, ok.body.child_done], [200, "done", 2]);
   assert.equal(sh(w.repo, "git rev-parse main"), before);
   assert.deepEqual([sh(w.repo, "git show main:a.txt"), sh(w.repo, "git show main:b.txt")], ["a", "b"]);
-  assert.equal(events(d.runs[2].id).at(-1)!.p.decision, "approved");
+  assert.equal(events(d.runs[1].id).at(-1)!.p.decision, "approved");
   assert.equal((await call("POST", "/api/evals/cases", w.cookie, { ticket_id: e.id })).status, 409); // epics are not eval cases
   pam = { epic: e, cookie: w.cookie, rounds: d.runs.map((r: any) => r.id) };
 });
@@ -175,7 +173,7 @@ test("create_ticket validation, child limit, sub-epic depth; finish_round/comple
   const refused = await use(e, "complete_epic", { summary: "done" });
   assert.match(refused.content, /children are still open: VAL-4 \(todo\), VAL-5 \(waiting on VAL-4\), VAL-6 \(todo\)\. Call finish_round/);
   assert.equal(outcome.summary, undefined);
-  assert.equal((await use(e, "finish_round", { notes: "wait" })).content, "Round finished. The next round starts when a child settles.");
+  assert.equal((await use(e, "finish_round", { notes: "wait" })).content, "Round finished. The next round starts when a child fails or no child is open any more.");
   assert.equal(outcome.notes, "wait");
 
   // A failed dependency blocks its dependents: blocked children are not open.
@@ -186,8 +184,11 @@ test("create_ticket validation, child limit, sub-epic depth; finish_round/comple
   assert.match((await use(e, "list_children", {})).content, /## VAL-5 B — blocked \(dependency VAL-4 failed\)\nKind: task · depends on VAL-4 · latest run: none\nHandoff: \(none yet\)/);
   assert.equal((await use(e, "complete_epic", { summary: "partly" })).is_error, false);
 
-  // Limit: 12 children per epic.
+  // Limit: 12 children per epic (in a new round: this one ended).
+  delete outcome.notes;
+  delete outcome.summary;
   for (let i = (await call("GET", `/api/tickets/${e.id}`, w.cookie)).body.child_count; i < MAX_CHILDREN; i++) await use(e, "create_ticket", { title: `t${i}`, spec: "s" });
+  assert.equal((await call("GET", `/api/tickets/${e.id}`, w.cookie)).body.child_count, MAX_CHILDREN);
   assert.match((await use(e, "create_ticket", { title: "one too many", spec: "s" })).content, /already has 12 child tickets, the limit/);
   // No open child: finish_round would wait forever.
   const empty = (await call("POST", "/api/tickets", w.cookie, { title: "Empty", kind: "epic" })).body;
@@ -282,6 +283,123 @@ test("a rejected child counts as failed: its dependents are blocked and the plan
   // Deleting the epic deletes its children and their branches.
   assert.equal((await call("DELETE", `/api/tickets/${e.id}`, w.cookie)).status, 204);
   assert.equal((await call("GET", "/api/tickets", w.cookie)).body.length, 0);
+});
+
+test("rounds start when the planner has something to do: 10 children settling one by one stay within the round limit", async () => {
+  const w = await workspace("ten");
+  const e = (await call("POST", "/api/tickets", w.cookie, { title: "Ten", kind: "epic" })).body;
+  let clock = 1000;
+  db.prepare("UPDATE runs SET status = 'passed', started_at = ? WHERE id = ?").run(++clock, createRun({ ticketId: e.id, model: "demo", attempt: 1, role: "planner" }));
+  db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(e.id);
+  for (let i = 0; i < 10; i++) db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, title, status) VALUES (?, ?, ?, ?, 'running')").run(`ten-${i}`, e.workspace_id, e.id, `c${i}`);
+  process.env.POLARIS_CONCURRENCY = "0"; // hold the queue: a queued round is finished by hand, as if it called finish_round
+  try {
+    for (let i = 0; i < 10; i++) {
+      db.prepare("UPDATE tickets SET status = ?, settled_at = ? WHERE id = ?").run(i === 4 ? "failed" : "done", ++clock, `ten-${i}`);
+      wake(e.id);
+      db.prepare("UPDATE runs SET status = 'passed', started_at = ? WHERE ticket_id = ? AND status = 'queued'").run(++clock, e.id);
+    }
+    const d = await w.get(e.id);
+    // Round 2 for the failed child, round 3 once nothing is open; a done child with siblings still open starts none.
+    assert.deepEqual([d.status, d.runs.map((r: any) => r.attempt)], ["running", [1, 2, 3]]);
+  } finally {
+    process.env.POLARIS_CONCURRENCY = "2";
+    db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id);
+  }
+});
+
+const idle = (ws: string) =>
+  until("no run in flight", async () => !db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.status IN ('queued', 'running')").get(ws));
+
+test("deleting a child: its dependents are blocked and its epic's planner replans or completes; eval cases of children block deleting the epic", async () => {
+  const w = await workspace("del", false, { wiki: false, test_command: "true" });
+  const e = await w.epic("Two files");
+  let d = await w.childIs(e.id, "Create a.txt", "review");
+  await until("round 1 finished", async () => (await w.get(e.id)).runs[0].status === "passed");
+  const [A, B] = d.children;
+  assert.equal((await call("DELETE", `/api/tickets/${A.id}`, w.cookie)).status, 204);
+  d = await w.is(e.id, "review");
+  assert.deepEqual(d.children.map((c: any) => [c.key, c.label]), [[B.key, "blocked (dependency deleted)"]]);
+  assert.equal(d.runs.length, 2);
+  db.prepare("INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image) VALUES ('del-case', ?, ?, 'b', '', '', '', '', '', '', '')").run(e.workspace_id, B.id);
+  const r = await call("DELETE", `/api/tickets/${e.id}`, w.cookie);
+  assert.deepEqual([r.status, /eval case/.test(r.body.error)], [409, true]);
+  db.prepare("DELETE FROM eval_cases WHERE id = 'del-case'").run();
+  assert.equal((await call("DELETE", `/api/tickets/${e.id}`, w.cookie)).status, 204);
+});
+
+test("a task moved into a running epic is queued at once; into a todo epic, when its first round starts", async () => {
+  const w = await workspace("mov", false, { wiki: false, test_command: "true" });
+  const e = await w.epic("Two files");
+  await w.childIs(e.id, "Create a.txt", "review");
+  await until("round 1 finished", async () => (await w.get(e.id)).runs[0].status === "passed");
+  const task = async (title: string) => (await call("POST", "/api/tickets", w.cookie, { title, spec: `${title}.` })).body;
+  const c = await task("Create c.txt");
+  assert.equal((await call("PATCH", `/api/tickets/${c.id}`, w.cookie, { parent_id: e.id })).status, 200);
+  assert.equal((await w.is(c.id, "review")).runs.length, 1);
+  const later = (await call("POST", "/api/tickets", w.cookie, { title: "Later", kind: "epic" })).body;
+  const x = await task("Create x.txt");
+  assert.equal((await call("PATCH", `/api/tickets/${x.id}`, w.cookie, { parent_id: later.id })).status, 200);
+  const before = await w.get(x.id);
+  assert.deepEqual([before.status, before.runs.length], ["todo", 0]);
+  assert.equal((await call("POST", `/api/tickets/${later.id}/runs`, w.cookie)).status, 201);
+  await w.is(x.id, "review");
+  await idle(e.workspace_id);
+  for (const id of [e.id, later.id]) assert.equal((await call("DELETE", `/api/tickets/${id}`, w.cookie)).status, 204);
+});
+
+test("create_ticket: children inherit the epic's test command, nothing is created after the round ended, wiki runs are not a child's runs", async () => {
+  const w = await workspace("inh");
+  const e = (await call("POST", "/api/tickets", w.cookie, { title: "E", kind: "epic", test_command: "test -f e.txt" })).body;
+  const outcome: { notes?: string; summary?: string } = {};
+  const use = (name: string, input: Record<string, unknown>) =>
+    runTool(plannerTools(e, outcome, 0, async () => undefined), { type: "tool_use", id: "x", name, input }, { root: w.repo, exec: hostExec });
+  assert.equal((await use("create_ticket", { title: "Own", spec: "s", test_command: "test -f own.txt" })).content, "Created INH-2 (queued).");
+  assert.equal((await use("create_ticket", { title: "Inherited", spec: "s" })).content, "Created INH-3 (queued).");
+  const kids = (await w.get(e.id)).children;
+  assert.deepEqual(kids.map((k: any) => k.test_command), ["test -f own.txt", "test -f e.txt"]);
+
+  // An approved child's wiki ingest run hangs off it, but is not its latest run.
+  db.prepare("UPDATE tickets SET status = 'done' WHERE parent_id = ?").run(e.id);
+  db.prepare("UPDATE runs SET status = 'passed' WHERE id = ?").run(createRun({ ticketId: kids[0].id, model: "demo" }));
+  createRun({ ticketId: kids[0].id, model: "wiki-model", role: "wiki" });
+  assert.match((await use("list_children", {})).content, /## INH-2 Own — done\nKind: task · test command: `test -f own\.txt` · latest run: #1 passed, demo, 0 tokens/);
+
+  // complete_epic and create_ticket in one turn: the epic is complete, so the child is refused.
+  assert.equal((await use("complete_epic", { summary: "done" })).is_error, false);
+  assert.match((await use("create_ticket", { title: "Late", spec: "s" })).content, /^InvalidArguments: this round has ended/);
+  assert.equal((await w.get(e.id)).children.length, 2);
+  db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id);
+});
+
+test("a crashed planner round is retried once with a fresh round; a second crash in a row fails the epic", async () => {
+  const w = await workspace("cra", true, { wiki: false, test_command: "true" });
+  const ws = (db.prepare("SELECT id FROM organization WHERE slug = 'cra'").get() as { id: string }).id;
+  db.prepare("INSERT INTO providers (id, workspace_id, name, kind, auth_type) VALUES ('cra-broken', ?, 'Broken', 'anthropic', 'api_key')").run(ws); // no key: every round throws
+  const epic = async (title: string) => (await call("POST", "/api/tickets", w.cookie, { title, spec: "PARALLEL", kind: "epic", provider_id: "cra-broken", model: "m" })).body;
+
+  const e = await epic("Crashes");
+  assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, w.cookie)).status, 201);
+  const d = await w.is(e.id, "failed");
+  assert.deepEqual(d.runs.map((r: any) => [r.attempt, r.status]), [[1, "failed"], [2, "failed"]]);
+  for (const r of d.runs) assert.ok(events(r.id).some((x) => x.type === "error" && /has no API key/.test(x.p.message)), r.id);
+  assert.match(d.handoff, /^A planner round failed twice in a row: ProviderError: provider "Broken" has no API key/);
+
+  // One crash: the retry goes on (here the provider works again by then).
+  const f = await epic("Crashes once");
+  process.env.POLARIS_CONCURRENCY = "0";
+  const r1 = (await call("POST", `/api/tickets/${f.id}/runs`, w.cookie)).body;
+  subscribe(r1.id, (x) => {
+    if (x.type !== "run_finished") return;
+    db.prepare("UPDATE runs SET provider_id = NULL, model = 'demo' WHERE id = ?").run(r1.id);
+    db.prepare("UPDATE tickets SET provider_id = NULL, model = 'demo' WHERE id = ?").run(f.id); // its children inherit the choice
+  });
+  process.env.POLARIS_CONCURRENCY = "2";
+  pump();
+  const g = await w.is(f.id, "review");
+  assert.deepEqual(g.runs.map((r: any) => [r.attempt, r.status]), [[1, "failed"], [2, "passed"], [3, "passed"]]);
+  assert.ok(events(r1.id).some((x) => x.type === "error" && /retrying with a fresh round/.test(x.p.message)));
+  await idle(ws);
 });
 
 test("other workspaces cannot see or act on an epic, its children or its planner rounds", async () => {
