@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket } from "./ui.tsx";
 
-type Detail = Ticket & { runs: Run[]; children?: Child[] };
+// spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
+type Detail = Ticket & { runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
 type Ev = { seq: number; type: string; payload: any };
 
 export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (number: number) => void }) {
@@ -123,7 +124,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
       </div>
       {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
-      {epic && detail?.children && <Epic ticket={ticket} items={detail.children} open={open} />}
+      {epic && detail?.children && <Epic ticket={ticket} detail={detail} items={detail.children} open={open} patch={(b) => patch(b).then(load)} />}
 
       <h3>{epic ? "Planner rounds" : "Runs"}</h3>
       {runs.length === 0 ? (
@@ -479,7 +480,8 @@ function Diff({ text }: { text: string }) {
 
 // Epic view: the summary (or why it failed), the whole tree of children with their state, dependencies and handoffs,
 // and the tokens and cost of everything the epic spent (planner rounds + every descendant's runs).
-function Epic({ ticket, items, open }: { ticket: Ticket; items: Child[]; open: (number: number) => void }) {
+// Its spending caps (empty = none) cover the same tree, cached tokens included: "spent $x of $y" once one is set.
+function Epic({ ticket, detail, items, open, patch }: { ticket: Ticket; detail: Detail; items: Child[]; open: (number: number) => void; patch: (b: object) => void }) {
   const all = [ticket, ...items];
   const tokens = all.reduce((n, t) => n + t.tokens_in + t.tokens_out, 0);
   const usd = all.reduce((n, t) => n + t.cost_usd, 0);
@@ -496,6 +498,22 @@ function Epic({ ticket, items, open }: { ticket: Ticket; items: Child[]; open: (
       <div className="row">
         <h3 className="grow">Children <span className="muted">{ticket.child_done}/{ticket.child_count} done</span></h3>
         <span className="tokens mono" aria-label="Epic usage">planner + children: {fmt(tokens)} tok · {cost(usd)}</span>
+      </div>
+      <div className="row" key={`${detail.cap_usd}-${detail.cap_tokens}`}>
+        <label className="check">
+          Cap $ <input aria-label="Epic cap (USD)" type="number" min={0} step="any" defaultValue={detail.cap_usd ?? ""} placeholder="none" style={{ width: 90 }} onBlur={(e) => e.target.value !== String(detail.cap_usd ?? "") && patch({ cap_usd: e.target.value })} />
+        </label>
+        <label className="check">
+          Cap tokens <input aria-label="Epic cap (tokens)" type="number" min={0} step={1} defaultValue={detail.cap_tokens ?? ""} placeholder="none" style={{ width: 110 }} onBlur={(e) => e.target.value !== String(detail.cap_tokens ?? "") && patch({ cap_tokens: e.target.value })} />
+        </label>
+        {detail.spent && (detail.cap_usd !== null || detail.cap_tokens !== null) && (
+          <span className={`mono${(detail.cap_usd !== null && detail.spent.usd >= detail.cap_usd) || (detail.cap_tokens !== null && detail.spent.tokens >= detail.cap_tokens) ? " error" : ""}`} aria-label="Epic cap">
+            spent {[
+              detail.cap_usd !== null && `$${detail.spent.usd.toFixed(2)} of $${detail.cap_usd.toFixed(2)}`,
+              detail.cap_tokens !== null && `${fmt(detail.spent.tokens)} of ${fmt(detail.cap_tokens)} tokens`,
+            ].filter(Boolean).join(" · ")}
+          </span>
+        )}
       </div>
       {items.length ? <Children parent={ticket.id} items={items} open={open} /> : <p className="muted">No children yet: the planner creates them in its first round.</p>}
     </section>
