@@ -12,8 +12,11 @@ async function setup(page: Page, workspace: string, autoApprove: boolean) {
   return repo;
 }
 
-async function newEpic(page: Page, title: string, spec: string) {
-  await newTicket(page, title, spec, (d) => d.getByRole("radio", { name: "Epic" }).check());
+async function newEpic(page: Page, title: string, spec: string, test = "") {
+  await newTicket(page, title, spec, async (d) => {
+    await d.getByRole("radio", { name: "Epic" }).check();
+    await d.getByLabel("Test command (optional)").fill(test);
+  });
   await page.getByRole("link", { name: "Board" }).click();
   const card = page.getByRole("button", { name: new RegExp(title) });
   await expect(card).toContainText("Epic");
@@ -88,13 +91,14 @@ test("M7: epic → planner round → children with a dependency → approvals dr
 test("M7: with auto-approve on, an epic runs to review without child approvals", async ({ page }) => {
   test.setTimeout(240_000);
   const repo = await setup(page, "Autopilot", true);
-  await newEpic(page, "Two files", "Add a.txt and b.txt.");
+  await newEpic(page, "Two files", "Add a.txt and b.txt.", "test -f a.txt || test -f b.txt");
   await page.getByRole("button", { name: "Run planner" }).click();
   const status = page.getByLabel("Status");
   await expect(status).toHaveValue("review", { timeout: 180_000 });
   const kids = page.getByRole("list", { name: "Children" });
   await expect(kids.getByRole("listitem")).toHaveCount(2);
   for (const key of ["AUT-2", "AUT-3"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
+  await expect(kids.getByRole("listitem", { name: "AUT-2", exact: true }).getByTitle("Test command")).toHaveText("test -f a.txt || test -f b.txt"); // inherited from the epic
   await expect(page.getByLabel("Summary")).toContainText("Done: AUT-2 Create a.txt; AUT-3 Create b.txt.");
   await page.getByRole("region", { name: "Review" }).getByRole("button", { name: "Approve" }).click();
   await expect(status).toHaveValue("done");

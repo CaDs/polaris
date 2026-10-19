@@ -39,7 +39,7 @@ export function List({ tickets, group, open }: { tickets: Ticket[] | null; group
             <button key={t.id} className="lrow" onClick={() => open(t)}>
               <PriorityIcon p={t.priority} />
               <span className="mono muted key">{t.key}</span>
-              <StatusIcon status={t.status} />
+              <StatusIcon status={t.status} label />
               <span className="title">
                 {t.title}
                 {t.kind === "epic" && <span className="badge epic">Epic{t.child_count > 0 && ` ${t.child_done}/${t.child_count}`}</span>}

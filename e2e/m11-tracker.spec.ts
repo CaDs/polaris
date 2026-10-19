@@ -173,6 +173,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/, /No priority 1/]);
   await expect(page.getByRole("region", { name: "High" })).toContainText("TRA-1");
   await expect(page.getByRole("region", { name: "High" }).locator(".lrow")).toContainText("regression");
+  await expect(page.getByRole("region", { name: "High" }).getByRole("img", { name: "todo" })).toBeVisible(); // a row's status is announced
 
   // Save the view (project filter + list grouped by priority), then reopen it from Views.
   await addFilter(page, "Project", "Checkout");
@@ -261,4 +262,8 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.getByLabel("Priority")).toHaveValue("2");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await shot("ticket-phone");
+  for (const link of ["Cycles", "Views"]) {
+    await page.getByRole("link", { name: link, exact: true }).click();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  }
 });

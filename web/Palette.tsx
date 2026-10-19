@@ -40,7 +40,7 @@ export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go:
       <ul id="palette-list" role="listbox" aria-label="Results">
         {items.map((it, i) => (
           <li key={it.id} id={`pi-${it.id}`} role="option" aria-selected={i === at} onMouseEnter={() => setSel(i)} onMouseDown={(e) => (e.preventDefault(), close(), it.run())}>
-            {it.ticket ? <><StatusIcon status={it.ticket.status} /><span className="mono muted">{it.ticket.key}</span></> : <span className="muted">›</span>}
+            {it.ticket ? <><StatusIcon status={it.ticket.status} label /><span className="mono muted">{it.ticket.key}</span></> : <span className="muted">›</span>}
             <span className="grow">{it.name}</span>
             {it.hint && <kbd>{it.hint}</kbd>}
           </li>

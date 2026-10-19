@@ -484,6 +484,7 @@ function Children({ parent, items, open }: { parent: string; items: Child[]; ope
             <span className="grow">{c.title} {c.kind === "epic" && <span className="badge epic">Epic</span>}</span>
             {c.depends_keys.length > 0 && <span className="muted" title="Dependencies">← {c.depends_keys.join(", ")}</span>}
             <span className="muted">{c.label}</span>
+            {c.test_command && <span className="mono muted" title="Test command">{c.test_command}</span>}
             {c.run_model && <span className="mono muted">{c.run_model}</span>}
             <span className="muted">{fmt(c.tokens_in + c.tokens_out)} tok</span>
           </div>

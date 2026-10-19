@@ -70,10 +70,11 @@ export const waiting = (t: Ticket) => t.kind === "epic" && t.status === "running
 export const duration = (r: Run) => (r.started_at ? `${(((r.ended_at ?? Date.now()) - r.started_at) / 1000).toFixed(1)}s` : "—");
 
 // Small status glyphs: circle = todo, spinning arc = running, ring with dot = review, check = done, x = failed.
-export function StatusIcon({ status }: { status: string }) {
+// label: the glyph is the only place the status shows (list rows, palette), so screen readers get it as an image.
+export function StatusIcon({ status, label = false }: { status: string; label?: boolean }) {
   const c = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
   return (
-    <svg className={`icon s-${status}`} width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+    <svg className={`icon s-${status}`} width="14" height="14" viewBox="0 0 14 14" {...(label ? { role: "img", "aria-label": status } : { "aria-hidden": true })}>
       {status === "running" ? (
         <>
           <circle cx="7" cy="7" r="5.5" {...c} opacity=".3" />
