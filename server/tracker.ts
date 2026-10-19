@@ -26,7 +26,7 @@ class Invalid extends Error {}
 const fail = (message: string): never => {
   throw new Invalid(message);
 };
-const attempt = <T>(fn: () => T): T | { error: string } => {
+const orError = <T>(fn: () => T): T | { error: string } => {
   try {
     return fn();
   } catch (e) {
@@ -85,7 +85,7 @@ export type TrackerFields = {
 type Current = { id: string; kind: string; status: string; run_count: number; parent_id: string | null; project_id: string | null; milestone_id: string | null };
 
 // Validated tracker fields of a ticket body (cur: the ticket being patched; kind: its kind, or the new ticket's).
-export const trackerFields = (ws: string, b: Record<string, any>, kind: string, cur?: Current) => attempt(() => fields(ws, b, kind, cur));
+export const trackerFields = (ws: string, b: Record<string, any>, kind: string, cur?: Current) => orError(() => fields(ws, b, kind, cur));
 function fields(ws: string, b: Record<string, any>, kind: string, cur?: Current) {
   const v: TrackerFields = {};
   if (b.priority !== undefined) v.priority = Number.isInteger(b.priority) && b.priority >= 0 && b.priority <= 4 ? b.priority : fail("priority must be 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
@@ -181,7 +181,7 @@ const json = (a: unknown[]) => JSON.stringify(a);
 
 // WHERE (AND across fields, OR within one) + ORDER BY for the board/list query. Unknown params are ignored (the UI keeps
 // its layout in the same query string); unknown values of known params are a 400.
-export const ticketQuery = (ws: string, userId: string, q: Record<string, string>) => attempt(() => query(ws, userId, q));
+export const ticketQuery = (ws: string, userId: string, q: Record<string, string>) => orError(() => query(ws, userId, q));
 function query(ws: string, userId: string, q: Record<string, string>) {
   const where: string[] = [];
   const params: SQLInputValue[] = [];

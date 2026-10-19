@@ -164,10 +164,10 @@ const text = (input: Record<string, unknown>, key: string, max: number) => {
 };
 
 // read_file + search on the checkout, and the planner tools. finish_round/complete_epic fill `outcome`, which ends the run
-// (runAgent's finished check). queue: starts a new child; returns an error message if it could not be queued. gate: the epic
+// (runAgent's finished check). startChild: queues a new child; returns an error message if it could not be queued. gate: the epic
 // gate (M9) complete_epic runs first; returns why it failed.
 export function plannerTools(
-  epic: Epic, outcome: Outcome, since: number, queue: (ticketId: string) => Promise<string | undefined>, gate: () => Promise<string | undefined> = async () => undefined,
+  epic: Epic, outcome: Outcome, since: number, startChild: (ticketId: string) => Promise<string | undefined>, gate: () => Promise<string | undefined> = async () => undefined,
 ): Tool[] {
   const createTicket: Tool = {
     def: {
@@ -228,7 +228,7 @@ export function plannerTools(
       const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;
-      const error = await queue(id);
+      const error = await startChild(id);
       return error ? `Created ${key}, but it could not be queued (it counts as failed): ${error}` : `Created ${key} (queued).`;
     },
   };

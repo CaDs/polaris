@@ -55,8 +55,8 @@ export const SETTINGS_DEFAULTS = {
 };
 // Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
 const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
-export const settingsFor = (workspaceId: string) =>
-  db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
+export const settingsFor = (ws: string) =>
+  db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as Settings | undefined;
 
 type TicketRow = {
   id: string; workspace_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string; test_command: string | null;
@@ -192,10 +192,10 @@ function queue(t: TicketRow, model: string, attempt: number, providerId: string 
   return runId;
 }
 
-export type Pick = { provider_id?: string | null; model?: string | null };
+export type Choice = { provider_id?: string | null; model?: string | null };
 
 // Provider + model for a new run: the first of explicit choice → ticket → workspace default that sets either; none → env.
-function choose(t: TicketRow, s: Settings, pick?: Pick): { provider_id: string | null; model: string } {
+function choose(t: TicketRow, s: Settings, pick?: Choice): { provider_id: string | null; model: string } {
   const level = [pick, t, { provider_id: s.default_provider_id, model: s.default_model }].find((l) => l && (l.provider_id || l.model));
   if (!level?.provider_id) return { provider_id: null, model: providerConfig({ model: level?.model ?? undefined }).model };
   const p = providerById(level.provider_id);
@@ -215,7 +215,7 @@ export function metaProvider(ws: string) {
 // Queues attempt 1 of a ticket (an epic: its next planner round) after checking the workspace's repo settings. Errors are user-facing.
 // M9: a top-level task's first run is triaged first when the workspace has a triage model; too large → split instead (the
 // returned run is the new epic's round 1, which logs the triage that split it: `triaged`).
-export async function enqueueRun(ticketId: string, pick?: Pick, triaged?: EventPayloads["triage"]): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
+export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: EventPayloads["triage"]): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
   const t = ticketRow(ticketId);
   if (!t) return { error: "not_found", status: 400 };
   const s = settingsFor(t.workspace_id);
@@ -822,7 +822,7 @@ export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint
     if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
     if (op === "lint" && !(await pageList(ws, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
   }
-  let chosen: { provider_id: string | null; model: string };
+  let chosen: ReturnType<typeof choose>;
   try {
     const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
     chosen = prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
@@ -937,8 +937,8 @@ export const reviewRun = (ticketId: string) =>
     | undefined;
 
 // Removes every worktree + branch the ticket's runs created (approve, reject, delete).
-export async function cleanupTicket(ticketId: string, workspaceId: string) {
-  const s = settingsFor(workspaceId);
+export async function cleanupTicket(ticketId: string, ws: string) {
+  const s = settingsFor(ws);
   if (!s) return;
   const runs = db.prepare("SELECT worktree, branch FROM runs WHERE ticket_id = ? AND branch IS NOT NULL").all(ticketId) as { worktree: string; branch: string }[];
   for (const r of runs) await removeWorktree(s.repo_path, r.worktree, r.branch, dataDir());

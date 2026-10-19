@@ -8,7 +8,7 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, withStates } from "./planner.ts";
 import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -93,8 +93,8 @@ const runIn = (c: Context<Env>) =>
     | undefined;
 
 // A provider_id/model choice: both optional, null = unset. Providers must belong to the caller's workspace.
-function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v: { provider_id?: string | null; model?: string | null } } {
-  const v: { provider_id?: string | null; model?: string | null } = {};
+function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v: Choice } {
+  const v: Choice = {};
   if (b.provider_id !== undefined) {
     if (b.provider_id !== null && (typeof b.provider_id !== "string" || !db.prepare("SELECT 1 FROM providers WHERE id = ? AND workspace_id = ?").get(b.provider_id, c.get("workspaceId"))))
       return { error: "provider not found" };

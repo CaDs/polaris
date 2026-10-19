@@ -123,7 +123,7 @@ const echo = { name: "echo", description: "Echo a string back.", input_schema: {
 type Env = { Variables: { workspaceId: string } };
 export const providerRoutes = new Hono<Env>();
 
-const own = (workspaceId: string, id: string) => db.prepare("SELECT * FROM providers WHERE id = ? AND workspace_id = ?").get(id, workspaceId) as ProviderRow | undefined;
+const own = (ws: string, id: string) => db.prepare("SELECT * FROM providers WHERE id = ? AND workspace_id = ?").get(id, ws) as ProviderRow | undefined;
 
 providerRoutes.get("/", (c) =>
   c.json((db.prepare("SELECT * FROM providers WHERE workspace_id = ? ORDER BY created_at, rowid").all(c.get("workspaceId")) as ProviderRow[]).map(view)),
