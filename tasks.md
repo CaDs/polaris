@@ -101,8 +101,19 @@
 - [x] Reflection gets the run's real tool names and must not invent tools
 - [x] `Split:` epics copy the original's tracker fields (labels, priority, assignee, estimate, due date, project, milestone, cycle)
 
+## Learnings from the code review
+- [x] Security: no agent-written `.git` path; host git with hooks and fsmonitor off and the recorded git dir; case-insensitive protected paths; scratch writes refuse symlinks; image setting validated
+- [x] Security: loopback bind (`HOST`), sign-up closed after the first account (`POLARIS_OPEN_SIGNUP`), Origin check on cookie-authenticated mutations, provider secret cleared on `base_url` change, OAuth callback on 127.0.0.1
+- [x] Run pipeline: reviewer snapshots on a throwaway index (its `git diff` shows the change); manual status only through the state machine; background work can't crash the process; restart recovery retries attempts and unsticks tickets; one fix-round rule; retry feedback from the previous run's reason
+- [x] Planner: rounds only when a child failed, was deleted, or none is open; child delete/move; children inherit the epic's test command; no `create_ticket` after the round ended
+- [x] Wiki: `delete_file`, passing no-op refresh, no queue slot while waiting, human edit refused when the page changed, `.polaris/wiki/` paths in the index section, validated sources
+- [x] Evals compared on the same model only; settings PUT merges; agent tool edge cases; indexes (015); shared constants, `truncate`, `ticketKey`, `pipeline`, JSON errors, test helpers
+- [x] Worker prompt matches the tools (every line numbered, git read-only); test command, git and budget in the environment block; a changed built-in prompt reaches workspaces on the unmodified one
+
 ## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
-- [ ] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
+- [x] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
+- [ ] One turn and token budget per attempt (today both apply per agent session: up to 4 × max turns with fix rounds)
+- [ ] Invite members and switch workspaces in the UI
 - [ ] Benchmark in the repo: the complexity ladder (tickets, locked tests, answer keys, runner) with 3 runs per level and a held-out set
 - [ ] Measure automatic splitting on levels a real model fails at the fair budget
 - [ ] Failure mining: per-run metrics (tool errors, repeated reads, budget use), failure classes, draft improvement tickets

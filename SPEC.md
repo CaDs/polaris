@@ -8,7 +8,9 @@ builds its own remaining milestones (`tasks.md`).
 
 - **One TypeScript process**: Hono API + N concurrent agent loops. Split workers out only when one process can't keep up.
 - **SQLite** via `node:sqlite`. Raw SQL, no ORM. Our migrations: `server/migrations/NNN_*.sql`, run once in order (`PRAGMA user_version`).
-- **Auth**: Better Auth (email/password) + organization plugin. **Workspace = organization.**
+- **Auth**: Better Auth (email/password) + organization plugin. **Workspace = organization.** The UI creates one workspace
+  per account and has no invite or workspace switcher yet; members (the assignee and lead pickers) come from the plugin's
+  tables.
 - **Dashboard**: React + Vite in `web/`, live updates over SSE.
 - **Sandbox**: one Docker container per run, worktree mounted at `/work`; every shell tool call is a `docker exec`. The repo's git dir is
   mounted read-only at its host path, so `git status`/`diff`/`log` work inside but commits and ref changes do not (the harness
@@ -32,15 +34,20 @@ loop: resp = provider.stream(messages, tools) → append → no tool calls? done
 
 Worker budget: workspace settings `max_turns` (10..500, default 120) and `max_minutes` (5..600, default 60). `max_minutes`
 is one wall-clock deadline for the whole attempt (counted from the run's start; the first run, gate fix rounds and review
-fix rounds share it); `max_turns` applies per agent call (the first run and each fix round count separately). The loop
+fix rounds share it); `max_turns` applies per agent call (the first run and each fix round count separately, so an attempt
+can use up to 4 × `max_turns`), and so does the 2M token cap. The Settings label for max turns still says "per attempt". The loop
 checks `budget.deadline` (epoch ms) at the top of each turn and ends with `time budget exhausted (<n> min)`. The
 `finishHint` fires once, when 2 turns are left or less than max(2 min, 10% of the call's window) remains, whichever
 comes first. Planner (50 turns), reviewer, wiki and CLI runs keep their own budgets. Eval case runs use the frozen
 defaults (120/60), not the workspace's values, so scores stay comparable when Settings change.
 
-- Tools: `read_file`, `edit_file` (`str_replace` for Claude, `apply_patch` for GPT), `shell`, `search` (rg).
-- Fresh context per run: SPEC + PROGRESS notes + LESSONS + ticket + last failure.
+- Tools: `read_file` (every line numbered `N<tab>`), `edit_file` (str_replace; OpenAI providers get `apply_patch`
+  instead), `shell` (timeout in seconds, default 120, max 600; 0 = default), `search` (rg). The wiki maintainer also has
+  `delete_file` and no shell.
+- Fresh context per run: environment, skills, lessons, wiki index, epic handoff request, reviewer note, last failure, ticket
+  (see Context management).
 - A reply that stops on `max_tokens` without a tool call is not an answer: a "continue" user message is appended (≤ 2 in a row, then the run fails).
+- A reply with `stop_reason: refusal` fails the run (`ProviderError`), it does not count as passed.
 - A tool call whose JSON arguments were cut off is answered with an `InvalidArguments` tool_result; the tool does not run.
 - Error classes: `InvalidArguments`, `UnexpectedEnvironment`, `ProviderError`, `Timeout`, `UserAborted`; anything else is a harness bug.
 
@@ -54,8 +61,9 @@ never changed mid-conversation either (cache prefix, model behaviour).
 - **Request layout** (stable prefix first): tools (static per provider kind, keys serialized in sorted order) → system
   prompt (the workspace's active prompt version, v1 = `prompts/worker.md`; static, no per-run or per-repo text) → messages.
   The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node,
-  repo, base branch, read-only paths), the skills list, `# Lessons from earlier runs` (M6), the latest reviewer note, the
-  previous attempt's gate failure, then `# Task`.
+  repo, base branch, test command, read-only paths, git read-only, turn and minute budget), the skills list, `# Lessons
+  from earlier runs` (M6), the wiki index (M10), the epic's handoff request (M7), the latest reviewer note, the previous
+  attempt's failure, then `# Task`. The environment block is the one place for those facts; `worker.md` only points at it.
 - **Cache breakpoints** (Anthropic, 3 of the 4 allowed): end of tools, end of system, and a moving one on the last content
   block of the last message, so each turn reads the previous turn's prefix. OpenAI sends `prompt_cache_key` (the ticket id,
   so retries of a ticket share a cache). Cache hit rate = `cache_read / (input + cache_read + cache_write)`, shown per run
@@ -146,7 +154,11 @@ can read or write it, and every change is a new version you can see in full on t
    counts. Otherwise Promote is disabled and the reason is shown (no eval yet, active version has no eval on this set
    with that model, not better). Changing the case set invalidates earlier evals for
    promotion. **There is deliberately no auto-promotion:** eval sets are small and agent runs noisy, so a human reads the
-   prompt and the scores before it affects every run.
+   prompt and the scores before it affects every run. One exception, for the built-in text: when `prompts/worker.md`
+   changes, a workspace without a seed version of the new text gets one as its next version (`source = 'seed'`, once per
+   text, on its next `activePrompt`). It becomes active only when the active version is itself a seed (versions are never
+   edited, so that is unmodified built-in text); a workspace on a human or proposed version keeps it, and the new seed
+   waits as a candidate whose rationale says so. Evals of the old version don't count for the new one.
 
 Guardrails specific to M6: agents can't write lessons, prompts, cases or results (DB only, no tool reaches them);
 reflection and proposal calls get no tools; lessons and prompts are size-capped and shown in full before they matter.
@@ -234,7 +246,9 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
   attempt (then the fresh retry applies). The round's turns and usage add to the run; a `gate_fix {reason}` event marks
   it ("Tests failed — fixing in the same run"). Not for eval case runs (they measure the unassisted worker) or planners.
 - **Environment.** The first message says the repository is at `/work` in the sandbox, also every shell command's working
-  directory; tool paths are relative to it (absolute `/work/...` is accepted).
+  directory; tool paths are relative to it (absolute `/work/...` is accepted). It names the gate's test command (the
+  ticket's, else the workspace's; an eval case's frozen one), the read-only paths, that git is read-only (status, diff and
+  log work; the harness commits), and the budget (max turns per agent session, max minutes for the attempt).
 - **Tool input errors.** `InvalidArguments` about a tool's input shape (missing or mistyped field) ends with
   `Expected input: {command: string, timeout?: number}`, derived from the tool's schema. Path errors do not.
 - **Per-ticket test command.** The ticket view and New ticket dialog edit `tickets.test_command` (empty = workspace default).
@@ -249,7 +263,9 @@ provider and model review the change before a human sees it (not for eval case r
   [{file, line?, problem, fix}]}` (request_changes needs a finding; `InvalidArguments` otherwise), which ends its loop.
   Budget: `clamp(6 + ceil(lines / 8), 8, 25)` turns for `lines` changed lines (git numstat against base plus new
   files, minus `.polaris/` scratch), same token cap as a worker. It runs *before* the commit and inspects `git status --short` and
-  `git diff` (new files are untracked: it reads them). Its first message: ticket, base sha, the test command that passed.
+  `git diff` (new files are untracked: it reads them). The harness snapshots the worktree before and after the reviewer
+  with `write-tree` on a throwaway index (`GIT_INDEX_FILE`), never the real one, so the reviewer's `git diff` shows the
+  change; a difference is restored and logged. Its first message: ticket, base sha, the test command that passed.
   It hunts correctness bugs against the spec and neighbouring code paths, not style.
 - **Fix rounds.** `request_changes`: the findings are appended to the worker's own conversation (`RunOptions.resume`, still
   append-only), the worker fixes and finishes, the gate runs again, then the next review. At most 3 review rounds per
@@ -448,11 +464,26 @@ is a 400 in a body and matches nothing in a filter).
 - Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
   dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Harness writes into the worktree
   (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
+- Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
+  binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
+  non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or
+  `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Changing a
+  provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it.
 - The harness never edits its running code; changes land through the review queue.
 - Every run has a token budget; every passing run is a commit on its own branch.
 
 ## Conventions
 
 - Node ≥ 26 runs `.ts` directly (type stripping): erasable syntax only, imports use `.ts` extensions.
-- Tests: `node:test` in `test/`, in-memory DB (`npm test`). Each non-trivial piece leaves one test.
+- Tests: `node:test` in `test/`, in-memory DB (`npm test`). Each non-trivial piece leaves one test. Shared helpers
+  (sign-up, workspace, temp repo, mock provider, waits) live in `test/helpers.ts`, e2e ones in `e2e/helpers.ts`.
+- One definition per shared rule: statuses, kinds, budgets, the command timeout and `OWN_RUNS` are exported once; the
+  ticket key is `ticketKey()` (SQL); output is cut with `truncate()`; settings defaults are `SETTINGS_DEFAULTS`
+  (`server/runs.ts`); worker, eval, planner and wiki runs share `pipeline()`.
+- `PUT /api/settings` merges: an omitted field keeps its value, `null` resets it to the default, toggles accept
+  `true`/`1`/`"on"` (what GET returns round-trips).
+- API errors are `{error}` JSON: route checks return their own status; thrown `Invalid`/`AgentError` are 400, `MergeError`
+  409, anything else 500 (logged) via `app.onError`.
+- Hot lookups are indexed (migration 015): child and split subqueries, project/milestone/cycle progress, the queue and
+  restart recovery, eval runs.
 - Deps pinned via lockfile; install with `npm install --before <date ≥ 2 weeks ago>`.
