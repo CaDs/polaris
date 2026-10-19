@@ -6,7 +6,8 @@ import { fakeProvider } from "./fake.ts";
 // Tasks containing "compact" run a long session instead: a 4000-line shell output (spilled to a file), an edit, then usage
 // that grows with the conversation (400 tokens per message, 75% cached) so a small compaction threshold triggers a
 // compaction after turn 2 and a fresh conversation finishes the work.
-// Retries (task contains "Previous attempt failed") also create ok.txt, so a `test -f ok.txt` gate fails attempt 1 only.
+// Retries (task contains "Previous attempt failed" or "... was stopped") also create ok.txt, so a `test -f ok.txt` gate fails attempt 1 only.
+// M12: STUCK-LOOP in a ticket makes attempt 1 read README.md over and over (the stuck monitor stops it); a retry works normally.
 // So does a system prompt containing ALWAYS-CREATE-OK (M6: eval scores differ between prompt versions).
 // "slow"/"compact" are matched in the ticket part only (after "# Task"), so lessons naming such a ticket don't leak.
 // Requests without tools are M6 meta calls (reflection, prompt proposal), answered at once by demoMeta.
@@ -96,7 +97,7 @@ function reviewScript(task: string) {
 
 function fixScript(task: string) {
   // REVIEW-FIX-STALL: the review fix round never finishes (it runs out of turns), like GATE-FIX-STALL.
-  if (task.slice(task.lastIndexOf("# Task")).includes("REVIEW-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: "true" })]), { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
+  if (task.slice(task.lastIndexOf("# Task")).includes("REVIEW-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: `echo ${i}` })]), { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
   return fakeProvider([
     [say("Fixing the review findings."), use("f1", "edit_file", { path: "fixed.txt", old_string: "", new_string: "fixed\n" })],
     [say("Created fixed.txt.")],
@@ -107,7 +108,7 @@ function gateFixScript(task: string) {
   const once = task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-ONCE");
   const usage = { input: 100, output: 20, cache_read: 10, cache_write: 0 };
   // GATE-FIX-STALL: the fix round never finishes (it runs out of turns), so the attempt falls back to a fresh retry.
-  if (task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: "true" })]), usage).provider;
+  if (task.slice(task.lastIndexOf("# Task")).includes("GATE-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: `echo ${i}` })]), usage).provider;
   if (!once) // changes nothing and repeats its earlier final reply, so a handoff still reads the same
     return fakeProvider([(req) => [say(req.messages.findLast((m) => m.role === "assistant" && m.content.some((b) => b.type === "text") && !m.content.some((b) => b.type === "tool_use"))?.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n") ?? "Done.")]], usage).provider;
   return fakeProvider([[say("Fixing the failing tests."), use("g1", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })], [say("Created ok.txt.")]], usage).provider;
@@ -195,6 +196,8 @@ function demoMeta(req: ProviderRequest): ProviderResponse {
 function script(task: string, ok: boolean, why: string) {
   const ticket = task.includes("# Task") ? task.slice(task.lastIndexOf("# Task")) : task;
   if (task.includes('"## Handoff"')) return childScript(ticket);
+  if (ticket.includes("STUCK-LOOP") && !task.includes("Previous attempt"))
+    return fakeProvider(Array.from({ length: 30 }, (_, i) => [use(`s${i}`, "read_file", { path: "README.md" })]), { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
   const compact = /\bcompact\b/i.test(ticket);
   return fakeProvider(
     compact
@@ -237,7 +240,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
   return {
     async stream(req, onEvent) {
       if (!req.tools.length) return demoMeta(req);
-      const retry = task.includes("Previous attempt failed");
+      const retry = /Previous attempt (failed|was stopped)/.test(task);
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
       const gateFix = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Tests failed"));

@@ -12,6 +12,9 @@ export type Msg = { role: "user" | "assistant"; content: Block[] };
 export type ToolDef = { name: string; description: string; input_schema: Record<string, unknown> };
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number };
 export const noUsage = (): Usage => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+// Same value, object keys sorted (canonical JSON once stringified).
+export const stable = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, stable(x)])) : v;
 export const addUsage = (into: Usage, u: Usage) => (Object.keys(into) as (keyof Usage)[]).forEach((k) => (into[k] += u[k]));
 
 // Live deltas for transcripts. The final Msg is authoritative.
@@ -53,6 +56,22 @@ export class AgentError extends Error {
 
 export type RunStatus = "passed" | "failed" | "cancelled";
 
+// M12 stuck monitor (loop.ts STUCK). no_tool is reserved: text-only replies already end the run (see SPEC).
+export type StuckSignal = "repeat_call" | "no_progress" | "repeat_error" | "no_tool";
+// Per-run counts for failure mining, logged as run_metrics right before run_finished.
+export type RunMetrics = {
+  turns: number; tool_calls: number; tool_errors: number;
+  repeated_calls: number; // tool calls identical (name + input) to an earlier one in the run
+  repeated_reads: number; // read_file answered by the dedupe stub
+  compactions: number;
+  first_edit_turn: number | null; // first successful edit_file/apply_patch/delete_file, 1-based
+  files_changed: number | null; // worker runs (runs.ts, from the worktree diff); null otherwise
+  turns_pct: number; minutes_pct: number | null; // 0-100 of the budget; minutes_pct only with a deadline
+  minutes: number; // elapsed wall-clock minutes, 1 decimal
+  input: number; output: number; cache_read: number;
+  stuck: null | { turn: number; signal: StuckSignal; action: "nudge" | "stop" };
+};
+
 export type Finding = { file: string; line?: number; problem: string; fix: string };
 
 // Event log payloads, keyed by events.type.
@@ -66,6 +85,9 @@ export type EventPayloads = {
   // Conversation n was summarized and replaced by a fresh one (see loop.ts).
   compaction: { n: number; tokens_before: number; summary_chars: number; history_path: string };
   run_finished: { status: RunStatus; reason?: string; turns: number; usage: Usage };
+  // M12: the stuck monitor nudged the model, or (second time) ended the attempt.
+  stuck: { turn: number; signal: StuckSignal; detail: string; action: "nudge" | "stop" };
+  run_metrics: RunMetrics;
   // M3 orchestration (server/runs.ts): sandbox setup, test gate, commit of a passing run, review decision.
   setup: { step: "worktree"; branch: string; base_sha: string } /* branch "" = detached (eval) */ | { step: "sandbox"; sandbox: string } | { step: "context"; window: number; source: string; compact_at: number } | { step: "skills"; skills: { name: string; description: string; path: string }[] } | { step: "command"; command: string; code: number | null; output: string };
   // flaky: the command failed, then passed on an immediate re-run (first_failure is the first run); the gate passed.

@@ -1,4 +1,4 @@
-import { AgentError, type Block, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
+import { AgentError, stable, type Block, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
 import { httpError, retryable, withRetry } from "./retry.ts";
 
 // Anthropic Messages API over fetch + SSE. The same adapter talks to Ollama's
@@ -24,10 +24,6 @@ function fromApi(b: ApiBlock): Block {
 const BREAKPOINT = { type: "ephemeral" } as const;
 const cached = <T extends object>(xs: T[]) => xs.map((x, i) => (i === xs.length - 1 ? { ...x, cache_control: BREAKPOINT } : x));
 
-// Same value, object keys sorted: the tools prefix must serialize identically on every request to hit the cache.
-const stable = (v: unknown): unknown =>
-  Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, stable(x)])) : v;
-
 // The request body. Prefix order: tools, system, messages. At most 3 of the 4 allowed breakpoints: end of tools, end of
 // system, and a moving one on the last block of the last message (so each turn reads the previous turn's prefix from cache).
 // Earlier messages are sent exactly as they were, never edited.
@@ -40,7 +36,7 @@ export function requestBody(req: ProviderRequest) {
     max_tokens: req.maxTokens ?? 32000,
     stream: true,
     system: cached(req.system.map(toApi).filter((b) => b !== undefined)),
-    ...(req.tools.length ? { tools: cached(req.tools.map((t) => stable(t) as object)) } : {}), // none: M6 meta calls
+    ...(req.tools.length ? { tools: cached(req.tools.map((t) => stable(t) as object)) } : {}), // sorted keys: the tools prefix must serialize identically to hit the cache; none: M6 meta calls
     messages,
   };
 }

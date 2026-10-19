@@ -72,7 +72,7 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
   assert.deepEqual(seen.map((e) => e.seq), seen.map((_, i) => i + 1));
   const types = seen.map((e) => e.type);
   assert.deepEqual(types.slice(0, 3), ["setup", "setup", "setup"]); // worktree, sandbox (no setup command), context
-  assert.deepEqual(types.slice(-4), ["test_result", "commit", "reflection", "run_finished"]);
+  assert.deepEqual(types.slice(-5), ["test_result", "commit", "reflection", "run_metrics", "run_finished"]);
   assert.deepEqual(seen.filter((e) => e.type === "tool_call").map((e) => e.payload.name), ["edit_file", "shell", "read_file"]);
 
   const ticket = await waitFor(alice, t.body.id, "review");
@@ -87,11 +87,28 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
   const listed = (await call("GET", "/api/tickets", alice)).body.find((x: any) => x.id === t.body.id);
   assert.equal(listed.run_status, "passed");
   assert.equal(listed.tokens_out, 80);
+  // M12 run metrics: on the ticket's runs and their own route (404 for a run without any).
+  assert.deepEqual(r.metrics, {
+    turns: 4, tool_calls: 3, tool_errors: 0, repeated_calls: 0, repeated_reads: 0, compactions: 0, first_edit_turn: 1, files_changed: 1, // notes.txt
+    turns_pct: 3, minutes: 0, minutes_pct: 0, input: 400, output: 80, cache_read: 40, stuck: null, // 4 of 120 turns; ~2 s of 60 min
+  });
+  assert.deepEqual((await call("GET", `/api/runs/${r.id}/metrics`, alice)).body, r.metrics);
+  db.prepare("INSERT INTO runs (id, ticket_id, model) VALUES ('no-metrics', ?, 'x')").run(t.body.id);
+  assert.equal((await call("GET", "/api/runs/no-metrics/metrics", alice)).status, 404);
+  db.prepare("DELETE FROM runs WHERE id = 'no-metrics'").run();
 
   // A manual re-run starts a new series of attempts (retries count up from 1).
   const second = await call("POST", `/api/tickets/${t.body.id}/runs`, alice);
   assert.equal(second.body.attempt, 1);
   await waitFor(alice, t.body.id, "review");
+
+  // The workspace's metrics per day and model (earlier tests ran demo runs today too).
+  const metrics = (await call("GET", "/api/metrics?days=3", alice)).body;
+  assert.equal(metrics.days, 3);
+  const today = metrics.rows.find((x: any) => x.day === new Date().toISOString().slice(0, 10) && x.model === r.model);
+  assert.deepEqual(Object.keys(today), ["day", "model", "runs", "passed", "failed", "cancelled", "measured", "mean_turns_pct", "sum_turns_pct", "stuck", "tool_calls", "tool_errors", "tool_error_rate", "mean_files_changed"]);
+  assert.ok(today.runs >= 2 && today.passed >= 2 && today.measured >= 2 && today.tool_calls >= 6, JSON.stringify(today));
+  assert.deepEqual([today.stuck, today.tool_error_rate, today.mean_turns_pct, today.sum_turns_pct], [0, today.tool_errors / today.tool_calls, today.sum_turns_pct / today.measured, today.sum_turns_pct]);
 });
 
 test("cancelling a slow run ends it as cancelled and returns the ticket to todo", async () => {

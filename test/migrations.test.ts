@@ -17,5 +17,6 @@ test("migrations apply on a fresh DB; the hot queries use their indexes", () => 
     ["SELECT id FROM runs r WHERE r.status = ?", "runs_status"],
     ["SELECT id FROM runs r WHERE r.eval_run_id = ?", "runs_eval_run"],
     ["SELECT * FROM eval_runs WHERE prompt_id = ?", "eval_runs_prompt"],
+    ["SELECT MAX(seq) FROM events WHERE run_id = ? AND type = 'run_metrics'", "events_run_type"],
   ]) assert.match(plan(sql), new RegExp(`USING (COVERING )?INDEX ${index}\\b`), sql);
 });
