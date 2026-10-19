@@ -1,0 +1,254 @@
+diff --git a/SPEC.md b/SPEC.md
+index 066f61b..b762462 100644
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -192,6 +192,12 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
+   deleting an epic deletes its children (refused while any of their runs is active); `auto_approve_children` in
+   `/api/settings`. Events: `handoff {text}` on a child's last run, `round_finished {round, notes, completed}` on a round.
+ 
++## API tokens
++- Personal tokens (`aht_` + 43 url-safe chars) authenticate `/api/*` (not `/api/auth/*`) with `Authorization: Bearer <token>` instead of the session cookie. A token acts as its user in the workspace it was created in; it does not follow workspace switches.
++- Scopes: `read` allows GET/HEAD only (any other method is a 403 before routing), `write` allows everything the user can do except managing tokens (`/api/tokens` needs a session).
++- Only the sha256 of the secret is stored, plus its first 8 chars for display. The secret is returned once, by `POST /api/tokens`. Expired, revoked or unknown tokens, and tokens of users who left the workspace, are a 401; an Authorization header is never mixed with the cookie.
++- `last_used_at` is updated whenever a request authenticates with the token. A token may make 100 requests per minute (429 with `Retry-After` beyond that; sessions are not limited), and a user has at most 20 tokens per workspace.
++
+ ## Guardrails
+ 
+ - `tests/` and `evals/` are read-only to agents (harness rejects writes).
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..887966a 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -10,17 +10,28 @@ import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote,
+ import { approve, cancelRun, cleanupTicket, enqueueRun, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+ import { withStates } from "./planner.ts";
+ import { SANDBOX_IMAGE } from "./sandbox.ts";
++import { authenticate, tokenRoutes } from "./tokens.ts";
+ 
+ migrate();
+ 
+-type Env = { Variables: { userId: string; workspaceId: string } };
++type Env = { Variables: { userId: string; workspaceId: string; tokenId?: string } };
+ 
+ export const app = new Hono<Env>();
+ 
+ app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+ 
+-// Every other API route requires a session and an active workspace the user still belongs to.
++// Every other API route requires a session and an active workspace the user still belongs to, or an API token
++// (Authorization: Bearer aht_..., tokens.ts). An Authorization header is used on its own: a bad one is a 401 even with a valid cookie.
+ app.use("/api/*", async (c, next) => {
++  const header = c.req.header("authorization");
++  if (header !== undefined) {
++    const t = authenticate(header, c.req.method);
++    if ("error" in t) return c.json({ error: t.error }, t.status, t.retryAfter ? { "retry-after": String(t.retryAfter) } : {});
++    c.set("userId", t.userId);
++    c.set("workspaceId", t.workspaceId);
++    c.set("tokenId", t.tokenId);
++    return next();
++  }
+   const s = await auth.api.getSession({ headers: c.req.raw.headers });
+   if (!s) return c.json({ error: "unauthorized" }, 401);
+   const ws = s.session.activeOrganizationId;
+@@ -32,6 +43,7 @@ app.use("/api/*", async (c, next) => {
+ });
+ 
+ app.route("/api/providers", providerRoutes);
++app.route("/api/tokens", tokenRoutes);
+ 
+ const STATUSES = ["todo", "running", "review", "done", "failed"];
+ 
+diff --git a/server/migrations/009_api_tokens.sql b/server/migrations/009_api_tokens.sql
+new file mode 100644
+index 0000000..8580a87
+--- /dev/null
++++ b/server/migrations/009_api_tokens.sql
+@@ -0,0 +1,15 @@
++-- Personal API tokens (Authorization: Bearer aht_...). Only the sha256 of the secret is stored; `prefix` is its first 8 chars, for display.
++-- A token acts as its user in the workspace it was created in. Revoking deletes the row.
++CREATE TABLE api_tokens (
++  id           TEXT PRIMARY KEY,
++  user_id      TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
++  workspace_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
++  name         TEXT NOT NULL,
++  scope        TEXT NOT NULL CHECK (scope IN ('read', 'write')),
++  token_hash   TEXT NOT NULL UNIQUE,
++  prefix       TEXT NOT NULL,
++  created_at   INTEGER NOT NULL,
++  last_used_at INTEGER,
++  expires_at   INTEGER
++);
++CREATE INDEX api_tokens_owner ON api_tokens(user_id, workspace_id);
+diff --git a/server/tokens.ts b/server/tokens.ts
+new file mode 100644
+index 0000000..c8c724c
+--- /dev/null
++++ b/server/tokens.ts
+@@ -0,0 +1,64 @@
++import { createHash, randomBytes, randomUUID } from "node:crypto";
++import { Hono } from "hono";
++import { db } from "./db.ts";
++
++// Personal API tokens. The secret is shown once, at creation; the table keeps only its sha256.
++const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
++const DAY = 86_400_000;
++const MAX_TOKENS = 20; // per user and workspace
++const RATE = 100; // authenticated requests per token per minute
++// ponytail: in-memory fixed windows, reset on restart; move to the DB if the server ever runs as several processes.
++const windows = new Map<string, { start: number; n: number }>();
++
++type TokenRow = { id: string; user_id: string; workspace_id: string; scope: "read" | "write"; expires_at: number | null };
++
++// An Authorization header value → the token's user and workspace, or the error response to send.
++export function authenticate(header: string, method: string): { userId: string; workspaceId: string; tokenId: string } | { error: string; status: 401 | 403 | 429; retryAfter?: number } {
++  const secret = /^Bearer (aht_[A-Za-z0-9_-]+)$/.exec(header)?.[1];
++  const t = secret && (db.prepare("SELECT id, user_id, workspace_id, scope, expires_at FROM api_tokens WHERE token_hash = ?").get(sha256(secret)) as TokenRow | undefined);
++  if (!t) return { error: "unauthorized", status: 401 };
++  if (t.expires_at !== null && t.expires_at <= Date.now()) return { error: "token expired", status: 401 };
++  if (!db.prepare("SELECT 1 FROM member WHERE userId = ? AND organizationId = ?").get(t.user_id, t.workspace_id)) return { error: "unauthorized", status: 401 };
++  const now = Date.now();
++  const start = now - (now % 60_000);
++  const w = windows.get(t.id)?.start === start ? windows.get(t.id)! : { start, n: 0 };
++  windows.set(t.id, w);
++  if (++w.n > RATE) return { error: "rate limit exceeded: 100 requests per minute per token", status: 429, retryAfter: Math.max(1, Math.ceil((start + 60_000 - now) / 1000)) };
++  db.prepare("UPDATE api_tokens SET last_used_at = ? WHERE id = ?").run(now, t.id);
++  if (t.scope === "read" && method !== "GET" && method !== "HEAD") return { error: "this token has the read scope: only GET requests are allowed", status: 403 };
++  return { userId: t.user_id, workspaceId: t.workspace_id, tokenId: t.id };
++}
++
++type Env = { Variables: { userId: string; workspaceId: string; tokenId?: string } };
++export const tokenRoutes = new Hono<Env>();
++
++// Tokens are managed with a session only: a token cannot mint, list or revoke tokens.
++tokenRoutes.use("*", async (c, next) => (c.get("tokenId") ? c.json({ error: "API tokens cannot manage tokens: use a session" }, 403) : next()));
++
++tokenRoutes.get("/", (c) =>
++  c.json(db.prepare("SELECT id, name, scope, created_at, last_used_at, expires_at, prefix FROM api_tokens WHERE user_id = ? AND workspace_id = ? ORDER BY created_at, rowid").all(c.get("userId"), c.get("workspaceId"))),
++);
++
++tokenRoutes.post("/", async (c) => {
++  const b = await c.req.json().catch(() => null);
++  const name = typeof b?.name === "string" ? b.name.trim() : "";
++  const days = b?.expires_in_days ?? null;
++  if (!name || name.length > 100) return c.json({ error: "name is required (1-100 chars)" }, 400);
++  if (b.scope !== "read" && b.scope !== "write") return c.json({ error: 'scope must be "read" or "write"' }, 400);
++  if (days !== null && (!Number.isInteger(days) || days < 1 || days > 365)) return c.json({ error: "expires_in_days must be a whole number from 1 to 365" }, 400);
++  if ((db.prepare("SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ? AND workspace_id = ?").get(c.get("userId"), c.get("workspaceId")) as { n: number }).n >= MAX_TOKENS)
++    return c.json({ error: `at most ${MAX_TOKENS} tokens per workspace: revoke one first` }, 409);
++  const secret = `aht_${randomBytes(32).toString("base64url")}`;
++  const now = Date.now();
++  const id = randomUUID();
++  db.prepare("INSERT INTO api_tokens (id, user_id, workspace_id, name, scope, token_hash, prefix, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
++    id, c.get("userId"), c.get("workspaceId"), name, b.scope, sha256(secret), secret.slice(0, 8), now, days === null ? null : now + days * DAY,
++  );
++  const row = db.prepare("SELECT id, name, scope, created_at, last_used_at, expires_at, prefix FROM api_tokens WHERE id = ?").get(id);
++  return c.json({ ...row, token: secret }, 201);
++});
++
++tokenRoutes.delete("/:id", (c) => {
++  const r = db.prepare("DELETE FROM api_tokens WHERE id = ? AND user_id = ? AND workspace_id = ?").run(c.req.param("id"), c.get("userId"), c.get("workspaceId"));
++  return r.changes ? c.body(null, 204) : c.json({ error: "not_found" }, 404);
++});
+diff --git a/web/Settings.tsx b/web/Settings.tsx
+index cc6e9a2..4a27975 100644
+--- a/web/Settings.tsx
++++ b/web/Settings.tsx
+@@ -1,5 +1,6 @@
+ import { useEffect, useState, type FormEvent } from "react";
+ import { Providers } from "./Providers.tsx";
++import { Tokens } from "./Tokens.tsx";
+ import { api } from "./ui.tsx";
+ 
+ type WorkspaceSettings = {
+@@ -90,6 +91,7 @@ export function Settings() {
+       </div>
+     </form>
+     <Providers defaults={s} />
++    <Tokens />
+     </div>
+   );
+ }
+diff --git a/web/Tokens.tsx b/web/Tokens.tsx
+new file mode 100644
+index 0000000..58bcd53
+--- /dev/null
++++ b/web/Tokens.tsx
+@@ -0,0 +1,65 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { api } from "./ui.tsx";
++
++type ApiToken = { id: string; name: string; scope: "read" | "write"; created_at: number; last_used_at: number | null; expires_at: number | null; prefix: string };
++const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "never");
++
++// Personal API tokens of the signed-in user in this workspace. The secret is shown once, right after creating it.
++export function Tokens() {
++  const [tokens, setTokens] = useState<ApiToken[]>([]);
++  const [secret, setSecret] = useState("");
++  const [error, setError] = useState("");
++  const load = () => api<ApiToken[]>("/api/tokens").then(setTokens, (e) => setError(e.message));
++  useEffect(() => void load(), []);
++
++  async function create(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const f = Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
++    setError("");
++    try {
++      const t = await api<ApiToken & { token: string }>("/api/tokens", "POST", { name: f.name, scope: f.scope, expires_in_days: f.days ? Number(f.days) : null });
++      setSecret(t.token);
++      e.currentTarget.reset();
++      await load();
++    } catch (err) {
++      setError((err as Error).message);
++    }
++  }
++
++  async function revoke(t: ApiToken) {
++    if (!confirm(`Revoke "${t.name}"? Anything using it stops working.`)) return;
++    await api(`/api/tokens/${t.id}`, "DELETE").then(load, (e) => setError(e.message));
++  }
++
++  return (
++    <section className="tokens">
++      <h2>API tokens</h2>
++      <p className="muted">Send <code>Authorization: Bearer &lt;token&gt;</code> to use the API as yourself in this workspace. A read token may only GET.</p>
++      {secret && (
++        <p role="status" className="secret">
++          Copy it now, it is not shown again: <code className="mono">{secret}</code>
++        </p>
++      )}
++      <ul>
++        {tokens.map((t) => (
++          <li key={t.id}>
++            <strong>{t.name}</strong> <span className="badge">{t.scope}</span> <span className="mono muted">{t.prefix}…</span>
++            <span className="hint">created {when(t.created_at)} · last used {when(t.last_used_at)} · expires {when(t.expires_at)}</span>
++            <button type="button" className="link" onClick={() => revoke(t)}>Revoke</button>
++          </li>
++        ))}
++        {tokens.length === 0 && <li className="muted">No tokens yet.</li>}
++      </ul>
++      <form onSubmit={create} className="row">
++        <input name="name" placeholder="Name" required maxLength={100} aria-label="Token name" />
++        <select name="scope" aria-label="Scope" defaultValue="read">
++          <option value="read">read</option>
++          <option value="write">write</option>
++        </select>
++        <input name="days" type="number" min={1} max={365} placeholder="Expires in days" aria-label="Expires in days" />
++        <button className="btn">Create token</button>
++      </form>
++      {error && <p className="error" role="alert">{error}</p>}
++    </section>
++  );
++}
+diff --git a/web/style.css b/web/style.css
+index 96a04cf..50e0313 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -245,3 +245,8 @@ label.check input { width: auto; margin: 0; }
+ .child .icon { vertical-align: -2px; }
+ .note { margin: 6px 0; padding: 4px 8px; border-left: 2px solid var(--accent); background: var(--hover); border-radius: 0 4px 4px 0; }
+ .note p { margin: 2px 0 0; }
++
++.tokens ul { list-style: none; padding: 0; margin: 8px 0 12px; }
++.tokens li { padding: 6px 0; border-bottom: 1px solid var(--border); }
++.tokens .secret { word-break: break-all; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--hover); }
++.tokens form { gap: 8px; flex-wrap: wrap; }

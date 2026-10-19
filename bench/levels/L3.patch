@@ -1,0 +1,97 @@
+diff --git a/test/max-turns-setting.test.ts b/test/max-turns-setting.test.ts
+new file mode 100644
+index 0000000..7b9a0a1
+--- /dev/null
++++ b/test/max-turns-setting.test.ts
+@@ -0,0 +1,91 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "node:child_process";
++import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// Workspace setting max_turns: the turn budget of worker runs (integer 1..200, default 50). Planner runs keep their own budget.
++// The demo worker needs 4 turns, so max_turns 3 makes it run out of budget and 4 is just enough.
++process.env.HARNESS_PROVIDER = "fake";
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_CONCURRENCY = "2";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "mt-data-"));
++const { app } = await import("../server/app.ts");
++const { db } = await import("../server/db.ts");
++
++const origin = "http://localhost:5173";
++async function call(method: string, path: string, cookie = "", body?: unknown) {
++  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
++}
++const { cookie: signed } = await call("POST", "/api/auth/sign-up/email", "", { email: "mt@x.dev", password: "password-123", name: "mt" });
++const me = (await call("POST", "/api/auth/organization/create", signed, { name: "Mt", slug: "mt" })).cookie;
++
++const repo = realpathSync(mkdtempSync(join(tmpdir(), "mt-repo-")));
++writeFileSync(join(repo, "README.md"), "hi\n");
++execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
++const save = (extra: Record<string, unknown>) => call("PUT", "/api/settings", me, { repo_path: repo, setup_command: "", test_command: "test -f a.txt || test -f b.txt || test -f notes.txt", ...extra });
++const until = async <T>(what: string, fn: () => Promise<T | false | undefined>, ms = 60_000): Promise<T> => {
++  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
++    const v = await fn();
++    if (v) return v;
++  }
++  assert.fail(`timed out waiting for ${what}`);
++};
++const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, me)).body;
++const settled = (id: string) => until("the ticket to settle", async () => ["review", "failed", "done"].includes((await get(id)).status) && get(id));
++const finished = (runId: string) => JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'run_finished'").get(runId) as { payload: string }).payload);
++
++test("max_turns defaults to 50, round-trips and is validated", async () => {
++  assert.equal((await call("GET", "/api/settings", me)).body.max_turns, 50); // even before a repository is saved
++  assert.equal((await save({})).body.max_turns, 50);
++  assert.equal((await save({ max_turns: 12 })).body.max_turns, 12);
++  assert.equal((await call("GET", "/api/settings", me)).body.max_turns, 12);
++  assert.equal((await save({ max_turns: "7" })).body.max_turns, 7); // the settings form posts strings
++  assert.equal((await save({ max_turns: 200 })).body.max_turns, 200);
++  assert.equal((await save({ max_turns: 1 })).body.max_turns, 1);
++  for (const bad of [0, -3, 201, 2.5, "abc", null, [], true]) {
++    const r = await save({ max_turns: bad });
++    assert.equal(r.status, 400, `max_turns=${JSON.stringify(bad)}`);
++    assert.match(r.body.error, /max_turns|turns/i);
++  }
++  assert.equal((await call("GET", "/api/settings", me)).body.max_turns, 1); // a rejected save changes nothing
++  assert.equal((await save({})).body.max_turns, 50); // omitted = the default, like the other fields
++});
++
++test("a worker run that needs more turns than max_turns fails with the budget reason; enough turns pass", async () => {
++  await save({ max_turns: 3 });
++  const t = (await call("POST", "/api/tickets", me, { title: "needs four turns" })).body;
++  assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, me)).status, 201);
++  const d = await settled(t.id);
++  assert.equal(d.status, "failed");
++  assert.equal(d.runs.length, 1); // a budget failure is not a gate failure: no retry
++  const end = finished(d.runs[0].id);
++  assert.equal(end.status, "failed");
++  assert.match(end.reason, /turn budget exhausted \(3\)/);
++  assert.equal(end.turns, 3);
++
++  await save({ max_turns: 4 });
++  const ok = (await call("POST", "/api/tickets", me, { title: "fits exactly" })).body;
++  await call("POST", `/api/tickets/${ok.id}/runs`, me);
++  const done = await settled(ok.id);
++  assert.equal(done.status, "review");
++  assert.equal(finished(done.runs[0].id).turns, 4);
++});
++
++test("planner runs keep their own budget: a small max_turns does not starve a planning round", async () => {
++  await save({ max_turns: 3 }); // the demo child workers need 2 turns, the planner round 4
++  const e = (await call("POST", "/api/tickets", me, { title: "Plan two files", spec: "PARALLEL", kind: "epic" })).body;
++  assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, me)).status, 201);
++  const round = await until("planner round 1", async () => {
++    const r = (await get(e.id)).runs[0];
++    return r?.status === "passed" || r?.status === "failed" ? r : false;
++  });
++  assert.equal(round.status, "passed", JSON.stringify(finished(round.id)));
++  assert.equal(finished(round.id).turns, 4); // read_file, two create_ticket calls, finish_round
++  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE parent_id = ?").get(e.id) as { n: number }).n, 2);
++  // The children are worker tickets with the 3-turn budget, which their 2 turns fit.
++  await until("both children in review", async () => (db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE parent_id = ? AND status = 'review'").get(e.id) as { n: number }).n === 2);
++});

@@ -1,0 +1,86 @@
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..b074622 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -81,7 +81,7 @@ function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v:
+ }
+ 
+ // Validated fields of a JSON body, or an error message.
+-type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null };
++type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string };
+ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string } | { v: Fields }> {
+   const b = await c.req.json().catch(() => null);
+   if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };
+@@ -100,10 +100,6 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
+     if (typeof b.spec !== "string" || b.spec.length > 20000) return { error: "spec must be a string of at most 20000 chars" };
+     v.spec = b.spec;
+   }
+-  if (b.test_command !== undefined) {
+-    if (b.test_command !== null && (typeof b.test_command !== "string" || b.test_command.length > 2000)) return { error: "test_command must be a string of at most 2000 chars, or null" };
+-    v.test_command = b.test_command || null;
+-  }
+   if (b.status !== undefined) {
+     if (!partial || !STATUSES.includes(b.status)) return { error: `status must be one of ${STATUSES.join(", ")}` };
+     v.status = b.status;
+@@ -117,8 +113,8 @@ app.post("/api/tickets", async (c) => {
+   const p = await parse(c, false);
+   if ("error" in p) return c.json(p, 400);
+   const id = randomUUID();
+-  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+-    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null,
++  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
++    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null,
+   );
+   return c.json(ticketIn(c, id), 201);
+ });
+@@ -139,9 +135,8 @@ app.patch("/api/tickets/:id", async (c) => {
+   const p = await parse(c, true);
+   if ("error" in p) return c.json(p, 400);
+   const v = p.v;
+-  db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
+-    v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
+-    v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
++  db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, updated_at = ? WHERE id = ?").run(
++    v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model, Date.now(), t.id,
+   );
+   return c.json(ticketIn(c));
+ });
+diff --git a/server/migrations/008_ticket_test_command.sql b/server/migrations/008_ticket_test_command.sql
+deleted file mode 100644
+index d470ca7..0000000
+--- a/server/migrations/008_ticket_test_command.sql
++++ /dev/null
+@@ -1,2 +0,0 @@
+--- A ticket's own test gate; NULL = use the workspace test_command.
+-ALTER TABLE tickets ADD COLUMN test_command TEXT;
+diff --git a/server/runs.ts b/server/runs.ts
+index 23e5e82..cbffc76 100644
+--- a/server/runs.ts
++++ b/server/runs.ts
+@@ -40,10 +40,10 @@ export const settingsFor = (workspaceId: string) =>
+   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
+ 
+ type TicketRow = {
+-  id: string; workspace_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string; test_command: string | null;
++  id: string; workspace_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string;
+ };
+ const ticketRow = (id: string) =>
+-  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key
++  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key
+     FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as TicketRow | undefined;
+ // Every ticket status change goes through here. Becoming done or failed settles a child: its planner may react (settled).
+ function setTicket(id: string, status: string) {
+@@ -316,11 +316,10 @@ async function execute(runId: string) {
+     reply = finalText(a.messages);
+     if (status !== "passed") return;
+ 
+-    const gate = (!ev && t.test_command) || cfg.test_command; // a ticket's own command replaces the workspace one (eval cases are frozen)
+-    const test = gate.trim() ? await sh(gate) : { stdout: "", stderr: "", code: 0, timedOut: false };
++    const test = cfg.test_command.trim() ? await sh(cfg.test_command) : { stdout: "", stderr: "", code: 0, timedOut: false };
+     abortCheck();
+     const touched = await protectedChanges(worktree, base_sha, protectedPaths);
+-    const result = { passed: test.code === 0 && !touched.length, command: gate, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched };
++    const result = { passed: test.code === 0 && !touched.length, command: cfg.test_command, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched };
+     log({ type: "test_result", payload: result });
+     if (!result.passed) {
+       status = "failed";

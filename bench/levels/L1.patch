@@ -1,0 +1,66 @@
+diff --git a/test/ticket-status-filter.test.ts b/test/ticket-status-filter.test.ts
+new file mode 100644
+index 0000000..a759446
+--- /dev/null
++++ b/test/ticket-status-filter.test.ts
+@@ -0,0 +1,60 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// GET /api/tickets?status=<status> filters the list by ticket status.
++process.env.HARNESS_PROVIDER = "fake";
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "tsf-data-"));
++const { app } = await import("../server/app.ts");
++
++const origin = "http://localhost:5173";
++async function call(method: string, path: string, cookie = "", body?: unknown) {
++  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
++}
++async function workspace(name: string) {
++  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
++  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
++}
++const me = await workspace("tsf");
++const other = await workspace("tsfother");
++
++async function ticket(cookie: string, title: string, status?: string) {
++  const t = (await call("POST", "/api/tickets", cookie, { title })).body;
++  if (status) assert.equal((await call("PATCH", `/api/tickets/${t.id}`, cookie, { status })).status, 200);
++  return t.id as string;
++}
++const ids = async (path: string, cookie = me) => {
++  const r = await call("GET", path, cookie);
++  assert.equal(r.status, 200);
++  return (r.body as { id: string }[]).map((t) => t.id);
++};
++
++test("status filters the ticket list; no param still returns everything", async () => {
++  const todo = await ticket(me, "a todo");
++  const done1 = await ticket(me, "done one", "done");
++  const done2 = await ticket(me, "done two", "done");
++  const review = await ticket(me, "in review", "review");
++  await ticket(other, "someone else's done ticket", "done");
++
++  assert.deepEqual(await ids("/api/tickets?status=done"), [done1, done2]); // still ordered by number
++  assert.deepEqual(await ids("/api/tickets?status=review"), [review]);
++  assert.deepEqual(await ids("/api/tickets?status=todo"), [todo]);
++  assert.deepEqual(await ids("/api/tickets?status=failed"), []); // valid status, no tickets
++  assert.deepEqual(await ids("/api/tickets"), [todo, done1, done2, review]);
++  const row = (await call("GET", "/api/tickets?status=review", me)).body[0];
++  assert.equal(row.key, "TSF-4"); // same row shape as the unfiltered list
++  assert.equal(row.status, "review");
++});
++
++test("an unknown status is a 400 that names the valid statuses", async () => {
++  for (const bad of ["bogus", "in_progress"]) {
++    const r = await call("GET", `/api/tickets?status=${bad}`, me);
++    assert.equal(r.status, 400, `status=${JSON.stringify(bad)}`);
++    for (const s of ["todo", "running", "review", "done", "failed"]) assert.match(r.body.error, new RegExp(s));
++  }
++});

@@ -1,0 +1,163 @@
+diff --git a/test/ticket-labels.test.ts b/test/ticket-labels.test.ts
+new file mode 100644
+index 0000000..caee655
+--- /dev/null
++++ b/test/ticket-labels.test.ts
+@@ -0,0 +1,157 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "node:child_process";
++import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// Ticket labels: normalized slugs on tickets, a label filter, workspace label counts, and inheritance through the planner.
++process.env.HARNESS_PROVIDER = "fake";
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "lbl-data-"));
++const { app } = await import("../server/app.ts");
++const { db } = await import("../server/db.ts");
++const { hostExec, runTool } = await import("../server/agent/tools.ts");
++const { plannerTools } = await import("../server/planner.ts");
++
++const origin = "http://localhost:5173";
++async function call(method: string, path: string, cookie = "", body?: unknown) {
++  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
++}
++async function workspace(name: string) {
++  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
++  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
++}
++const me = await workspace("lbl");
++const other = await workspace("lblother");
++const repo = realpathSync(mkdtempSync(join(tmpdir(), "lbl-repo-")));
++writeFileSync(join(repo, "README.md"), "hi\n");
++execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
++await call("PUT", "/api/settings", me, { repo_path: repo, setup_command: "", test_command: "true" });
++
++const mk = (title: string, labels?: unknown, extra: Record<string, unknown> = {}) => call("POST", "/api/tickets", me, { title, ...(labels === undefined ? {} : { labels }), ...extra });
++const titles = async (path: string, cookie = me) => {
++  const r = await call("GET", path, cookie);
++  assert.equal(r.status, 200);
++  return (r.body as { title: string }[]).map((t) => t.title);
++};
++
++test("labels are normalized (trimmed, lowercased, deduped, sorted) on create and replaced on PATCH", async () => {
++  const plain = await mk("no labels");
++  assert.equal(plain.status, 201);
++  assert.deepEqual(plain.body.labels, []);
++
++  const t = await mk("normalize me", [" Bug ", "bug", "UI-fix", "a1", "zeta", "0day"]);
++  assert.equal(t.status, 201);
++  assert.deepEqual(t.body.labels, ["0day", "a1", "bug", "ui-fix", "zeta"]);
++  assert.deepEqual((await call("GET", `/api/tickets/${t.body.id}`, me)).body.labels, ["0day", "a1", "bug", "ui-fix", "zeta"]);
++  assert.deepEqual((await call("GET", "/api/tickets", me)).body.find((x: any) => x.id === t.body.id).labels, ["0day", "a1", "bug", "ui-fix", "zeta"]);
++
++  const renamed = await call("PATCH", `/api/tickets/${t.body.id}`, me, { title: "still labelled" });
++  assert.deepEqual(renamed.body.labels, ["0day", "a1", "bug", "ui-fix", "zeta"]); // absent in a PATCH = unchanged
++  const replaced = await call("PATCH", `/api/tickets/${t.body.id}`, me, { labels: ["Backend", "api", "api "] });
++  assert.equal(replaced.status, 200);
++  assert.deepEqual(replaced.body.labels, ["api", "backend"]); // replaced, not merged
++  assert.deepEqual((await call("PATCH", `/api/tickets/${t.body.id}`, me, { labels: [] })).body.labels, []);
++});
++
++test("invalid labels are a 400 on create and PATCH, and change nothing", async () => {
++  const t = (await mk("validated", ["keep"])).body;
++  const bad: unknown[] = [
++    ["has space"], ["under_score"], ["dot.ted"], ["ünï"], [""], ["   "], ["x".repeat(31)], [5], [null], [["nested"]], ["ok", 3],
++    "bug", null, { bug: true }, 7,
++    Array.from({ length: 11 }, (_, i) => `l${i}`),
++  ];
++  for (const labels of bad) {
++    const label = JSON.stringify(labels).slice(0, 60);
++    const r = await mk("bad", labels);
++    assert.equal(r.status, 400, `POST labels=${label}`);
++    assert.match(r.body.error, /label/i);
++    assert.equal((await call("PATCH", `/api/tickets/${t.id}`, me, { labels })).status, 400, `PATCH labels=${label}`);
++  }
++  assert.deepEqual((await call("GET", `/api/tickets/${t.id}`, me)).body.labels, ["keep"]);
++  assert.equal((await titles("/api/tickets")).includes("bad"), false); // no ticket was created by a rejected POST
++
++  // Boundaries: 30 chars and 10 labels are fine; the limit counts the normalized, deduped set.
++  assert.equal((await mk("edge", ["x".repeat(30)])).status, 201);
++  const ten = Array.from({ length: 10 }, (_, i) => `t${i}`);
++  assert.equal((await mk("ten", ten)).status, 201);
++  assert.equal((await mk("ten with duplicates", [...ten, "T0", " t1 "])).status, 201);
++});
++
++test("GET /api/tickets?label= filters; GET /api/labels counts per workspace", async () => {
++  await mk("L filter one", ["flt-a", "flt-b"]);
++  await mk("L filter two", ["flt-b"]);
++  const three = (await mk("L filter three", ["flt-c"])).body;
++  await call("POST", "/api/tickets", other, { title: "other workspace", labels: ["flt-a", "theirs"] });
++
++  assert.deepEqual(await titles("/api/tickets?label=flt-a"), ["L filter one"]);
++  assert.deepEqual(await titles("/api/tickets?label=flt-b"), ["L filter one", "L filter two"]);
++  assert.deepEqual(await titles("/api/tickets?label=FLT-B"), ["L filter one", "L filter two"]); // the filter value is normalized too
++  assert.deepEqual(await titles("/api/tickets?label=nothing-like-this"), []);
++  assert.deepEqual(await titles("/api/tickets?label=not%20a%20slug!"), []); // malformed: empty list, not an error
++  assert.ok((await titles("/api/tickets")).length > 3); // no filter = everything
++  assert.equal((await call("GET", "/api/tickets?label=flt-b", me)).body[0].key, "LBL-" + (await call("GET", "/api/tickets?label=flt-b", me)).body[0].number);
++
++  const counts = async (cookie = me) => {
++    const r = await call("GET", "/api/labels", cookie);
++    assert.equal(r.status, 200);
++    return Object.fromEntries((r.body as { label: string; count: number }[]).map((l) => [l.label, l.count]));
++  };
++  const mine = await counts();
++  assert.deepEqual([mine["flt-a"], mine["flt-b"], mine["flt-c"], mine["theirs"]], [1, 2, 1, undefined]);
++  const list = (await call("GET", "/api/labels", me)).body as { label: string }[];
++  assert.deepEqual(list.map((l) => l.label), list.map((l) => l.label).sort()); // sorted by label
++  assert.deepEqual(await counts(other), { "flt-a": 1, theirs: 1 });
++
++  // Counts follow edits and deletion; a label nobody carries is gone.
++  await call("PATCH", `/api/tickets/${three.id}`, me, { labels: ["flt-b"] });
++  let now = await counts();
++  assert.deepEqual([now["flt-b"], now["flt-c"]], [3, undefined]);
++  assert.equal((await call("DELETE", `/api/tickets/${three.id}`, me)).status, 204);
++  now = await counts();
++  assert.equal(now["flt-b"], 2);
++});
++
++test("planner create_ticket: children inherit the epic's labels plus their own, down through sub-epics", async () => {
++  const epicId = (await mk("Labelled epic", ["Backend", "q3"], { kind: "epic" })).body.id as string;
++  const row = db.prepare("SELECT t.id, t.workspace_id, t.title, t.spec, t.parent_id, t.provider_id, t.model, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?");
++  const epic = () => row.get(epicId) as any; // only the existing Epic fields: the tool must look the labels up itself
++  const use = (e: any, input: Record<string, unknown>) => runTool(plannerTools(e, {}, 0, async () => undefined), { type: "tool_use", id: "x", name: "create_ticket", input }, { root: repo, exec: hostExec });
++  const find = async (key: string) => (await call("GET", "/api/tickets", me)).body.find((t: any) => t.key === key);
++  const created = async (r: { content: string; is_error?: boolean }) => {
++    assert.equal(r.is_error, false, r.content);
++    return (await find(/Created (\S+?)[ .]/.exec(r.content)![1]))!;
++  };
++
++  assert.deepEqual((await created(await use(epic(), { title: "inherits only", spec: "s" }))).labels, ["backend", "q3"]);
++  assert.deepEqual((await created(await use(epic(), { title: "adds own", spec: "s", labels: [" UI ", "backend"] }))).labels, ["backend", "q3", "ui"]);
++  assert.deepEqual((await created(await use(epic(), { title: "explicitly none", spec: "s", labels: [] }))).labels, ["backend", "q3"]); // still inherits
++
++  const sub = await created(await use(epic(), { title: "Sub epic", spec: "s", kind: "epic", labels: ["part-one"] }));
++  assert.deepEqual(sub.labels, ["backend", "part-one", "q3"]);
++  const grandchild = await created(await use(row.get(sub.id), { title: "deep task", spec: "s", labels: ["leaf"] }));
++  assert.deepEqual(grandchild.labels, ["backend", "leaf", "part-one", "q3"]);
++
++  // The epic's detail view lists its descendants with their labels.
++  const detail = (await call("GET", `/api/tickets/${epicId}`, me)).body;
++  assert.deepEqual(detail.labels, ["backend", "q3"]);
++  assert.deepEqual(detail.children.find((c: any) => c.title === "deep task").labels, ["backend", "leaf", "part-one", "q3"]);
++
++  // Invalid labels, or too many once inherited, are a tool error and create nothing.
++  const kids = () => (db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE parent_id = ?").get(epicId) as { n: number }).n;
++  const before = kids();
++  const bad = await use(epic(), { title: "bad label", spec: "s", labels: ["not valid"] });
++  assert.equal(bad.is_error, true);
++  assert.match(bad.content, /label/i);
++  assert.equal((await use(epic(), { title: "bad type", spec: "s", labels: "backend" })).is_error, true);
++  const full = (await mk("Nine labels", ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"], { kind: "epic" })).body.id as string;
++  const over = await use(row.get(full), { title: "one too many", spec: "s", labels: ["n10", "n11"] });
++  assert.equal(over.is_error, true);
++  assert.match(over.content, /label/i);
++  assert.equal((await use(row.get(full), { title: "exactly ten", spec: "s", labels: ["n10", "n1"] })).is_error, false);
++  assert.equal(kids(), before);
++  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE parent_id = ?").get(full) as { n: number }).n, 1);
++});

@@ -1,0 +1,96 @@
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..27f9da6 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -212,7 +212,7 @@ const SETTINGS_FIELDS = Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS
+ 
+ app.get("/api/settings", (c) => {
+   const s = settingsFor(c.get("workspaceId"));
+-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, ...s, configured: !!s });
++  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, compact_at_tokens: 150000, auto_approve_children: 0, max_turns: 50, ...s, configured: !!s });
+ });
+ 
+ // Workspace default provider/model (null = env fallback). Lives on the settings row, so the repository must be saved first.
+@@ -241,6 +241,9 @@ app.put("/api/settings", async (c) => {
+   // Cap on the context size at which a run compacts (also limited to 70% of the provider's window). Form posts send a string.
+   const compact = b.compact_at_tokens === undefined || b.compact_at_tokens === "" ? 150000 : Number(b.compact_at_tokens);
+   if (!Number.isInteger(compact) || compact < 1000 || compact > 100_000_000) return c.json({ error: "Compact at must be a whole number of tokens (1000 to 100000000)" }, 400);
++  // Turn budget of worker runs: a whole number 1-200 (a string from the form is fine, other types are not).
++  const turns = b.max_turns === undefined || b.max_turns === "" ? 50 : typeof b.max_turns === "number" || typeof b.max_turns === "string" ? Number(b.max_turns) : NaN;
++  if (!Number.isInteger(turns) || turns < 1 || turns > 200) return c.json({ error: "max_turns must be a whole number from 1 to 200" }, 400);
+   if (v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
+     return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);
+   // M7: merge children that pass the gate without a click. Form posts send "on" for a checked box and omit it otherwise.
+@@ -248,12 +251,12 @@ app.put("/api/settings", async (c) => {
+   const repo = await inspectRepo(v.repo_path, v.base_branch);
+   if ("error" in repo) return c.json(repo, 400);
+   db.prepare(
+-    `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, updated_at)
+-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++    `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, max_turns, updated_at)
++     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (workspace_id) DO UPDATE SET repo_path = excluded.repo_path, base_branch = excluded.base_branch, setup_command = excluded.setup_command,
+        test_command = excluded.test_command, protected_paths = excluded.protected_paths, image = excluded.image, compact_at_tokens = excluded.compact_at_tokens,
+-       auto_approve_children = excluded.auto_approve_children, updated_at = excluded.updated_at`,
+-  ).run(c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, compact, autoApprove, Date.now());
++       auto_approve_children = excluded.auto_approve_children, max_turns = excluded.max_turns, updated_at = excluded.updated_at`,
++  ).run(c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, compact, autoApprove, turns, Date.now());
+   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
+ });
+ 
+diff --git a/server/migrations/009_max_turns.sql b/server/migrations/009_max_turns.sql
+new file mode 100644
+index 0000000..5ac4412
+--- /dev/null
++++ b/server/migrations/009_max_turns.sql
+@@ -0,0 +1,2 @@
++-- Turn budget of worker runs (planner rounds keep their own).
++ALTER TABLE workspace_settings ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 50;
+diff --git a/server/runs.ts b/server/runs.ts
+index 23e5e82..c5d62b3 100644
+--- a/server/runs.ts
++++ b/server/runs.ts
+@@ -34,7 +34,7 @@ const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 };
+ 
+ export type Settings = {
+   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
+-  default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number;
++  default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; max_turns: number;
+ };
+ export const settingsFor = (workspaceId: string) =>
+   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
+@@ -308,7 +308,7 @@ async function execute(runId: string) {
+     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
+     if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
+     const a = await runAgent({
+-      provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, system: prompt.body, task, tools: toolsFor(stored?.kind), root: worktree, exec: sandbox.exec, protectedPaths, budget: BUDGET, signal,
++      provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, system: prompt.body, task, tools: toolsFor(stored?.kind), root: worktree, exec: sandbox.exec, protectedPaths, budget: { ...BUDGET, maxTurns: s?.max_turns ?? BUDGET.maxTurns }, signal,
+       cacheKey: t.id, compactAt: compactThreshold(s?.compact_at_tokens, stored?.context_window ?? envWindow()),
+       onEvent: (e) => e.type !== "run_finished" && log(e), // this pipeline writes the final run_finished
+     });
+diff --git a/web/Settings.tsx b/web/Settings.tsx
+index cc6e9a2..cf7d733 100644
+--- a/web/Settings.tsx
++++ b/web/Settings.tsx
+@@ -5,7 +5,7 @@ import { api } from "./ui.tsx";
+ type WorkspaceSettings = {
+   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
+   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
+-  auto_approve_children: number;
++  auto_approve_children: number; max_turns: number;
+ };
+ 
+ export function Settings() {
+@@ -73,6 +73,12 @@ export function Settings() {
+         <span className="hint">A run summarizes and starts a fresh conversation when its context passes this, or 70% of the provider's context window if that is lower.</span>
+       </label>
+ 
++      <label>
++        Max turns per worker run
++        <input name="max_turns" type="number" min={1} max={200} step={1} defaultValue={s.max_turns} required />
++        <span className="hint">A worker run fails when it has not finished after this many model turns (1 to 200). Planner rounds are not affected.</span>
++      </label>
++
+       <h2>Planner</h2>
+       <label className="check">
+         <input type="checkbox" name="auto_approve_children" defaultChecked={!!s.auto_approve_children} /> Auto-approve child tickets

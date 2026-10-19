@@ -9,6 +9,7 @@
     "typecheck": "tsc",
     "agent": "node --env-file-if-exists=.env server/cli/agent.ts",
     "seed-tasks": "node --env-file-if-exists=.env server/cli/seed-tasks.ts",
+    "bench": "node --env-file-if-exists=.env bench/run.ts",
     "e2e": "playwright test",
     "e2e:headed": "HEADED=1 playwright test"
   },

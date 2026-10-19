@@ -1,0 +1,274 @@
+diff --git a/test/api-tokens.test.ts b/test/api-tokens.test.ts
+new file mode 100644
+index 0000000..c84e461
+--- /dev/null
++++ b/test/api-tokens.test.ts
+@@ -0,0 +1,268 @@
++import { test, mock } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "node:child_process";
++import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// Personal API tokens: Authorization: Bearer <token> as an alternative to the session cookie on every /api route except /api/auth/*.
++process.env.HARNESS_PROVIDER = "fake";
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "tok-data-"));
++const { app } = await import("../server/app.ts");
++const { db } = await import("../server/db.ts");
++
++const origin = "http://localhost:5173";
++// who: a session cookie, or a token (starts with "aht_") sent as a bearer. extra: raw headers (e.g. a malformed Authorization).
++async function call(method: string, path: string, who = "", body?: unknown, extra: Record<string, string> = {}) {
++  const headers: Record<string, string> = { origin, "content-type": "application/json", ...extra };
++  if (who.startsWith("aht_")) headers.authorization = `Bearer ${who}`;
++  else if (who) headers.cookie = who;
++  const res = await app.request(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  const text = await res.text();
++  let json: any = null;
++  try { json = JSON.parse(text); } catch {}
++  return { status: res.status, body: json, text, headers: res.headers, cookie: set || who };
++}
++async function workspace(name: string) {
++  const { cookie } = await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
++  return (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie;
++}
++const repo = realpathSync(mkdtempSync(join(tmpdir(), "tok-repo-")));
++writeFileSync(join(repo, "README.md"), "hi\n");
++execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
++const settings = (who: string) => call("PUT", "/api/settings", who, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" });
++
++const alice = await workspace("alice");
++const bob = await workspace("bob");
++await settings(alice);
++const mint = async (who: string, body: Record<string, unknown>) => {
++  const r = await call("POST", "/api/tokens", who, body);
++  assert.equal(r.status, 201, r.text);
++  return r.body as { token: string; id: string; [k: string]: any };
++};
++// Shared tokens; if minting is not implemented yet the tests below fail one by one instead of the whole file.
++const seed = (who: string, name: string, scope: string) => mint(who, { name, scope }).catch(() => ({ token: `aht_${"0".repeat(40)}`, id: "none" }) as Awaited<ReturnType<typeof mint>>);
++const readTok = await seed(alice, "ci read", "read");
++const writeTok = await seed(alice, "ci write", "write");
++const bobTok = await seed(bob, "bob read", "read");
++
++test("creating a token returns the secret once; listing never does", async () => {
++  const t = await mint(alice, { name: "  my laptop  ", scope: "write", expires_in_days: 30 });
++  assert.match(t.token, /^aht_[A-Za-z0-9_-]{32,}$/);
++  assert.equal(t.name, "my laptop");
++  assert.equal(t.scope, "write");
++  assert.equal(t.prefix, t.token.slice(0, 8));
++  assert.equal(t.last_used_at, null);
++  assert.equal(typeof t.created_at, "number");
++  assert.equal(t.expires_at, t.created_at + 30 * 86_400_000);
++  assert.equal((await mint(alice, { name: "forever", scope: "read" })).expires_at, null);
++  assert.notEqual((await mint(alice, { name: "forever", scope: "read" })).token, (await mint(alice, { name: "forever", scope: "read" })).token); // fresh randomness
++
++  const list = await call("GET", "/api/tokens", alice);
++  assert.equal(list.status, 200);
++  const row = list.body.find((x: any) => x.id === t.id);
++  assert.deepEqual(Object.keys(row).sort(), ["created_at", "expires_at", "id", "last_used_at", "name", "prefix", "scope"]);
++  assert.equal(row.prefix, t.token.slice(0, 8));
++  assert.equal(list.text.includes(t.token.slice(4)), false); // no secret anywhere in the listing
++  assert.ok(list.body.every((x: any) => x.name !== "bob read")); // only the caller's own tokens
++  assert.deepEqual(list.body.map((x: any) => x.created_at), list.body.map((x: any) => x.created_at).sort((a: number, b: number) => a - b)); // oldest first
++  assert.equal((await call("GET", "/api/tokens", bob)).body.some((x: any) => x.id === t.id), false);
++});
++
++test("token creation is validated", async () => {
++  for (const bad of [{}, { name: "x" }, { scope: "read" }, { name: "", scope: "read" }, { name: "   ", scope: "read" }, { name: "x".repeat(101), scope: "read" }, { name: 5, scope: "read" },
++    { name: "x", scope: "admin" }, { name: "x", scope: "READ" }, { name: "x", scope: "read", expires_in_days: 0 }, { name: "x", scope: "read", expires_in_days: 366 },
++    { name: "x", scope: "read", expires_in_days: 1.5 }, { name: "x", scope: "read", expires_in_days: "7" }]) {
++    assert.equal((await call("POST", "/api/tokens", alice, bad)).status, 400, JSON.stringify(bad));
++  }
++  assert.equal((await call("POST", "/api/tokens", alice, { name: "x".repeat(100), scope: "read", expires_in_days: 365 })).status, 201);
++  assert.equal((await call("POST", "/api/tokens", alice, { name: "no expiry", scope: "read", expires_in_days: null })).status, 201);
++  assert.equal((await call("POST", "/api/tokens", "", { name: "x", scope: "read" })).status, 401);
++});
++
++test("only a hash of the secret is stored", async () => {
++  const t = await mint(alice, { name: "hash me", scope: "read" });
++  const secret = t.token.slice(4);
++  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((r) => r.name);
++  let scanned = 0;
++  for (const name of tables) {
++    for (const row of db.prepare(`SELECT * FROM "${name}"`).all()) {
++      scanned++;
++      const flat = JSON.stringify(row, (_k, v) => (typeof v === "bigint" ? String(v) : v));
++      assert.equal(flat.includes(secret), false, `secret found in table ${name}`);
++    }
++  }
++  assert.ok(scanned > 10);
++  assert.equal((await call("GET", "/api/tickets", t.token)).status, 200); // and it still authenticates
++});
++
++test("a bearer token acts as its user in its workspace; bad tokens are 401 and win over a valid cookie", async () => {
++  const mine = (await call("POST", "/api/tickets", alice, { title: "alice only" })).body;
++  const theirs = (await call("POST", "/api/tickets", bob, { title: "bob only" })).body;
++
++  const list = await call("GET", "/api/tickets", readTok.token);
++  assert.equal(list.status, 200);
++  assert.deepEqual(list.body.map((t: any) => t.title), ["alice only"]);
++  assert.equal((await call("GET", `/api/tickets/${mine.id}`, readTok.token)).status, 200);
++  assert.equal((await call("GET", `/api/tickets/${theirs.id}`, readTok.token)).status, 404); // workspace isolation
++  assert.equal((await call("GET", `/api/tickets/${mine.id}`, bobTok.token)).status, 404);
++  assert.equal((await call("GET", "/api/settings", readTok.token)).body.configured, true);
++  assert.equal((await call("GET", "/api/usage", readTok.token)).status, 200);
++
++  for (const headers of [{ authorization: "Bearer aht_" + "x".repeat(40) }, { authorization: "Bearer " }, { authorization: "Bearer garbage" }, { authorization: "Basic YTpi" }, { authorization: readTok.token }]) {
++    assert.equal((await call("GET", "/api/tickets", "", undefined, headers)).status, 401, JSON.stringify(headers));
++    assert.equal((await call("GET", "/api/tickets", alice, undefined, headers)).status, 401, "a bad Authorization header is not rescued by a valid cookie");
++  }
++  assert.equal((await call("GET", "/api/tickets", "")).status, 401);
++  assert.equal((await call("GET", "/api/tickets", alice, undefined, { authorization: `Bearer ${readTok.token}` })).status, 200);
++});
++
++test("a token keeps the workspace it was created in, even when the user switches workspaces", async () => {
++  const carol = await workspace("carol-one");
++  await call("POST", "/api/tickets", carol, { title: "in carol one" });
++  const tok = await mint(carol, { name: "ws1", scope: "write" });
++  const second = (await call("POST", "/api/auth/organization/create", carol, { name: "Carol Two", slug: "carol-two" })).cookie; // now active in the new workspace
++  await call("POST", "/api/tickets", second, { title: "in carol two" });
++  assert.deepEqual((await call("GET", "/api/tickets", second)).body.map((t: any) => t.title), ["in carol two"]);
++  assert.deepEqual((await call("GET", "/api/tickets", tok.token)).body.map((t: any) => t.title), ["in carol one"]);
++  assert.equal((await call("POST", "/api/tickets", tok.token, { title: "made by token" })).status, 201);
++  assert.deepEqual((await call("GET", "/api/tickets", carol)).body, (await call("GET", "/api/tickets", carol)).body); // sanity: stable
++  assert.equal((await call("GET", "/api/tickets", second)).body.length, 1); // nothing leaked into the other workspace
++  // The token list belongs to the workspace too, and a token cannot be revoked from another workspace.
++  assert.equal((await call("GET", "/api/tokens", second)).body.length, 0);
++  assert.equal((await call("DELETE", `/api/tokens/${tok.id}`, second)).status, 404);
++  assert.equal((await call("GET", "/api/tickets", tok.token)).status, 200);
++  // Leaving the workspace ends the token's access.
++  db.prepare("DELETE FROM member WHERE userId = (SELECT id FROM user WHERE email = 'carol-one@x.dev') AND organizationId = (SELECT id FROM organization WHERE slug = 'carol-one')").run();
++  assert.equal((await call("GET", "/api/tickets", tok.token)).status, 401);
++});
++
++test("read tokens may only read: every other method is a 403 naming the scope, before anything else is checked", async () => {
++  const t = (await call("POST", "/api/tickets", alice, { title: "protected" })).body;
++  const before = (await call("GET", "/api/tickets", alice)).body.length;
++  const fake = "00000000-0000-0000-0000-000000000000";
++  const writes: [string, string, unknown?][] = [
++    ["POST", "/api/tickets", { title: "nope" }], ["POST", "/api/tickets", {}], ["PATCH", `/api/tickets/${t.id}`, { title: "hacked" }], ["PATCH", `/api/tickets/${fake}`, {}],
++    ["DELETE", `/api/tickets/${t.id}`], ["DELETE", `/api/tickets/${fake}`], ["PUT", "/api/settings", { repo_path: repo }], ["PUT", "/api/settings/default-provider", {}],
++    ["POST", `/api/tickets/${t.id}/runs`, {}], ["POST", `/api/tickets/${t.id}/approve`, {}], ["POST", `/api/tickets/${t.id}/reject`, {}], ["POST", `/api/runs/${fake}/cancel`],
++    ["POST", "/api/providers", { name: "p", kind: "ollama" }], ["PUT", "/api/lessons", { body: "x" }], ["POST", "/api/prompts/propose"], ["POST", "/api/evals/cases", { ticket_id: t.id }],
++  ];
++  for (const [method, path, body] of writes) {
++    const r = await call(method, path, readTok.token, body);
++    assert.equal(r.status, 403, `${method} ${path}`);
++    assert.match(r.body.error, /read/i);
++  }
++  const after = (await call("GET", "/api/tickets", alice)).body;
++  assert.equal(after.length, before);
++  assert.equal(after.find((x: any) => x.id === t.id).title, "protected");
++  assert.equal(after.find((x: any) => x.id === t.id).status, "todo");
++  assert.equal((await call("GET", "/api/providers", readTok.token)).status, 200);
++  assert.equal((await call("GET", "/api/lessons", readTok.token)).status, 200);
++});
++
++test("write tokens can do what their user can, but cannot manage tokens; neither scope can", async () => {
++  const w = writeTok.token;
++  const t = await call("POST", "/api/tickets", w, { title: "via write token" });
++  assert.equal(t.status, 201);
++  assert.equal((await call("PATCH", `/api/tickets/${t.body.id}`, w, { title: "renamed" })).body.title, "renamed");
++  assert.equal((await call("PUT", "/api/settings", w, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" })).status, 200);
++  assert.equal((await call("DELETE", `/api/tickets/${t.body.id}`, w)).status, 204);
++
++  for (const tok of [w, readTok.token]) {
++    for (const [method, path, body] of [["POST", "/api/tokens", { name: "x", scope: "read" }], ["GET", "/api/tokens"], ["DELETE", `/api/tokens/${writeTok.id}`]] as [string, string, unknown?][]) {
++      const r = await call(method, path, tok, body);
++      assert.equal(r.status, 403, `${method} ${path}`);
++      assert.match(r.body.error, /token/i);
++    }
++  }
++  assert.equal((await call("GET", "/api/tickets", w)).status, 200); // still alive
++});
++
++test("a write token can run a ticket; the run's event stream (SSE) works with a read token", async () => {
++  const t = (await call("POST", "/api/tickets", writeTok.token, { title: "run me" })).body;
++  const run = await call("POST", `/api/tickets/${t.id}/runs`, writeTok.token);
++  assert.equal(run.status, 201);
++  for (const end = Date.now() + 60_000; Date.now() < end; await new Promise((r) => setTimeout(r, 50)))
++    if ((await call("GET", `/api/tickets/${t.id}`, alice)).body.status === "review") break;
++  assert.equal((await call("GET", `/api/tickets/${t.id}`, alice)).body.status, "review");
++
++  const sse = await call("GET", `/api/runs/${run.body.id}/events`, readTok.token);
++  assert.equal(sse.status, 200);
++  assert.match(sse.text, /"type":"run_finished"/);
++  assert.equal((await call("GET", `/api/runs/${run.body.id}/events`, bobTok.token)).status, 404); // other workspace
++  assert.equal((await call("GET", `/api/runs/${run.body.id}/events`, "aht_" + "y".repeat(40))).status, 401);
++  assert.equal((await call("POST", `/api/tickets/${t.id}/approve`, readTok.token)).status, 403);
++  assert.equal((await call("POST", `/api/tickets/${t.id}/approve`, writeTok.token)).status, 200);
++});
++
++test("last_used_at is set when a token is used; revoked and expired tokens are 401", async () => {
++  const t = await mint(alice, { name: "usage", scope: "read" });
++  assert.equal((await call("GET", "/api/tokens", alice)).body.find((x: any) => x.id === t.id).last_used_at, null);
++  const t0 = Date.now();
++  assert.equal((await call("GET", "/api/tickets", t.token)).status, 200);
++  const used = (await call("GET", "/api/tokens", alice)).body.find((x: any) => x.id === t.id).last_used_at;
++  assert.ok(used >= t0 && used <= Date.now() + 1000, `last_used_at ${used}`);
++  const untouched = (await call("GET", "/api/tokens", alice)).body.find((x: any) => x.name === "ci write");
++  assert.ok(untouched.last_used_at !== null); // used above
++
++  assert.equal((await call("DELETE", `/api/tokens/${t.id}`, bob)).status, 404); // not yours
++  assert.equal((await call("GET", "/api/tickets", t.token)).status, 200);
++  assert.equal((await call("DELETE", `/api/tokens/${t.id}`, alice)).status, 204);
++  assert.equal((await call("GET", "/api/tickets", t.token)).status, 401);
++  assert.equal((await call("GET", "/api/tokens", alice)).body.some((x: any) => x.id === t.id), false);
++  assert.equal((await call("DELETE", `/api/tokens/${t.id}`, alice)).status, 404);
++
++  const short = await mint(alice, { name: "short lived", scope: "write", expires_in_days: 1 });
++  const long = await mint(alice, { name: "long lived", scope: "write", expires_in_days: 30 });
++  assert.equal((await call("GET", "/api/tickets", short.token)).status, 200);
++  mock.timers.enable({ apis: ["Date"], now: Date.now() });
++  try {
++    mock.timers.tick(86_400_000 - 60_000);
++    assert.equal((await call("GET", "/api/tickets", short.token)).status, 200); // 23h59m: still valid
++    mock.timers.tick(120_000);
++    const r = await call("GET", "/api/tickets", short.token);
++    assert.equal(r.status, 401);
++    assert.match(r.body.error, /expired/i);
++    assert.equal((await call("POST", "/api/tickets", short.token, { title: "late" })).status, 401);
++    assert.equal((await call("GET", "/api/tickets", long.token)).status, 200);
++  } finally {
++    mock.timers.reset();
++  }
++});
++
++test("at most 20 tokens per user and workspace", async () => {
++  const dave = await workspace("dave");
++  const made: string[] = [];
++  for (let i = 0; i < 20; i++) made.push((await mint(dave, { name: `t${i}`, scope: "read" })).id);
++  const over = await call("POST", "/api/tokens", dave, { name: "one too many", scope: "read" });
++  assert.equal(over.status, 409);
++  assert.match(over.body.error, /20/);
++  assert.equal((await call("GET", "/api/tokens", dave)).body.length, 20);
++  assert.equal((await call("DELETE", `/api/tokens/${made[0]}`, dave)).status, 204);
++  assert.equal((await call("POST", "/api/tokens", dave, { name: "fits again", scope: "read" })).status, 201);
++  assert.equal((await mint(alice, { name: "other user is unaffected", scope: "read" })).scope, "read");
++});
++
++test("a token is limited to 100 requests per minute (429 + Retry-After); cookies and other tokens are not", async () => {
++  const a = await mint(alice, { name: "busy", scope: "read" });
++  const b = await mint(alice, { name: "idle", scope: "read" });
++  mock.timers.enable({ apis: ["Date"], now: Date.now() }); // frozen clock: the window cannot roll over mid-test
++  try {
++    for (let i = 0; i < 100; i++) assert.equal((await call("GET", "/api/usage", a.token)).status, 200, `request ${i + 1}`);
++    const limited = await call("GET", "/api/usage", a.token);
++    assert.equal(limited.status, 429);
++    assert.match(limited.body.error, /rate/i);
++    const retry = Number(limited.headers.get("retry-after"));
++    assert.ok(Number.isInteger(retry) && retry >= 1 && retry <= 60, `retry-after ${retry}`);
++    assert.equal((await call("POST", "/api/tickets", a.token, {})).status, 429); // limited before the scope check, too
++    assert.equal((await call("GET", "/api/usage", b.token)).status, 200); // per token
++    assert.equal((await call("GET", "/api/usage", alice)).status, 200); // sessions are not limited
++    assert.equal((await call("GET", "/api/usage", "aht_" + "z".repeat(40))).status, 401); // and unauthenticated requests are 401, not counted
++    mock.timers.tick(retry * 1000);
++    assert.equal((await call("GET", "/api/usage", a.token)).status, 200); // a new window
++  } finally {
++    mock.timers.reset();
++  }
++});

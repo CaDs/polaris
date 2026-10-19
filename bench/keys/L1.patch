@@ -1,0 +1,17 @@
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..ac4b6d5 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -111,7 +111,11 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
+   return { v };
+ }
+ 
+-app.get("/api/tickets", (c) => c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? ORDER BY t.number`).all(c.get("workspaceId"))));
++app.get("/api/tickets", (c) => {
++  const status = c.req.query("status");
++  if (status !== undefined && !STATUSES.includes(status)) return c.json({ error: `status must be one of ${STATUSES.join(", ")}` }, 400);
++  return c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND (? IS NULL OR t.status = ?) ORDER BY t.number`).all(c.get("workspaceId"), status ?? null, status ?? null));
++});
+ 
+ app.post("/api/tickets", async (c) => {
+   const p = await parse(c, false);

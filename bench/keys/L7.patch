@@ -1,0 +1,486 @@
+diff --git a/SPEC.md b/SPEC.md
+index 066f61b..798127e 100644
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -192,6 +192,11 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
+   deleting an epic deletes its children (refused while any of their runs is active); `auto_approve_children` in
+   `/api/settings`. Events: `handoff {text}` on a child's last run, `round_finished {round, notes, completed}` on a round.
+ 
++## Comments and activity
++- **Comments.** `/api/tickets/:id/comments` (GET, POST) and `/:cid` (PATCH, DELETE): body 1-10000 chars, author = the user, only the author edits or deletes. Delete is soft: the comment stays in the list as `[deleted]`. `@name` mentions (not glued to a preceding word character or dot) of workspace members by email local part are parsed into `mentions`; unknown names are ignored.
++- **Feed.** `ticket_activity` is append-only: `comment` (on creation), `status` (every real change, from `setTicket` and the PATCH route) and `run` (started/finished, from `eventLog`). Its `seq` is the item id and the order. `GET /api/tickets/:id/activity` (oldest first), `GET /api/tickets/:id/activity/stream` (SSE, new items only), `GET /api/activity?since&limit&cursor` (workspace, newest first, `{items, next_cursor}`).
++- **Agents read comments.** `commentsText` puts a `# Comments` section (oldest first, deleted ones left out) into the first message of every worker run and planner round, before the ticket.
++
+ ## Guardrails
+ 
+ - `tests/` and `evals/` are read-only to agents (harness rejects writes).
+diff --git a/server/activity.ts b/server/activity.ts
+new file mode 100644
+index 0000000..1d2e2a8
+--- /dev/null
++++ b/server/activity.ts
+@@ -0,0 +1,165 @@
++import { randomUUID } from "node:crypto";
++import { Hono } from "hono";
++import { streamSSE } from "hono/streaming";
++import { db } from "./db.ts";
++
++// Ticket comments and the activity feed (SPEC "Comments and activity"). Every status change goes through recordStatus (runs.ts
++// setTicket, PATCH in app.ts), every run start/finish through recordRun (agent/events.ts), every new comment through the routes below.
++
++type Env = { Variables: { userId: string; workspaceId: string } };
++type Row = { seq: number; ticket_id: string; ticket_key: string; type: string; at: number; data: string };
++export type Item = { id: string; type: "comment" | "status" | "run"; at: number; ticket_id: string; ticket_key: string; [k: string]: unknown };
++
++const listeners = new Map<string, Set<(i: Item) => void>>();
++const KEY = "upper(substr(o.slug, 1, 3)) || '-' || t.number";
++const ROWS = `SELECT a.seq, a.ticket_id, ${KEY} AS ticket_key, a.type, a.at, a.data FROM ticket_activity a JOIN tickets t ON t.id = a.ticket_id JOIN organization o ON o.id = a.workspace_id`;
++
++const commentOf = (id: string) => {
++  const c = db.prepare("SELECT c.*, u.email AS author_email FROM ticket_comments c JOIN user u ON u.id = c.author_id WHERE c.id = ?").get(id) as Record<string, any>;
++  const deleted = c.deleted_at !== null;
++  return {
++    id: c.id, ticket_id: c.ticket_id, author_id: c.author_id, author_email: c.author_email, body: deleted ? "[deleted]" : c.body,
++    mentions: deleted ? [] : (JSON.parse(c.mentions) as string[]), created_at: c.created_at, edited_at: c.edited_at, deleted,
++  };
++};
++const item = (r: Row): Item => {
++  const data = JSON.parse(r.data);
++  const { comment_id, ...rest } = data;
++  return { id: String(r.seq), type: r.type as Item["type"], at: r.at, ticket_id: r.ticket_id, ticket_key: r.ticket_key, ...rest, ...(comment_id ? { comment: commentOf(comment_id) } : {}) };
++};
++
++function record(ticketId: string, type: Item["type"], data: object) {
++  const t = db.prepare("SELECT workspace_id FROM tickets WHERE id = ?").get(ticketId) as { workspace_id: string } | undefined;
++  if (!t) return;
++  const { lastInsertRowid } = db.prepare("INSERT INTO ticket_activity (workspace_id, ticket_id, type, at, data) VALUES (?, ?, ?, ?, ?)").run(t.workspace_id, ticketId, type, Date.now(), JSON.stringify(data));
++  const i = item(db.prepare(`${ROWS} WHERE a.seq = ?`).get(lastInsertRowid) as Row);
++  for (const fn of listeners.get(ticketId) ?? []) {
++    try {
++      fn(i);
++    } catch (e) {
++      console.error("activity listener failed", e); // a broken viewer must not break the change
++    }
++  }
++}
++
++export const recordStatus = (ticketId: string, from: string, to: string) => from !== to && record(ticketId, "status", { from, to });
++
++// A run started or finished. Eval case runs belong to their case's ticket but are not part of it.
++export function recordRun(runId: string, event: "started" | "finished", status?: string, reason?: string) {
++  const r = db.prepare("SELECT ticket_id, attempt, role, eval_run_id FROM runs WHERE id = ?").get(runId) as { ticket_id: string; attempt: number; role: string; eval_run_id: string | null } | undefined;
++  if (r && !r.eval_run_id) record(r.ticket_id, "run", { run_id: runId, attempt: r.attempt, role: r.role, event, status: status ?? null, reason: reason ?? null });
++}
++
++// "# Comments" for the first message of a worker run or planner round; "" without comments. Oldest first, deleted ones left out.
++export function commentsText(ticketId: string) {
++  const rows = db.prepare("SELECT c.body, u.email FROM ticket_comments c JOIN user u ON u.id = c.author_id WHERE c.ticket_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at, c.rowid").all(ticketId) as { body: string; email: string }[];
++  return rows.length ? `# Comments\n\n${rows.map((c) => `- ${c.email}: ${c.body.replaceAll("\n", "\n  ")}`).join("\n")}` : "";
++}
++
++// Local parts of the emails of the workspace members named as @local in the text, lowercased, deduped, sorted.
++function mentionsIn(body: string, workspaceId: string) {
++  const named = new Set([...body.matchAll(/(?<![\w.])@([a-z0-9][a-z0-9._-]*)/gi)].map((m) => m[1].replace(/[._-]+$/, "").toLowerCase()));
++  const members = (db.prepare("SELECT u.email FROM member m JOIN user u ON u.id = m.userId WHERE m.organizationId = ?").all(workspaceId) as { email: string }[]).map((m) => m.email.split("@")[0].toLowerCase());
++  return [...new Set(members.filter((m) => named.has(m)))].sort();
++}
++
++export const activityRoutes = new Hono<Env>();
++
++const ticketIn = (c: { get: (k: "workspaceId") => string; req: { param: (k: string) => string } }) =>
++  db.prepare("SELECT id FROM tickets WHERE id = ? AND workspace_id = ?").get(c.req.param("id"), c.get("workspaceId")) as { id: string } | undefined;
++const bodyOf = async (c: { req: { json: () => Promise<any> } }) => {
++  const b = (await c.req.json().catch(() => null))?.body;
++  const text = typeof b === "string" ? b.trim() : "";
++  return text && text.length <= 10_000 ? text : undefined;
++};
++const BAD_BODY = { error: "body is required (1-10000 chars)" };
++
++activityRoutes.get("/api/tickets/:id/comments", (c) => {
++  const t = ticketIn(c);
++  if (!t) return c.json({ error: "not_found" }, 404);
++  return c.json((db.prepare("SELECT id FROM ticket_comments WHERE ticket_id = ? ORDER BY created_at, rowid").all(t.id) as { id: string }[]).map((r) => commentOf(r.id)));
++});
++
++activityRoutes.post("/api/tickets/:id/comments", async (c) => {
++  const t = ticketIn(c);
++  if (!t) return c.json({ error: "not_found" }, 404);
++  const body = await bodyOf(c);
++  if (!body) return c.json(BAD_BODY, 400);
++  const id = randomUUID();
++  db.prepare("INSERT INTO ticket_comments (id, ticket_id, author_id, body, mentions, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
++    id, t.id, c.get("userId"), body, JSON.stringify(mentionsIn(body, c.get("workspaceId"))), Date.now(),
++  );
++  record(t.id, "comment", { comment_id: id });
++  return c.json(commentOf(id), 201);
++});
++
++// A live comment of this ticket that the caller may change: 404 unless it exists, 403 unless they wrote it.
++function own(c: Parameters<typeof ticketIn>[0] & { get: (k: "userId") => string; req: { param: (k: string) => string } }) {
++  const t = ticketIn(c);
++  const row = t && (db.prepare("SELECT id, author_id FROM ticket_comments WHERE id = ? AND ticket_id = ? AND deleted_at IS NULL").get(c.req.param("cid"), t.id) as { id: string; author_id: string } | undefined);
++  return !row ? ({ status: 404 } as const) : row.author_id !== c.get("userId") ? ({ status: 403 } as const) : ({ id: row.id } as const);
++}
++
++activityRoutes.patch("/api/tickets/:id/comments/:cid", async (c) => {
++  const o = own(c);
++  if ("status" in o) return c.json({ error: o.status === 404 ? "not_found" : "only the author can change a comment" }, o.status);
++  const body = await bodyOf(c);
++  if (!body) return c.json(BAD_BODY, 400);
++  db.prepare("UPDATE ticket_comments SET body = ?, mentions = ?, edited_at = ? WHERE id = ?").run(body, JSON.stringify(mentionsIn(body, c.get("workspaceId"))), Date.now(), o.id);
++  return c.json(commentOf(o.id));
++});
++
++activityRoutes.delete("/api/tickets/:id/comments/:cid", (c) => {
++  const o = own(c);
++  if ("status" in o) return c.json({ error: o.status === 404 ? "not_found" : "only the author can change a comment" }, o.status);
++  db.prepare("UPDATE ticket_comments SET deleted_at = ? WHERE id = ?").run(Date.now(), o.id);
++  return c.body(null, 204);
++});
++
++activityRoutes.get("/api/tickets/:id/activity", (c) => {
++  const t = ticketIn(c);
++  if (!t) return c.json({ error: "not_found" }, 404);
++  return c.json((db.prepare(`${ROWS} WHERE a.ticket_id = ? ORDER BY a.seq`).all(t.id) as Row[]).map(item));
++});
++
++// New items of one ticket as they happen (no replay: GET the feed first).
++activityRoutes.get("/api/tickets/:id/activity/stream", (c) => {
++  const t = ticketIn(c);
++  if (!t) return c.json({ error: "not_found" }, 404);
++  return streamSSE(c, async (stream) => {
++    const queue: Item[] = [];
++    let wake = () => {};
++    let closed = false;
++    const set = listeners.get(t.id) ?? new Set();
++    const push = (i: Item) => (queue.push(i), wake());
++    listeners.set(t.id, set.add(push));
++    stream.onAbort(() => ((closed = true), wake()));
++    await stream.write(": subscribed\n\n");
++    try {
++      while (!closed) {
++        const i = queue.shift();
++        if (!i) {
++          await new Promise<void>((resolve) => (wake = resolve));
++          continue;
++        }
++        await stream.writeSSE({ id: i.id, data: JSON.stringify(i) });
++      }
++    } finally {
++      set.delete(push);
++      if (!set.size) listeners.delete(t.id);
++    }
++  });
++});
++
++// The workspace's feed, newest first. ?since=<ISO time> ?limit=1..100 (default 50) ?cursor=<next_cursor of the previous page>.
++activityRoutes.get("/api/activity", (c) => {
++  const { since, limit, cursor } = c.req.query();
++  const at = since === undefined ? 0 : Date.parse(since);
++  const n = limit === undefined ? 50 : /^\d+$/.test(limit) ? Number(limit) : 0;
++  if (Number.isNaN(at)) return c.json({ error: "since must be an ISO-8601 time" }, 400);
++  if (n < 1 || n > 100) return c.json({ error: "limit must be a whole number from 1 to 100" }, 400);
++  if (cursor !== undefined && !/^\d+$/.test(cursor)) return c.json({ error: "invalid cursor" }, 400);
++  const rows = db.prepare(`${ROWS} WHERE a.workspace_id = ? AND a.at >= ? AND a.seq < ? ORDER BY a.seq DESC LIMIT ?`).all(c.get("workspaceId"), at, cursor === undefined ? Number.MAX_SAFE_INTEGER : Number(cursor), n + 1) as Row[];
++  const page = rows.slice(0, n);
++  return c.json({ items: page.map(item), next_cursor: rows.length > n ? String(page.at(-1)!.seq) : null });
++});
+diff --git a/server/agent/events.ts b/server/agent/events.ts
+index 26b8657..e0738cf 100644
+--- a/server/agent/events.ts
++++ b/server/agent/events.ts
+@@ -1,5 +1,6 @@
+ import { randomUUID } from "node:crypto";
+ import { db } from "../db.ts";
++import { recordRun } from "../activity.ts";
+ import type { AgentEvent } from "./types.ts";
+ 
+ export type StoredEvent = AgentEvent & { run_id: string; seq: number; created_at: number };
+@@ -37,13 +38,19 @@ export function eventLog(runId: string) {
+   return (e: AgentEvent) => {
+     const now = Date.now();
+     insert.run(runId, ++seq, e.type, JSON.stringify(e.payload), now);
+-    if (e.type === "run_started") db.prepare("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ?").run(now, runId);
++    if (e.type === "run_started") {
++      db.prepare("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ?").run(now, runId);
++      recordRun(runId, "started");
++    }
+     // tokens_in counts all uncached prompt tokens (incl. cache writes); tokens_cached counts cache reads.
+     if (e.type === "usage")
+       db.prepare("UPDATE runs SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, tokens_cached = tokens_cached + ? WHERE id = ?").run(
+         e.payload.input + e.payload.cache_write, e.payload.output, e.payload.cache_read, runId,
+       );
+-    if (e.type === "run_finished") db.prepare("UPDATE runs SET status = ?, ended_at = ? WHERE id = ?").run(e.payload.status, now, runId);
++    if (e.type === "run_finished") {
++      db.prepare("UPDATE runs SET status = ?, ended_at = ? WHERE id = ?").run(e.payload.status, now, runId);
++      recordRun(runId, "finished", e.payload.status, e.payload.reason);
++    }
+     for (const fn of listeners.get(runId) ?? []) {
+       try {
+         fn({ ...e, run_id: runId, seq, created_at: now } as StoredEvent);
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..0556ca0 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -10,6 +10,7 @@ import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote,
+ import { approve, cancelRun, cleanupTicket, enqueueRun, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+ import { withStates } from "./planner.ts";
+ import { SANDBOX_IMAGE } from "./sandbox.ts";
++import { activityRoutes, recordStatus } from "./activity.ts";
+ 
+ migrate();
+ 
+@@ -32,6 +33,7 @@ app.use("/api/*", async (c, next) => {
+ });
+ 
+ app.route("/api/providers", providerRoutes);
++app.route("/", activityRoutes);
+ 
+ const STATUSES = ["todo", "running", "review", "done", "failed"];
+ 
+@@ -143,6 +145,7 @@ app.patch("/api/tickets/:id", async (c) => {
+     v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
+     v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
+   );
++  recordStatus(t.id, t.status, v.status ?? t.status);
+   return c.json(ticketIn(c));
+ });
+ 
+diff --git a/server/migrations/009_activity.sql b/server/migrations/009_activity.sql
+new file mode 100644
+index 0000000..957d118
+--- /dev/null
++++ b/server/migrations/009_activity.sql
+@@ -0,0 +1,24 @@
++-- Ticket comments and the activity feed. Comments are soft-deleted (deleted_at); the feed is append-only, one row per item,
++-- and its seq is the order things happened in (the item id, and the pagination cursor).
++CREATE TABLE ticket_comments (
++  id         TEXT PRIMARY KEY,
++  ticket_id  TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
++  author_id  TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
++  body       TEXT NOT NULL,
++  mentions   TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(mentions)),
++  created_at INTEGER NOT NULL,
++  edited_at  INTEGER,
++  deleted_at INTEGER
++);
++CREATE INDEX ticket_comments_ticket ON ticket_comments(ticket_id);
++
++CREATE TABLE ticket_activity (
++  seq          INTEGER PRIMARY KEY AUTOINCREMENT,
++  workspace_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
++  ticket_id    TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
++  type         TEXT NOT NULL CHECK (type IN ('comment', 'status', 'run')),
++  at           INTEGER NOT NULL,
++  data         TEXT NOT NULL CHECK (json_valid(data))
++);
++CREATE INDEX ticket_activity_ticket ON ticket_activity(ticket_id, seq);
++CREATE INDEX ticket_activity_workspace ON ticket_activity(workspace_id, seq);
+diff --git a/server/planner.ts b/server/planner.ts
+index 3a5738d..6371be0 100644
+--- a/server/planner.ts
++++ b/server/planner.ts
+@@ -117,7 +117,7 @@ export function childrenText(epicId: string, since: number) {
+ type Epic = { id: string; workspace_id: string; key: string; title: string; spec: string; parent_id: string | null; provider_id: string | null; model: string | null };
+ 
+ export function plannerTask(epic: Epic, o: {
+-  repo: string; base: string; sha: string; test: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; round: number;
++  repo: string; base: string; sha: string; test: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; comments?: string; round: number;
+   notes: { round: number; notes: string }[]; review?: string; since: number;
+ }) {
+   const parts = [
+@@ -130,6 +130,7 @@ export function plannerTask(epic: Epic, o: {
+   ];
+   if (o.skills.length) parts.push(skillsText(o.skills));
+   if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
++  if (o.comments) parts.push(o.comments);
+   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
+   parts.push(`# Epic\n\n# ${epic.title}${epic.spec ? `\n\n${epic.spec}` : ""}`);
+   if (o.notes.length) parts.push(`# Your notes from earlier rounds\n\n${o.notes.map((n) => `## Round ${n.round}\n${n.notes}`).join("\n\n")}`);
+diff --git a/server/runs.ts b/server/runs.ts
+index 23e5e82..8ebfab6 100644
+--- a/server/runs.ts
++++ b/server/runs.ts
+@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
+ import { mkdirSync } from "node:fs";
+ import { basename, join, resolve } from "node:path";
+ import { db } from "./db.ts";
++import { commentsText, recordStatus } from "./activity.ts";
+ import { createRun, eventLog } from "./agent/events.ts";
+ import { listSkills, skillsText, type Skill } from "./agent/context.ts";
+ import { runAgent } from "./agent/loop.ts";
+@@ -49,7 +50,9 @@ const ticketRow = (id: string) =>
+ function setTicket(id: string, status: string) {
+   const now = Date.now();
+   const end = status === "done" || status === "failed";
++  const previous = (db.prepare("SELECT status FROM tickets WHERE id = ?").get(id) as { status: string } | undefined)?.status;
+   db.prepare("UPDATE tickets SET status = ?, updated_at = ?, settled_at = ? WHERE id = ?").run(status, now, end ? now : null, id);
++  if (previous) recordStatus(id, previous, status);
+   if (end) void settled(id).catch((e) => console.error("settling failed", e));
+ }
+ 
+@@ -86,7 +89,7 @@ const envWindow = () => (process.env.ANTHROPIC_BASE_URL ? CONTEXT_WINDOW.ollama
+ // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
+ // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
+ // lessons, and feedback (see below).
+-function taskFor(t: { title: string; spec: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string }, feedback: string[]) {
++function taskFor(t: { title: string; spec: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; comments?: string }, feedback: string[]) {
+   const parts = [
+     [
+       "# Environment",
+@@ -97,6 +100,7 @@ function taskFor(t: { title: string; spec: string }, info: { sandbox: string; re
+   ];
+   if (info.skills.length) parts.push(skillsText(info.skills));
+   if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
++  if (info.comments) parts.push(info.comments);
+   parts.push(...feedback, `# Task\n\n${t.spec ? `# ${t.title}\n\n${t.spec}` : t.title}`);
+   return parts.join("\n\n");
+ }
+@@ -304,6 +308,7 @@ async function execute(runId: string) {
+     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
+     const task = taskFor(ev ?? t, {
+       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body,
++      comments: run.eval_run_id ? undefined : commentsText(t.id),
+     }, ev ? [] : feedback(t, runId, run.attempt));
+     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
+     if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
+@@ -396,7 +401,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
+       ORDER BY r.rowid, e.seq`).all(t.id) as { payload: string }[]).map((e) => JSON.parse(e.payload) as EventPayloads["round_finished"]);
+     const task = plannerTask(t, {
+       repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, test: s.test_command, protectedPaths: parseProtected(s.protected_paths), skills,
+-      lessons: lessons?.body, round: run.attempt, notes, review: reviewNote(t.id), since,
++      lessons: lessons?.body, comments: commentsText(t.id), round: run.attempt, notes, review: reviewNote(t.id), since,
+     });
+     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
+     if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
+diff --git a/web/Activity.tsx b/web/Activity.tsx
+new file mode 100644
+index 0000000..0db8dfb
+--- /dev/null
++++ b/web/Activity.tsx
+@@ -0,0 +1,74 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { api } from "./ui.tsx";
++
++type Comment = { id: string; author_id: string; author_email: string; body: string; mentions: string[]; created_at: number; edited_at: number | null; deleted: boolean };
++type Item = { id: string; type: "comment" | "status" | "run"; at: number; comment?: Comment; from?: string; to?: string; event?: string; status?: string | null; attempt?: number; role?: string };
++
++const line = (i: Item) =>
++  i.type === "status" ? `Status ${i.from} → ${i.to}`
++  : i.type === "run" ? `${i.role === "planner" ? "Planner round" : "Run"} #${i.attempt} ${i.event === "started" ? "started" : `finished (${i.status})`}`
++  : "";
++
++// Comment box and the ticket's activity feed. New items arrive over SSE; a comment edit or delete re-reads the feed.
++export function Activity({ ticketId, me }: { ticketId: string; me: string }) {
++  const [items, setItems] = useState<Item[]>([]);
++  const [error, setError] = useState("");
++  const load = () => api<Item[]>(`/api/tickets/${ticketId}/activity`).then(setItems, (e) => setError(e.message));
++  useEffect(() => {
++    void load();
++    const es = new EventSource(`/api/tickets/${ticketId}/activity/stream`);
++    es.onmessage = (m) => {
++      const i = JSON.parse(m.data) as Item;
++      setItems((cur) => (cur.some((x) => x.id === i.id) ? cur : [...cur, i]));
++    };
++    return () => es.close();
++  }, [ticketId]);
++
++  async function add(e: FormEvent<HTMLFormElement>) {
++    e.preventDefault();
++    const form = e.currentTarget;
++    setError("");
++    try {
++      await api(`/api/tickets/${ticketId}/comments`, "POST", { body: new FormData(form).get("body") });
++      form.reset();
++    } catch (err) {
++      setError((err as Error).message);
++    }
++  }
++  async function change(c: Comment, method: "PATCH" | "DELETE") {
++    const body = method === "PATCH" ? prompt("Edit comment", c.body) : undefined;
++    if (method === "PATCH" && !body?.trim()) return;
++    await api(`/api/tickets/${ticketId}/comments/${c.id}`, method, body === undefined ? undefined : { body }).then(load, (e) => setError(e.message));
++  }
++
++  return (
++    <section className="activity">
++      <h3>Activity</h3>
++      <ul>
++        {items.map((i) => (
++          <li key={i.id} className={i.type}>
++            {i.comment ? (
++              <>
++                <strong>{i.comment.author_email}</strong> <span className="muted">{new Date(i.at).toLocaleString()}{i.comment.edited_at && " · edited"}</span>
++                <p className={i.comment.deleted ? "muted" : ""}>{i.comment.body}</p>
++                {!i.comment.deleted && i.comment.author_email === me && (
++                  <span className="row">
++                    <button type="button" className="link" onClick={() => change(i.comment!, "PATCH")}>Edit</button>
++                    <button type="button" className="link" onClick={() => change(i.comment!, "DELETE")}>Delete</button>
++                  </span>
++                )}
++              </>
++            ) : (
++              <span className="muted">{new Date(i.at).toLocaleTimeString()} · {line(i)}</span>
++            )}
++          </li>
++        ))}
++      </ul>
++      <form onSubmit={add}>
++        <textarea name="body" rows={3} required maxLength={10000} placeholder="Comment. @name mentions a member; the next agent run reads it." aria-label="Comment" />
++        <button className="btn">Comment</button>
++      </form>
++      {error && <p className="error" role="alert">{error}</p>}
++    </section>
++  );
++}
+diff --git a/web/App.tsx b/web/App.tsx
+index 4e0428c..31867d1 100644
+--- a/web/App.tsx
++++ b/web/App.tsx
+@@ -187,7 +187,7 @@ function Dashboard({ email }: { email: string }) {
+           ) : improve ? (
+             <Improvement />
+           ) : number ? (
+-            ticket ? <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={(n) => go(`/t/${n}`)} /> : <p className="muted pad">{tickets ? "Ticket not found." : "Loading…"}</p>
++            ticket ? <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={(n) => go(`/t/${n}`)} me={email} /> : <p className="muted pad">{tickets ? "Ticket not found." : "Loading…"}</p>
+           ) : (
+             <>
+               <Board tickets={tickets} open={(t) => go(`/t/${t.number}`)} />
+diff --git a/web/TicketView.tsx b/web/TicketView.tsx
+index 782ace5..d3d9614 100644
+--- a/web/TicketView.tsx
++++ b/web/TicketView.tsx
+@@ -1,10 +1,11 @@
+ import { useEffect, useState } from "react";
++import { Activity } from "./Activity.tsx";
+ import { COLUMNS, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
+ 
+ type Detail = Ticket & { runs: Run[]; children?: Child[] };
+ type Ev = { seq: number; type: string; payload: any };
+ 
+-export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (number: number) => void }) {
++export function TicketView({ ticket, reload, close, open, me }: { ticket: Ticket; reload: () => void; close: () => void; open: (number: number) => void; me: string }) {
+   const [detail, setDetail] = useState<Detail | null>(null);
+   const [title, setTitle] = useState(ticket.title);
+   const [spec, setSpec] = useState(ticket.spec);
+@@ -148,6 +149,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
+       )}
+       {current && <Transcript key={current.id} run={current} onFinish={() => (reload(), load())} />}
+ 
++      <Activity ticketId={ticket.id} me={me} />
+       {retrying && providers && (
+         <RetryDialog run={retrying} providers={providers} close={() => setRetrying(null)} go={(c) => (setRetrying(null), run(c))} />
+       )}
+diff --git a/web/style.css b/web/style.css
+index 96a04cf..8749f1c 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -245,3 +245,8 @@ label.check input { width: auto; margin: 0; }
+ .child .icon { vertical-align: -2px; }
+ .note { margin: 6px 0; padding: 4px 8px; border-left: 2px solid var(--accent); background: var(--hover); border-radius: 0 4px 4px 0; }
+ .note p { margin: 2px 0 0; }
++
++.activity ul { list-style: none; padding: 0; margin: 8px 0; }
++.activity li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
++.activity li.comment p { margin: 2px 0; white-space: pre-wrap; }
++.activity form { display: grid; gap: 6px; }

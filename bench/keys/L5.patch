@@ -1,0 +1,224 @@
+diff --git a/server/app.ts b/server/app.ts
+index 9acb224..61ba97c 100644
+--- a/server/app.ts
++++ b/server/app.ts
+@@ -10,6 +10,7 @@ import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote,
+ import { approve, cancelRun, cleanupTicket, enqueueRun, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
+ import { withStates } from "./planner.ts";
+ import { SANDBOX_IMAGE } from "./sandbox.ts";
++import { normalizeLabels } from "./labels.ts";
+ 
+ migrate();
+ 
+@@ -56,8 +57,12 @@ const TICKETS = `
+ // d = the ticket bound to ? and all of its descendants (epic → children → a sub-epic's children).
+ const TREE = "WITH RECURSIVE d(id) AS (SELECT ? UNION ALL SELECT t.id FROM tickets t JOIN d ON t.parent_id = d.id)";
+ 
+-const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
+-  db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined;
++// labels is stored as a JSON array string; the API returns the array.
++const withLabels = <T extends { labels: string }>(t: T) => ({ ...t, labels: JSON.parse(t.labels) as string[] });
++const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) => {
++  const t = db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as { labels: string } & Record<string, any> | undefined;
++  return t && withLabels(t);
++};
+ 
+ // Runs are only reachable through a ticket in the caller's workspace.
+ const runIn = (c: Context<Env>) =>
+@@ -81,7 +86,7 @@ function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v:
+ }
+ 
+ // Validated fields of a JSON body, or an error message.
+-type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null };
++type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; labels?: string[]; test_command?: string | null };
+ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string } | { v: Fields }> {
+   const b = await c.req.json().catch(() => null);
+   if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };
+@@ -100,6 +105,13 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
+     if (typeof b.spec !== "string" || b.spec.length > 20000) return { error: "spec must be a string of at most 20000 chars" };
+     v.spec = b.spec;
+   }
++  if (b.labels !== undefined) {
++    try {
++      v.labels = normalizeLabels(b.labels);
++    } catch (e) {
++      return { error: (e as Error).message };
++    }
++  }
+   if (b.test_command !== undefined) {
+     if (b.test_command !== null && (typeof b.test_command !== "string" || b.test_command.length > 2000)) return { error: "test_command must be a string of at most 2000 chars, or null" };
+     v.test_command = b.test_command || null;
+@@ -111,14 +123,24 @@ async function parse(c: Context<Env>, partial: boolean): Promise<{ error: string
+   return { v };
+ }
+ 
+-app.get("/api/tickets", (c) => c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? ORDER BY t.number`).all(c.get("workspaceId"))));
++// ?label=x: only tickets carrying that label (normalized like stored ones; a malformed label matches nothing).
++app.get("/api/tickets", (c) => {
++  const label = c.req.query("label")?.trim().toLowerCase() ?? null;
++  const rows = db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(t.labels) WHERE value = ?)) ORDER BY t.number`).all(c.get("workspaceId"), label, label);
++  return c.json((rows as { labels: string }[]).map(withLabels));
++});
++
++// The workspace's labels with the number of tickets carrying each.
++app.get("/api/labels", (c) =>
++  c.json(db.prepare("SELECT j.value AS label, COUNT(*) AS count FROM tickets t, json_each(t.labels) j WHERE t.workspace_id = ? GROUP BY j.value ORDER BY j.value").all(c.get("workspaceId"))),
++);
+ 
+ app.post("/api/tickets", async (c) => {
+   const p = await parse(c, false);
+   if ("error" in p) return c.json(p, 400);
+   const id = randomUUID();
+-  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+-    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null,
++  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, labels, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
++    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, JSON.stringify(p.v.labels ?? []), p.v.test_command ?? null,
+   );
+   return c.json(ticketIn(c, id), 201);
+ });
+@@ -130,7 +152,7 @@ app.get("/api/tickets/:id", (c) => {
+   const runs = db.prepare("SELECT r.*, p.auth_type AS auth_type FROM runs r LEFT JOIN providers p ON p.id = r.provider_id WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid").all(t.id);
+   if (t.kind !== "epic") return c.json({ ...t, runs });
+   const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id) as any[];
+-  return c.json({ ...t, runs, children: withStates(tree) });
++  return c.json({ ...t, runs, children: withStates((tree as { labels: string }[]).map(withLabels) as any) });
+ });
+ 
+ app.patch("/api/tickets/:id", async (c) => {
+@@ -139,9 +161,9 @@ app.patch("/api/tickets/:id", async (c) => {
+   const p = await parse(c, true);
+   if ("error" in p) return c.json(p, 400);
+   const v = p.v;
+-  db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
++  db.prepare("UPDATE tickets SET title = ?, spec = ?, status = ?, provider_id = ?, model = ?, labels = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
+     v.title ?? t.title, v.spec ?? t.spec, v.status ?? t.status, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
+-    v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
++    JSON.stringify(v.labels ?? t.labels), v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
+   );
+   return c.json(ticketIn(c));
+ });
+diff --git a/server/labels.ts b/server/labels.ts
+new file mode 100644
+index 0000000..50f850b
+--- /dev/null
++++ b/server/labels.ts
+@@ -0,0 +1,14 @@
++export const MAX_LABELS = 10;
++
++// Labels as stored: trimmed, lowercased slugs [a-z0-9-]{1,30}, deduped and sorted, at most MAX_LABELS. Throws a user-facing message.
++export function normalizeLabels(input: unknown): string[] {
++  if (!Array.isArray(input)) throw new Error("labels must be an array of strings");
++  const out = new Set<string>();
++  for (const l of input) {
++    const s = typeof l === "string" ? l.trim().toLowerCase() : "";
++    if (!/^[a-z0-9-]{1,30}$/.test(s)) throw new Error(`invalid label ${JSON.stringify(l)}: labels are 1-30 chars of a-z, 0-9 and -`);
++    out.add(s);
++  }
++  if (out.size > MAX_LABELS) throw new Error(`a ticket has at most ${MAX_LABELS} labels (got ${out.size})`);
++  return [...out].sort();
++}
+diff --git a/server/migrations/009_labels.sql b/server/migrations/009_labels.sql
+new file mode 100644
+index 0000000..9d8ea6f
+--- /dev/null
++++ b/server/migrations/009_labels.sql
+@@ -0,0 +1,2 @@
++-- Ticket labels: a JSON array of normalized slugs (labels.ts), queried with json_each.
++ALTER TABLE tickets ADD COLUMN labels TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(labels));
+diff --git a/server/planner.ts b/server/planner.ts
+index 3a5738d..79a9b00 100644
+--- a/server/planner.ts
++++ b/server/planner.ts
+@@ -1,6 +1,7 @@
+ import { randomUUID } from "node:crypto";
+ import { readFileSync } from "node:fs";
+ import { db } from "./db.ts";
++import { normalizeLabels } from "./labels.ts";
+ import { skillsText, type Skill } from "./agent/context.ts";
+ import { readOnlyTools, type Tool } from "./agent/tools.ts";
+ import { AgentError, type Msg } from "./agent/types.ts";
+@@ -161,6 +162,7 @@ export function plannerTools(epic: Epic, outcome: Outcome, since: number, queue:
+           spec: { type: "string", description: "Self-contained task: goal, files/areas, conventions, acceptance criteria in terms of what the test gate checks" },
+           depends_on: { type: "array", items: { type: "string" }, description: "Keys of tickets in this epic that must be merged first" },
+           kind: { type: "string", enum: ["task", "epic"], description: "epic = a sub-planner owns this slice (default task)" },
++          labels: { type: "array", items: { type: "string" }, description: "Extra labels (lowercase a-z0-9-, up to 30 chars). The ticket also gets all of this epic's labels; at most 10 in all." },
+         },
+         required: ["title", "spec"],
+       },
+@@ -180,9 +182,17 @@ export function plannerTools(epic: Epic, outcome: Outcome, since: number, queue:
+         if (!k) throw new AgentError("InvalidArguments", `unknown dependency ${key}: depends_on must name tickets of this epic (${kids.map((x) => x.key).join(", ") || "none yet"})`);
+         return k;
+       });
++      let labels: string[];
++      try {
++        const inherited = JSON.parse((db.prepare("SELECT labels FROM tickets WHERE id = ?").get(epic.id) as { labels: string }).labels) as string[];
++        if (input.labels !== undefined && !Array.isArray(input.labels)) throw new Error("must be an array of strings");
++        labels = normalizeLabels([...inherited, ...((input.labels as unknown[] | undefined) ?? [])]);
++      } catch (e) {
++        throw new AgentError("InvalidArguments", `"labels": ${(e as Error).message}`);
++      }
+       const id = randomUUID();
+-      db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, depends_on, provider_id, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+-        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, // children inherit the epic's model choice
++      db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, kind, title, spec, depends_on, provider_id, model, labels) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
++        id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, JSON.stringify(labels), // children inherit the epic's model choice and labels
+       );
+       const key = `${epic.key.split("-")[0]}-${(db.prepare("SELECT number FROM tickets WHERE id = ?").get(id) as { number: number }).number}`;
+       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
+diff --git a/web/Board.tsx b/web/Board.tsx
+index c553f48..481e23b 100644
+--- a/web/Board.tsx
++++ b/web/Board.tsx
+@@ -1,10 +1,23 @@
++import { useState } from "react";
+ import { COLUMNS, StatusIcon, cost, fmt, waiting, type Ticket } from "./ui.tsx";
+ 
+ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: Ticket) => void }) {
++  const [label, setLabel] = useState("");
++  const labels = [...new Set(tickets?.flatMap((t) => t.labels))].sort();
+   return (
++    <>
++    {labels.length > 0 && (
++      <label className="inline pad">
++        Label
++        <select value={label} onChange={(e) => setLabel(e.target.value)}>
++          <option value="">All</option>
++          {labels.map((l) => <option key={l}>{l}</option>)}
++        </select>
++      </label>
++    )}
+     <div className="board">
+       {COLUMNS.map((col) => {
+-        const list = tickets?.filter((t) => t.status === col) ?? [];
++        const list = tickets?.filter((t) => t.status === col && (!label || t.labels.includes(label))) ?? [];
+         return (
+           <section key={col} aria-label={col}>
+             <h2>
+@@ -18,6 +31,7 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
+                   {t.kind === "epic" && <span className="badge epic">Epic</span>}
+                 </span>
+                 <span className="title">{t.title}</span>
++                {t.labels.length > 0 && <span className="meta">{t.labels.map((l) => <span key={l} className="badge">{l}</span>)}</span>}
+                 {t.kind === "epic" && t.child_count > 0 && <span className="meta muted">{t.child_done}/{t.child_count} done</span>}
+                 {t.run_status && (
+                   <span className="meta muted">
+@@ -30,5 +44,6 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
+         );
+       })}
+     </div>
++    </>
+   );
+ }
+diff --git a/web/ui.tsx b/web/ui.tsx
+index 6e7c670..4235289 100644
+--- a/web/ui.tsx
++++ b/web/ui.tsx
+@@ -6,7 +6,7 @@ export type Ticket = {
+   id: string; number: number; key: string; title: string; spec: string; status: Status;
+   provider_id: string | null; model: string | null; run_model: string | null; run_auth: string | null;
+   run_status: string | null; run_count: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number;
+-  eval_case_id: string | null;
++  eval_case_id: string | null; labels: string[];
+   // M7: epic = planned by a planner; children have parent_id. handoff: a child's handoff, an epic's summary or failure reason.
+   kind: "task" | "epic"; parent_id: string | null; parent_key: string | null; handoff: string | null; child_count: number; child_done: number;
+ };

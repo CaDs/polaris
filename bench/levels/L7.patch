@@ -1,0 +1,363 @@
+diff --git a/test/comments-activity.test.ts b/test/comments-activity.test.ts
+new file mode 100644
+index 0000000..666da8c
+--- /dev/null
++++ b/test/comments-activity.test.ts
+@@ -0,0 +1,357 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "node:child_process";
++import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// Ticket comments, @mentions, an activity feed (per ticket and per workspace, paginated), live updates over SSE,
++// and human comments in the agent's first message.
++process.env.HARNESS_PROVIDER = "fake"; // the demo worker writes notes.txt (and ok.txt on a retry); the demo planner creates a.txt and b.txt
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_CONCURRENCY = "2";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "act-data-"));
++const { app } = await import("../server/app.ts");
++const { db } = await import("../server/db.ts");
++
++const origin = "http://localhost:5173";
++async function request(method: string, path: string, cookie = "", body?: unknown) {
++  return app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
++}
++async function call(method: string, path: string, cookie = "", body?: unknown) {
++  const res = await request(method, path, cookie, body);
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
++}
++async function signUp(name: string) {
++  return (await call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name })).cookie;
++}
++async function workspace(name: string) {
++  return (await call("POST", "/api/auth/organization/create", await signUp(name), { name, slug: name })).cookie;
++}
++// A second user in an existing workspace (members are added straight in the database, there is no invite flow).
++async function joinAs(name: string, slug: string) {
++  const cookie = await signUp(name);
++  const user = db.prepare("SELECT id FROM user WHERE email = ?").get(`${name}@x.dev`) as { id: string };
++  const org = db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string };
++  db.prepare("INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, 'member', ?)").run(`m-${name}`, org.id, user.id, new Date().toISOString());
++  return (await call("POST", "/api/auth/organization/set-active", cookie, { organizationId: org.id })).cookie;
++}
++const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
++async function until<T>(what: string, fn: () => Promise<T | false | undefined>, ms = 60_000): Promise<T> {
++  for (const end = Date.now() + ms; Date.now() < end; await sleep(50)) {
++    const v = await fn();
++    if (v) return v;
++  }
++  assert.fail(`timed out waiting for ${what}`);
++}
++
++const repo = realpathSync(mkdtempSync(join(tmpdir(), "act-repo-")));
++writeFileSync(join(repo, "README.md"), "hi\n");
++execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
++const gate = (who: string, test_command: string, extra: Record<string, unknown> = {}) => call("PUT", "/api/settings", who, { repo_path: repo, setup_command: "", test_command, ...extra });
++
++const alice = await workspace("alice");
++const bob = await joinAs("bob", "alice");
++const carol = await workspace("carol"); // another workspace entirely
++await gate(alice, "test -f ok.txt");
++
++const mk = async (who: string, title: string, extra: Record<string, unknown> = {}) => (await call("POST", "/api/tickets", who, { title, ...extra })).body;
++const feed = async (who: string, ticketId: string) => {
++  const r = await call("GET", `/api/tickets/${ticketId}/activity`, who);
++  assert.equal(r.status, 200);
++  return r.body as any[];
++};
++// One short line per feed item, to compare whole sequences.
++const brief = (items: any[]) =>
++  items.map((i) => (i.type === "status" ? `status ${i.from}>${i.to}` : i.type === "run" ? `run ${i.event}${i.event === "finished" ? ` ${i.status}` : ""} #${i.attempt}` : `comment ${i.comment.body}`));
++const statusOnly = (items: any[]) => brief(items.filter((i) => i.type === "status"));
++const comment = async (who: string, ticketId: string, body: string) => {
++  const r = await call("POST", `/api/tickets/${ticketId}/comments`, who, { body });
++  assert.equal(r.status, 201, JSON.stringify(r.body));
++  return r.body;
++};
++const events = (runId: string) =>
++  (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
++const task = (runId: string) => events(runId).find((e) => e.type === "run_started")!.p.task as string;
++
++test("comments: create, validate, list, author-only edit and delete, soft delete, workspace isolation", async () => {
++  const t = await mk(alice, "discuss");
++  const other = await mk(alice, "another ticket");
++  const c1 = await call("POST", `/api/tickets/${t.id}/comments`, alice, { body: "  first thoughts  " });
++  assert.equal(c1.status, 201);
++  assert.deepEqual(Object.keys(c1.body).sort(), ["author_email", "author_id", "body", "created_at", "deleted", "edited_at", "id", "mentions", "ticket_id"]);
++  assert.deepEqual([c1.body.body, c1.body.author_email, c1.body.ticket_id, c1.body.deleted, c1.body.edited_at, c1.body.mentions], ["first thoughts", "alice@x.dev", t.id, false, null, []]);
++  assert.equal(typeof c1.body.created_at, "number");
++  const c2 = (await call("POST", `/api/tickets/${t.id}/comments`, bob, { body: "second, from bob" })).body; // any member can comment
++  assert.equal(c2.author_email, "bob@x.dev");
++
++  for (const bad of [{}, { body: "" }, { body: "   " }, { body: 5 }, { body: null }, { body: "x".repeat(10_001) }])
++    assert.equal((await call("POST", `/api/tickets/${t.id}/comments`, alice, bad)).status, 400, JSON.stringify(bad).slice(0, 40));
++  assert.equal((await call("POST", `/api/tickets/${t.id}/comments`, alice, { body: "x".repeat(10_000) })).status, 201);
++
++  const list = (await call("GET", `/api/tickets/${t.id}/comments`, bob)).body;
++  assert.deepEqual(list.slice(0, 2).map((c: any) => c.body), ["first thoughts", "second, from bob"]); // oldest first
++  assert.equal(list.length, 3);
++
++  // Only the author edits or deletes.
++  assert.equal((await call("PATCH", `/api/tickets/${t.id}/comments/${c1.body.id}`, bob, { body: "hijack" })).status, 403);
++  assert.equal((await call("DELETE", `/api/tickets/${t.id}/comments/${c1.body.id}`, bob)).status, 403);
++  assert.equal((await call("PATCH", `/api/tickets/${t.id}/comments/${c1.body.id}`, alice, { body: "" })).status, 400);
++  const edited = await call("PATCH", `/api/tickets/${t.id}/comments/${c1.body.id}`, alice, { body: "revised thoughts" });
++  assert.equal(edited.status, 200);
++  assert.equal(edited.body.body, "revised thoughts");
++  assert.equal(typeof edited.body.edited_at, "number");
++  assert.equal((await call("GET", `/api/tickets/${t.id}/comments`, alice)).body[0].body, "revised thoughts");
++
++  // Wrong ticket, other workspace.
++  assert.equal((await call("PATCH", `/api/tickets/${other.id}/comments/${c1.body.id}`, alice, { body: "x" })).status, 404);
++  assert.equal((await call("GET", `/api/tickets/${t.id}/comments`, carol)).status, 404);
++  assert.equal((await call("POST", `/api/tickets/${t.id}/comments`, carol, { body: "hi" })).status, 404);
++  assert.equal((await call("GET", `/api/tickets/nope/comments`, alice)).status, 404);
++
++  // Soft delete: the row stays in the list as "[deleted]".
++  assert.equal((await call("DELETE", `/api/tickets/${t.id}/comments/${c1.body.id}`, alice)).status, 204);
++  const after = (await call("GET", `/api/tickets/${t.id}/comments`, alice)).body;
++  assert.equal(after.length, 3);
++  assert.deepEqual([after[0].id, after[0].body, after[0].deleted, after[0].mentions], [c1.body.id, "[deleted]", true, []]);
++  assert.equal(JSON.stringify(after[0]).includes("revised thoughts"), false);
++  assert.equal((await call("PATCH", `/api/tickets/${t.id}/comments/${c1.body.id}`, alice, { body: "undelete" })).status, 404);
++  assert.equal((await call("DELETE", `/api/tickets/${t.id}/comments/${c1.body.id}`, alice)).status, 404);
++});
++
++test("@mentions: workspace members by email local part; unknown names, other workspaces and email addresses are ignored", async () => {
++  const t = await mk(alice, "mentions");
++  const m = async (body: string) => (await comment(alice, t.id, body)).mentions;
++  assert.deepEqual(await m("@bob can you look?"), ["bob"]);
++  assert.deepEqual(await m("cc @Bob and @ALICE, thanks"), ["alice", "bob"]); // case-insensitive, deduped, sorted
++  assert.deepEqual(await m("@bob @bob @bob"), ["bob"]);
++  assert.deepEqual(await m("(@bob)."), ["bob"]);
++  assert.deepEqual(await m("ask @bob."), ["bob"]); // trailing punctuation is not part of the name
++  assert.deepEqual(await m("@nobody and @carol are not members"), []); // unknown, and a member of another workspace only
++  assert.deepEqual(await m("mail bob@alice.dev or ping@bob"), []); // an @ glued to a word is not a mention
++  assert.deepEqual(await m("no mentions here"), []);
++  const c = await comment(alice, t.id, "first @nobody");
++  const edited = await call("PATCH", `/api/tickets/${t.id}/comments/${c.id}`, alice, { body: "now @bob" });
++  assert.deepEqual(edited.body.mentions, ["bob"]); // recomputed on edit
++  assert.deepEqual((await call("GET", `/api/tickets/${t.id}/comments`, alice)).body.at(-1).mentions, ["bob"]);
++});
++
++test("the activity feed records comments, every status-change path and run start/finish, in order, exactly once", async () => {
++  // Plain user edits: only real changes count.
++  const u = await mk(alice, "edited by a user");
++  assert.deepEqual(await feed(alice, u.id), []); // creating a ticket is not activity
++  await call("PATCH", `/api/tickets/${u.id}`, alice, { title: "renamed" });
++  await call("PATCH", `/api/tickets/${u.id}`, alice, { status: "todo" });
++  await call("PATCH", `/api/tickets/${u.id}`, alice, { status: "review" });
++  await call("PATCH", `/api/tickets/${u.id}`, alice, { status: "review", title: "again" });
++  await comment(bob, u.id, "looks fine");
++  await call("PATCH", `/api/tickets/${u.id}`, alice, { status: "done" });
++  const items = await feed(alice, u.id);
++  assert.deepEqual(brief(items), ["status todo>review", "comment looks fine", "status review>done"]);
++  assert.ok(items.every((i) => i.ticket_id === u.id && typeof i.at === "number" && i.id !== undefined));
++  assert.deepEqual(items.map((i) => i.at), [...items.map((i) => i.at)].sort((a, b) => a - b));
++  assert.equal(new Set(items.map((i) => i.id)).size, 3);
++  assert.equal(items[1].comment.author_email, "bob@x.dev");
++  // A deleted comment stays in the feed as "[deleted]".
++  const gone = await comment(alice, u.id, "oops");
++  await call("DELETE", `/api/tickets/${u.id}/comments/${gone.id}`, alice);
++  assert.equal((await feed(alice, u.id)).at(-1).comment.body, "[deleted]");
++  assert.equal((await call("GET", `/api/tickets/${u.id}/activity`, carol)).status, 404);
++
++  // A run whose first attempt fails the gate and is retried automatically; then approve.
++  const r = await mk(alice, "retry me");
++  await call("POST", `/api/tickets/${r.id}/runs`, alice);
++  await until("review", async () => (await call("GET", `/api/tickets/${r.id}`, alice)).body.status === "review");
++  const expected = ["status todo>running", "run started #1", "run finished failed #1", "run started #2", "run finished passed #2", "status running>review"]; // no running>running for the retry
++  await until("feed", async () => (await feed(alice, r.id)).length >= expected.length);
++  assert.deepEqual(brief(await feed(alice, r.id)), expected);
++  const runItem = (await feed(alice, r.id)).find((i) => i.event === "finished" && i.attempt === 1);
++  assert.deepEqual([runItem.role, runItem.status, typeof runItem.run_id], ["worker", "failed", "string"]);
++  assert.match(runItem.reason, /ok\.txt/);
++  assert.equal((await call("POST", `/api/tickets/${r.id}/approve`, alice)).status, 200);
++  assert.deepEqual(brief(await feed(alice, r.id)), [...expected, "status review>done"]);
++
++  // Reject.
++  const j = await mk(alice, "reject me");
++  await gate(alice, "test -f notes.txt");
++  await call("POST", `/api/tickets/${j.id}/runs`, alice);
++  await until("review", async () => (await call("GET", `/api/tickets/${j.id}`, alice)).body.status === "review");
++  assert.equal((await call("POST", `/api/tickets/${j.id}/reject`, alice, { note: "no" })).status, 200);
++  await until("feed", async () => (await feed(alice, j.id)).at(-1)?.to === "todo");
++  assert.deepEqual(brief(await feed(alice, j.id)), ["status todo>running", "run started #1", "run finished passed #1", "status running>review", "status review>todo"]);
++
++  // Cancel a running run.
++  const s = await mk(alice, "slow cancel");
++  const run = (await call("POST", `/api/tickets/${s.id}/runs`, alice)).body;
++  await until("run started", async () => (await feed(alice, s.id)).some((i) => i.event === "started"));
++  assert.equal((await call("POST", `/api/runs/${run.id}/cancel`, alice)).status, 200);
++  await until("todo", async () => (await call("GET", `/api/tickets/${s.id}`, alice)).body.status === "todo");
++  await until("feed", async () => (await feed(alice, s.id)).length >= 4);
++  assert.deepEqual(brief(await feed(alice, s.id)), ["status todo>running", "run started #1", "run finished cancelled #1", "status running>todo"]);
++});
++
++test("the planner path: an epic, its children and their auto-approved merges are all in the feeds", async () => {
++  await gate(alice, "test -f a.txt || test -f b.txt", { auto_approve_children: true });
++  const e = await mk(alice, "Plan two files", { spec: "PARALLEL", kind: "epic" });
++  assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, alice)).status, 201);
++  await until("epic review", async () => (await call("GET", `/api/tickets/${e.id}`, alice)).body.status === "review");
++  const kids = (await call("GET", `/api/tickets/${e.id}`, alice)).body.children as { id: string }[];
++  assert.equal(kids.length, 2);
++  for (const k of kids) {
++    const items = await feed(alice, k.id);
++    assert.deepEqual(statusOnly(items), ["status todo>running", "status running>review", "status review>done"]);
++    assert.deepEqual(brief(items.filter((i) => i.type === "run")), ["run started #1", "run finished passed #1"]);
++  }
++  const items = await feed(alice, e.id);
++  assert.deepEqual(statusOnly(items), ["status todo>running", "status running>review"]); // the planner's later rounds do not repeat running
++  const rounds = items.filter((i) => i.type === "run");
++  assert.ok(rounds.length >= 4 && rounds.every((i) => i.role === "planner"));
++  assert.equal(rounds.filter((i) => i.event === "started").length, rounds.filter((i) => i.event === "finished").length);
++  assert.equal((await call("POST", `/api/tickets/${e.id}/approve`, alice)).status, 200);
++  assert.deepEqual(statusOnly(await feed(alice, e.id)), ["status todo>running", "status running>review", "status review>done"]);
++});
++
++test("GET /api/activity: workspace-wide, newest first, since, limit and cursor pagination", async () => {
++  const dana = await workspace("dana");
++  await call("PUT", "/api/settings", dana, { repo_path: repo, setup_command: "", test_command: "true" });
++  const t = await mk(dana, "pager");
++  const u = await mk(dana, "pager two");
++  await call("PATCH", `/api/tickets/${t.id}`, dana, { status: "review" });
++  await comment(dana, t.id, "c1");
++  await call("PATCH", `/api/tickets/${u.id}`, dana, { status: "failed" });
++  await comment(dana, u.id, "c2");
++  await call("PATCH", `/api/tickets/${t.id}`, dana, { status: "done" });
++  await comment(dana, t.id, "c3");
++  await call("PATCH", `/api/tickets/${u.id}`, dana, { status: "todo" });
++
++  const page = async (qs: string, who = dana) => {
++    const r = await call("GET", `/api/activity${qs}`, who);
++    assert.equal(r.status, 200, `${qs}: ${JSON.stringify(r.body)}`);
++    return r.body as { items: any[]; next_cursor: string | null };
++  };
++  const all = await page("?limit=100");
++  assert.equal(all.next_cursor, null);
++  assert.deepEqual(brief(all.items), ["status failed>todo", "comment c3", "status review>done", "comment c2", "status todo>failed", "comment c1", "status todo>review"]); // newest first
++  assert.deepEqual(all.items.map((i) => i.ticket_key), ["DAN-2", "DAN-1", "DAN-1", "DAN-2", "DAN-2", "DAN-1", "DAN-1"]);
++  assert.ok(all.items.every((i) => typeof i.ticket_id === "string" && typeof i.at === "number"));
++  assert.equal((await page("")).items.length, 7); // the default limit is generous
++
++  // Walk it in pages of 3; an item that arrives meanwhile neither repeats nor shifts later pages.
++  const first = await page("?limit=3");
++  assert.equal(first.items.length, 3);
++  assert.equal(typeof first.next_cursor, "string");
++  await comment(dana, t.id, "arrives between pages");
++  const second = await page(`?limit=3&cursor=${encodeURIComponent(first.next_cursor!)}`);
++  const third = await page(`?limit=3&cursor=${encodeURIComponent(second.next_cursor!)}`);
++  assert.equal(third.next_cursor, null);
++  assert.deepEqual([...first.items, ...second.items, ...third.items].map((i) => i.id), all.items.map((i) => i.id));
++  assert.equal((await page("?limit=100")).items.length, 8);
++  assert.equal((await page("?limit=7")).next_cursor !== null, true);
++  assert.equal((await page("?limit=8")).next_cursor, null);
++
++  // since: only items recorded at or after it.
++  await sleep(20);
++  const since = new Date().toISOString();
++  await sleep(20);
++  await comment(dana, u.id, "after since");
++  await call("PATCH", `/api/tickets/${u.id}`, dana, { status: "done" });
++  const recent = await page(`?since=${encodeURIComponent(since)}`);
++  assert.deepEqual(brief(recent.items), ["status todo>done", "comment after since"]);
++  assert.equal((await page(`?since=${encodeURIComponent(new Date(Date.now() + 60_000).toISOString())}`)).items.length, 0);
++
++  for (const bad of ["?since=yesterday", "?limit=0", "?limit=101", "?limit=abc", "?limit=2.5", "?cursor=garbage-cursor"])
++    assert.equal((await call("GET", `/api/activity${bad}`, dana)).status, 400, bad);
++  // Isolation: the other workspaces never show up here, and this one never shows up there.
++  assert.equal((await page("?limit=100")).items.every((i) => i.ticket_key.startsWith("DAN-")), true);
++  assert.equal((await page("?limit=100", carol)).items.some((i) => i.ticket_key.startsWith("DAN-")), false);
++  assert.equal((await call("GET", "/api/activity", "")).status, 401);
++});
++
++test("GET /api/tickets/:id/activity/stream pushes new items live (and only that ticket's)", async () => {
++  const t = await mk(alice, "live");
++  const other = await mk(alice, "not watched");
++  await comment(alice, t.id, "old comment, before subscribing");
++  assert.equal((await request("GET", `/api/tickets/${t.id}/activity/stream`, carol)).status, 404);
++
++  const res = await request("GET", `/api/tickets/${t.id}/activity/stream`, bob);
++  assert.equal(res.status, 200);
++  assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
++  const reader = res.body!.getReader();
++  const decoder = new TextDecoder();
++  let buffer = "";
++  const seen: any[] = [];
++  let connected = false; // the server sends an initial SSE comment once it listens
++  const pump = (async () => {
++    for (;;) {
++      const { value, done } = await reader.read();
++      if (done) return;
++      connected = true;
++      buffer += decoder.decode(value, { stream: true });
++      for (let i = buffer.indexOf("\n\n"); i >= 0; i = buffer.indexOf("\n\n")) {
++        const data = buffer.slice(0, i).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
++        buffer = buffer.slice(i + 2);
++        if (data) seen.push(JSON.parse(data));
++      }
++    }
++  })().catch(() => {});
++  try {
++    await until("the stream to start", async () => connected);
++    const posted = await comment(alice, t.id, "posted after subscribing");
++    const item = await until("the comment on the stream", async () => seen.find((i) => i.type === "comment"));
++    assert.deepEqual([item.comment.id, item.comment.body, item.ticket_id], [posted.id, "posted after subscribing", t.id]);
++    await call("PATCH", `/api/tickets/${t.id}`, alice, { status: "review" });
++    const status = await until("the status change on the stream", async () => seen.find((i) => i.type === "status"));
++    assert.deepEqual([status.from, status.to], ["todo", "review"]);
++    await comment(alice, other.id, "elsewhere");
++    await call("PATCH", `/api/tickets/${other.id}`, alice, { status: "done" });
++    await sleep(300);
++    assert.deepEqual(brief(seen), ["comment posted after subscribing", "status todo>review"]); // no replay of old items, nothing from other tickets
++    const ids = (await feed(alice, t.id)).map((i) => i.id);
++    assert.deepEqual(seen.map((i) => i.id), ids.slice(-2)); // same items, same ids as the feed
++  } finally {
++    await reader.cancel().catch(() => {});
++    await pump;
++  }
++});
++
++test("human comments reach the agent: '# Comments' in the first message of the next worker run and planner round", async () => {
++  await gate(alice, "test -f notes.txt");
++  const t = await mk(alice, "needs context", { spec: "Write the notes." });
++  await comment(alice, t.id, "Please keep it short.");
++  await comment(bob, t.id, "Use the house style.");
++  const dropped = await comment(alice, t.id, "never mind this one");
++  await call("DELETE", `/api/tickets/${t.id}/comments/${dropped.id}`, alice);
++  const run = (await call("POST", `/api/tickets/${t.id}/runs`, alice)).body;
++  await until("review", async () => (await call("GET", `/api/tickets/${t.id}`, alice)).body.status === "review");
++  const first = task(run.id);
++  assert.match(first, /# Comments\n/);
++  assert.ok(first.indexOf("alice@x.dev: Please keep it short.") > first.indexOf("# Comments"));
++  assert.ok(first.indexOf("bob@x.dev: Use the house style.") > first.indexOf("alice@x.dev: Please keep it short.")); // oldest first
++  assert.equal(first.includes("never mind this one"), false); // deleted comments are not passed on
++  assert.ok(first.indexOf("# Comments") < first.indexOf("# Task"));
++  assert.ok(first.indexOf("Write the notes.") > first.indexOf("# Comments"));
++
++  // A reject, a new comment (and an edit), then the next run sees the current comments.
++  await call("POST", `/api/tickets/${t.id}/reject`, alice, { note: "try again" });
++  const late = await comment(bob, t.id, "Also add a trailing newline.");
++  await call("PATCH", `/api/tickets/${t.id}/comments/${late.id}`, bob, { body: "Also add a trailing newline, please." });
++  const again = (await call("POST", `/api/tickets/${t.id}/runs`, alice)).body;
++  await until("review again", async () => (await call("GET", `/api/tickets/${t.id}`, alice)).body.status === "review");
++  assert.match(task(again.id), /bob@x\.dev: Also add a trailing newline, please\./);
++  assert.match(task(again.id), /alice@x\.dev: Please keep it short\./);
++
++  // A ticket without comments gets no empty section.
++  const bare = await mk(alice, "no comments");
++  const bareRun = (await call("POST", `/api/tickets/${bare.id}/runs`, alice)).body;
++  await until("bare review", async () => (await call("GET", `/api/tickets/${bare.id}`, alice)).body.status === "review");
++  assert.equal(task(bareRun.id).includes("# Comments"), false);
++
++  // Planner rounds get them too.
++  await gate(alice, "test -f a.txt || test -f b.txt || test -f notes.txt"); // its children pass the gate and wait in review
++  const e = await mk(alice, "Epic with remarks", { kind: "epic", spec: "PARALLEL" });
++  await comment(alice, e.id, "Keep the plan to two tickets.");
++  const round = (await call("POST", `/api/tickets/${e.id}/runs`, alice)).body;
++  await until("round 1 finished", async () => (await call("GET", `/api/tickets/${e.id}`, alice)).body.runs[0]?.status === "passed");
++  assert.match(task(round.id), /# Comments\n\n- alice@x\.dev: Keep the plan to two tickets\./);
++});

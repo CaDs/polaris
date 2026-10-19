@@ -1,0 +1,184 @@
+diff --git a/test/ticket-webhooks.test.ts b/test/ticket-webhooks.test.ts
+new file mode 100644
+index 0000000..89fff05
+--- /dev/null
++++ b/test/ticket-webhooks.test.ts
+@@ -0,0 +1,178 @@
++import { test, after } from "node:test";
++import assert from "node:assert/strict";
++import { execFileSync } from "node:child_process";
++import { createServer } from "node:http";
++import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++// Ticket status webhooks: with the workspace setting webhook_url set, every change of a ticket's status POSTs JSON to it.
++process.env.HARNESS_PROVIDER = "fake"; // the demo worker writes notes.txt on attempt 1, the demo planner creates a.txt and b.txt children
++process.env.HARNESS_SANDBOX = "host";
++process.env.HARNESS_CONCURRENCY = "2";
++process.env.HARNESS_DATA_DIR = mkdtempSync(join(tmpdir(), "wh-data-"));
++const { app } = await import("../server/app.ts");
++
++const origin = "http://localhost:5173";
++async function call(method: string, path: string, cookie = "", body?: unknown) {
++  const res = await app.request(path, { method, headers: { cookie, origin, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
++  const set = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
++  return { status: res.status, body: (await res.json().catch(() => null)) as any, cookie: set || cookie };
++}
++const { cookie: signed } = await call("POST", "/api/auth/sign-up/email", "", { email: "wh@x.dev", password: "password-123", name: "wh" });
++const me = (await call("POST", "/api/auth/organization/create", signed, { name: "Wh", slug: "wh" })).cookie;
++
++const repo = realpathSync(mkdtempSync(join(tmpdir(), "wh-repo-")));
++writeFileSync(join(repo, "README.md"), "hi\n");
++execFileSync("sh", ["-c", "git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -q -m init"], { cwd: repo });
++const save = (webhook_url: unknown, extra: Record<string, unknown> = {}) =>
++  call("PUT", "/api/settings", me, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt || test -f a.txt || test -f b.txt", webhook_url, ...extra });
++
++// A local receiver. mode "hang" accepts the request and never answers.
++type Hook = { headers: Record<string, any>; method?: string; body: any };
++const hooks: Hook[] = [];
++let mode: "ok" | "hang" = "ok";
++const server = createServer((req, res) => {
++  let raw = "";
++  req.on("data", (d) => (raw += d));
++  req.on("end", () => {
++    hooks.push({ headers: req.headers, method: req.method, body: JSON.parse(raw) });
++    if (mode === "ok") res.end("ok");
++  });
++});
++await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
++const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/hook`;
++after(() => (server.closeAllConnections(), server.close()));
++
++const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
++const until = async <T>(what: string, fn: () => Promise<T | false | undefined> | T | false | undefined, ms = 60_000): Promise<T> => {
++  for (const end = Date.now() + ms; Date.now() < end; await sleep(50)) {
++    const v = await fn();
++    if (v) return v;
++  }
++  assert.fail(`timed out waiting for ${what}`);
++};
++// "previous>status" of the deliveries about one ticket, in arrival order.
++const changes = (id: string) => hooks.filter((h) => h.body.ticket.id === id).map((h) => `${h.body.ticket.previous_status}>${h.body.ticket.status}`);
++const sawAll = async (id: string, expected: string[]) => {
++  await until(`${expected.join(", ")} for ${id}`, () => changes(id).length >= expected.length, 15_000);
++  await sleep(300); // nothing extra may follow
++  assert.deepEqual(changes(id), expected);
++};
++const create = async (title: string, extra: Record<string, unknown> = {}) => (await call("POST", "/api/tickets", me, { title, ...extra })).body;
++const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, me)).body;
++const is = (id: string, status: string) => until(`${id} ${status}`, async () => (await get(id)).status === status && get(id));
++const deliveries = async () => (await call("GET", "/api/webhook-deliveries", me)).body as any[];
++
++test("webhook_url defaults to empty and must be an http(s) URL of at most 2000 chars", async () => {
++  assert.equal((await call("GET", "/api/settings", me)).body.webhook_url, "");
++  assert.equal((await save(url)).body.webhook_url, url);
++  assert.equal((await call("GET", "/api/settings", me)).body.webhook_url, url);
++  for (const bad of ["not a url", "ftp://example.com/x", "javascript:alert(1)", `http://example.com/${"x".repeat(2000)}`, 5]) {
++    const r = await save(bad);
++    assert.equal(r.status, 400, String(bad));
++    assert.match(r.body.error, /webhook_url/);
++  }
++  assert.equal((await call("GET", "/api/settings", me)).body.webhook_url, url); // rejected saves change nothing
++  assert.equal((await save("")).body.webhook_url, ""); // empty = off
++  assert.equal((await save("https://example.com/hooks/tickets?token=1")).status, 200);
++});
++
++test("a worker run, approve, reject and user edits each deliver exactly one POST per status change", async () => {
++  await save(url);
++  const t = await create("first ticket");
++  await call("PATCH", `/api/tickets/${t.id}`, me, { title: "renamed" }); // not a status change
++  await call("PATCH", `/api/tickets/${t.id}`, me, { status: "todo" }); // same status: not a change
++  assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, me)).status, 201);
++  await is(t.id, "review");
++  await sawAll(t.id, ["todo>running", "running>review"]); // creating the ticket, and the run's own bookkeeping, deliver nothing more
++
++  const h = hooks.find((x) => x.body.ticket.id === t.id)!;
++  assert.equal(h.method, "POST");
++  assert.match(String(h.headers["content-type"]), /application\/json/);
++  assert.equal(h.body.event, "ticket.status");
++  assert.deepEqual(Object.keys(h.body.ticket).sort(), ["id", "key", "previous_status", "status", "title"]);
++  assert.deepEqual([h.body.ticket.key, h.body.ticket.title], [t.key, "renamed"]);
++  assert.ok(Number.isFinite(Date.parse(h.body.at)), "at is an ISO-8601 timestamp");
++
++  assert.equal((await call("POST", `/api/tickets/${t.id}/approve`, me)).status, 200);
++  await sawAll(t.id, ["todo>running", "running>review", "review>done"]);
++
++  const r = await create("to be rejected");
++  await call("POST", `/api/tickets/${r.id}/runs`, me);
++  await is(r.id, "review");
++  assert.equal((await call("POST", `/api/tickets/${r.id}/reject`, me, { note: "no" })).status, 200);
++  await sawAll(r.id, ["todo>running", "running>review", "review>todo"]);
++
++  const u = await create("edited by a user");
++  assert.equal((await call("PATCH", `/api/tickets/${u.id}`, me, { status: "review" })).status, 200);
++  assert.equal((await call("PATCH", `/api/tickets/${u.id}`, me, { status: "review", title: "again" })).status, 200); // no change
++  assert.equal((await call("PATCH", `/api/tickets/${u.id}`, me, { status: "done" })).status, 200);
++  await sawAll(u.id, ["todo>review", "review>done"]);
++
++  const mine = (await deliveries()).filter((d) => d.ticket_id === u.id);
++  assert.equal(mine.length, 2);
++  assert.deepEqual([mine[0].ok, mine[0].status_code, mine[0].url, mine[0].error], [true, 200, url, null]);
++  assert.ok(mine[0].created_at >= mine[1].created_at, "newest first");
++});
++
++test("cancelling a running run delivers running>todo", async () => {
++  const c = await create("slow cancel");
++  const run = (await call("POST", `/api/tickets/${c.id}/runs`, me)).body;
++  await until("the run to start", async () => (await call("GET", `/api/runs/${run.id}`, me)).body.status === "running");
++  assert.equal((await call("POST", `/api/runs/${run.id}/cancel`, me)).status, 200);
++  await is(c.id, "todo");
++  await sawAll(c.id, ["todo>running", "running>todo"]);
++});
++
++test("an epic and its children (planner path, auto-approved merges) deliver their whole lifecycle once each", async () => {
++  await save(url, { auto_approve_children: true });
++  const e = await create("Plan two files", { spec: "PARALLEL", kind: "epic" });
++  assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, me)).status, 201);
++  await is(e.id, "review");
++  const kids = (await get(e.id)).children as { id: string; status: string }[];
++  assert.equal(kids.length, 2);
++  for (const k of kids) {
++    assert.equal(k.status, "done");
++    await sawAll(k.id, ["todo>running", "running>review", "review>done"]);
++  }
++  await sawAll(e.id, ["todo>running", "running>review"]); // planner rounds in between keep it running: no repeated running>running
++  assert.equal((await call("POST", `/api/tickets/${e.id}/approve`, me)).status, 200);
++  await sawAll(e.id, ["todo>running", "running>review", "review>done"]);
++});
++
++test("a dead URL never breaks a status change and is recorded; a hanging one does not delay it", async () => {
++  await save("http://127.0.0.1:1/nothing-listens-here");
++  const a = await create("dead url");
++  const r = await call("PATCH", `/api/tickets/${a.id}`, me, { status: "failed" });
++  assert.equal(r.status, 200);
++  assert.equal(r.body.status, "failed");
++  const row = await until("a failed delivery row", async () => (await deliveries()).find((d) => d.ticket_id === a.id));
++  assert.equal(row.ok, false);
++  assert.equal(row.status_code, null);
++  assert.equal(typeof row.error, "string");
++  assert.ok(row.error.length > 0);
++
++  await call("POST", `/api/tickets/${a.id}/runs`, me); // the whole run pipeline also works with a dead URL
++  await is(a.id, "review");
++
++  mode = "hang";
++  await save(url);
++  const b = await create("hanging url");
++  const t0 = Date.now();
++  const p = await call("PATCH", `/api/tickets/${b.id}`, me, { status: "done" });
++  assert.equal(p.status, 200);
++  assert.equal(p.body.status, "done");
++  assert.ok(Date.now() - t0 < 4500, "the request must not wait for the webhook");
++  await until("the hanging request to arrive", () => changes(b.id).length === 1);
++  mode = "ok";
++});
++
++test("an empty webhook_url turns delivery off", async () => {
++  await save("");
++  const before = hooks.length;
++  const t = await create("quiet");
++  await call("PATCH", `/api/tickets/${t.id}`, me, { status: "done" });
++  await sleep(500);
++  assert.equal(hooks.length, before);
++});

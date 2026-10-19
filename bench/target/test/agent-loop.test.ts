@@ -1,0 +1,106 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import "../server/auth.ts";
+import { db, migrate } from "../server/db.ts";
+import { createRun, eventLog, subscribe } from "../server/agent/events.ts";
+import { runAgent, type RunOptions } from "../server/agent/loop.ts";
+import { fakeProvider, type Turn } from "../server/agent/providers/fake.ts";
+import { tools } from "../server/agent/tools.ts";
+import type { ToolUseBlock } from "../server/agent/types.ts";
+
+migrate();
+db.prepare("INSERT INTO organization (id, name, slug, createdAt) VALUES ('w', 'w', 'w', '2026-01-01')").run();
+db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES ('t', 'w', 'test')").run();
+
+const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
+
+function run(script: Turn[], opts: Partial<RunOptions> = {}) {
+  const root = mkdtempSync(join(tmpdir(), "loop-"));
+  const runId = createRun({ ticketId: "t", model: "fake", worktree: root });
+  const live: number[] = [];
+  const unsubscribe = subscribe(runId, (e) => live.push(e.seq));
+  const fake = fakeProvider(script, { input: 100, output: 20, cache_read: 7, cache_write: 3 });
+  const done = runAgent({
+    provider: fake.provider, model: "fake", system: "sys", task: "do it", tools, root,
+    budget: { maxTurns: 10, maxTokens: 1e6 }, onEvent: eventLog(runId), ...opts,
+  }).finally(unsubscribe);
+  return { root, runId, fake, done, live };
+}
+
+const events = (runId: string) =>
+  db.prepare("SELECT seq, type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { seq: number; type: string; payload: string }[];
+const runRow = (runId: string) => db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Record<string, any>;
+
+test("fake provider drives the loop to create and edit a file, run a shell command and finish", async () => {
+  const { root, runId, fake, done, live } = run([
+    [{ type: "text", text: "creating" }, use("1", "edit_file", { path: "a.txt", old_string: "", new_string: "hello\n" })],
+    [use("2", "edit_file", { path: "a.txt", old_string: "hello", new_string: "hello world" }), use("3", "shell", { command: "cat a.txt" })],
+    [{ type: "text", text: "done" }],
+  ]);
+  const r = await done;
+
+  assert.equal(r.status, "passed");
+  assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "hello world\n");
+  // The third request carried both tool results in one user message.
+  const last = fake.requests[2].messages.at(-1)!;
+  assert.equal(last.role, "user");
+  assert.deepEqual(last.content.map((b) => b.type), ["tool_result", "tool_result"]);
+  assert.match(JSON.stringify(last.content[1]), /hello world/);
+
+  const ev = events(runId);
+  assert.deepEqual(ev.map((e) => e.seq), ev.map((_, i) => i + 1));
+  assert.deepEqual(live, ev.map((e) => e.seq));
+  assert.deepEqual(ev.map((e) => e.type), [
+    "run_started",
+    "assistant_message", "usage", "tool_call", "tool_result",
+    "assistant_message", "usage", "tool_call", "tool_result", "tool_call", "tool_result",
+    "assistant_message", "usage",
+    "run_finished",
+  ]);
+  assert.equal(JSON.parse(ev.at(-1)!.payload).status, "passed");
+
+  const row = runRow(runId);
+  assert.equal(row.status, "passed");
+  assert.ok(row.started_at && row.ended_at);
+  assert.deepEqual([row.tokens_in, row.tokens_out, row.tokens_cached], [3 * 103, 3 * 20, 3 * 7]);
+});
+
+test("turn and token budgets stop the run", async () => {
+  const forever = Array(20).fill([use("x", "shell", { command: "true" })]);
+  const turns = await run(forever, { budget: { maxTurns: 2, maxTokens: 1e6 } }).done;
+  assert.equal(turns.status, "failed");
+  assert.match(turns.reason!, /turn budget/);
+  assert.equal(turns.turns, 2);
+
+  const t = run(forever, { budget: { maxTurns: 20, maxTokens: 300 } });
+  const tokens = await t.done;
+  assert.equal(tokens.status, "failed");
+  assert.match(tokens.reason!, /token budget/);
+  assert.equal(tokens.turns, 3); // 123 tokens per turn
+  assert.equal(runRow(t.runId).status, "failed");
+});
+
+test("abort signal cancels a running tool and the run", async () => {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 200);
+  const t0 = Date.now();
+  const t = run([[use("s", "shell", { command: "sleep 30" })], [{ type: "text", text: "never" }]], { signal: ac.signal });
+  const r = await t.done;
+  assert.equal(r.status, "cancelled");
+  assert.ok(Date.now() - t0 < 5000);
+  assert.equal(t.fake.requests.length, 1);
+  const result = events(t.runId).find((e) => e.type === "tool_result")!;
+  assert.equal(JSON.parse(result.payload).error_kind, "UserAborted");
+  assert.equal(runRow(t.runId).status, "cancelled");
+});
+
+test("unexpected errors fail the run and are classified Unknown", async () => {
+  const t = run([]);
+  const r = await t.done;
+  assert.equal(r.status, "failed");
+  const err = events(t.runId).find((e) => e.type === "error")!;
+  assert.equal(JSON.parse(err.payload).kind, "Unknown");
+});
