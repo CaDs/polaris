@@ -117,8 +117,10 @@
 - [ ] Invite members and switch workspaces in the UI
 - [ ] Benchmark in the repo: the complexity ladder (tickets, locked tests, answer keys, runner) with 3 runs per level and a held-out set
 - [ ] Measure automatic splitting on levels a real model fails at the fair budget
-- [ ] Failure mining: per-run metrics (tool errors, repeated reads, budget use), failure classes, draft improvement tickets
-- [ ] Stuck monitor: a decision model checks every few turns whether the agent is stuck; nudge, then end the attempt
+- [x] Failure mining: per-run metrics (tool errors, repeated reads, budget use): `run_metrics`, `GET /api/metrics`
+- [ ] Failure mining: failure classes, draft improvement tickets
+- [x] Stuck monitor: repeated call/error and no-progress heuristics; nudge, then end the attempt (retried fresh)
+- [ ] Stuck monitor: a decision model checks every few turns whether the agent is stuck
 - [ ] Separate reviewer model per workspace
 - [ ] Spending caps per epic and per workspace
 - [ ] Sandbox containers run as a non-root user
