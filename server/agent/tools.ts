@@ -9,7 +9,7 @@ export type ExecResult = { stdout: string; stderr: string; code: number | null; 
 export type Exec = (command: string, opts: { cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<ExecResult>;
 // protectedPaths: repo-relative dirs/files edit_file must not write (tests/, evals/). The sandbox also mounts them read-only.
 // turn/callId/tool name the spill file of a long result (see spill below). reads: read_file outputs of the current conversation (loop.ts).
-export type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
+type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
 export type Tool = { def: ToolDef; run: (input: Record<string, unknown>, ctx: ToolContext) => Promise<string> };
 
 const MAX_OUTPUT = 30_000; // read_file only: shell/search output over SPILL_AT goes to a file instead

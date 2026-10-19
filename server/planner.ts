@@ -43,7 +43,7 @@ export function handoffText(reply: string, failure?: string) {
 
 // --- children ---
 
-export type Child = {
+type Child = {
   id: string; key: string; title: string; kind: string; status: string; depends_on: string; handoff: string | null; settled_at: number | null;
   test_command: string | null; escalated_to: string | null; run_count: number; run_status: string | null; attempt: number | null; model: string | null; tokens: number;
 };
@@ -65,7 +65,7 @@ type Sibling = { id: string; key: string; status: string; depends_on: string; ru
 // What each sibling is doing, as the planner and the epic view show it. Open children keep the epic from completing.
 // A todo child whose dependency failed, was deleted or is itself blocked is blocked: it never starts on its own, so it is not open.
 // A child replaced by a "Split:" epic (M9) is not open either; its dependents were moved to that epic.
-export function childStates(kids: Sibling[]) {
+function childStates(kids: Sibling[]) {
   const byId = new Map(kids.map((k) => [k.id, k]));
   const out = new Map<string, State>();
   const state = (k: Sibling): State => {
@@ -108,7 +108,7 @@ export function withStates<T extends Sibling & { parent_id: string | null }>(row
 
 // The children section of a round's first message and the list_children result. since: when the previous round started;
 // children that settled after it are marked new.
-export function childrenText(epicId: string, since: number) {
+function childrenText(epicId: string, since: number) {
   const kids = childrenOf(epicId);
   if (!kids.length) return "(none yet)";
   const states = childStates(kids);

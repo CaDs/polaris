@@ -19,7 +19,7 @@ export const LESSONS_MAX = 8000; // chars, ≈ 2,000 tokens
 export const PROMPT_MAX = 20_000;
 const SEED = readFileSync(new URL("./agent/prompts/worker.md", import.meta.url), "utf8");
 
-export type Lessons = { id: string; workspace_id: string; version: number; body: string; source: string; run_id: string | null; author: string | null; restored_from: number | null; created_at: number };
+type Lessons = { id: string; workspace_id: string; version: number; body: string; source: string; run_id: string | null; author: string | null; restored_from: number | null; created_at: number };
 export type Prompt = { id: string; workspace_id: string; version: number; body: string; active: number; source: string; author: string | null; rationale: string | null; created_at: number };
 type Final = { status: string; reason?: string; turns: number };
 
@@ -73,7 +73,7 @@ const ticketOf = (runId: string) =>
 
 // One run from its event log: outcome, counts, tool errors (name + class + first line), setup/gate failures with output tails.
 // final: the outcome when run_finished is not logged yet (reflection runs just before it).
-export function runDigest(runId: string, final?: Final) {
+function runDigest(runId: string, final?: Final) {
   const r = db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Record<string, any>;
   const ev = (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
   const fin: Final = final ?? ev.find((e) => e.type === "run_finished")?.p ?? { status: r.status, turns: 0 };
@@ -119,7 +119,7 @@ Reply with the full updated lessons document and nothing else. Rules:
 - Stay under ${LESSONS_MAX} characters (about 2,000 tokens): drop the least useful bullets to fit.
 - If nothing new was learned, return the current document unchanged.`;
 
-export const PROPOSE_SYSTEM = `You improve the system prompt of a coding agent that works tickets in a git repository inside a sandbox, gated by the repository's tests. You get its current system prompt, the lessons learned so far, and digests of recent failed runs (including eval runs).
+const PROPOSE_SYSTEM = `You improve the system prompt of a coding agent that works tickets in a git repository inside a sandbox, gated by the repository's tests. You get its current system prompt, the lessons learned so far, and digests of recent failed runs (including eval runs).
 
 Write a revised full system prompt that would avoid such failures in general, not just for these tickets. Keep what works, keep it concise, and keep repository-specific facts out (those belong in the lessons). Never include secrets. Stay under ${PROMPT_MAX} characters.
 
@@ -133,7 +133,7 @@ const SECRET = /\b(sk-[\w-]{16,}|ghp_\w{20,}|github_pat_\w{20,}|xox[abp]-[\w-]{1
 const scrub = (s: string) => s.replace(SECRET, "[redacted]"); // ponytail: common key shapes only; the prompt forbids the rest
 
 // Over the cap: cut at the last line break before it.
-export function capLessons(s: string) {
+function capLessons(s: string) {
   s = s.trim();
   if (s.length <= LESSONS_MAX) return s;
   const cut = s.slice(0, LESSONS_MAX);
@@ -195,7 +195,7 @@ export type EvalCase = {
   id: string; workspace_id: string; ticket_id: string; title: string; spec: string; repo_path: string; base_sha: string;
   setup_command: string; test_command: string; protected_paths: string; image: string; created_at: number;
 };
-export type EvalRun = {
+type EvalRun = {
   id: string; workspace_id: string; prompt_id: string; prompt_version: number; lessons_version: number | null; case_ids: string; model: string;
   status: "running" | "done"; passed: number | null; total: number | null; mean_tokens: number | null; started_at: number; ended_at: number | null;
 };

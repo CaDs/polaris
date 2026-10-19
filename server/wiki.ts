@@ -17,8 +17,8 @@ import { today } from "./tracker.ts";
 const execFileP = promisify(execFile);
 export const WIKI_PROMPT = readFileSync(new URL("./agent/prompts/wiki.md", import.meta.url), "utf8");
 const SCHEMA = readFileSync(new URL("./agent/prompts/wiki-schema.md", import.meta.url), "utf8");
-export const INDEX_MAX = 6000; // chars
-export const PAGE_MAX = 3500;
+const INDEX_MAX = 6000; // chars
+const PAGE_MAX = 3500;
 const SPECIAL = ["SCHEMA.md", "index.md", "log.md"]; // every other .md is a content page
 const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+)\.md$/; // root .md files, modules/*.md, howto/*.md
 const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
@@ -64,7 +64,7 @@ export const headOf = (s: { repo_path: string; base_branch: string }) => git(s.r
 
 // --- pages ---
 
-export type Meta = { title: string; sources: string[]; verified: string; updated: string };
+type Meta = { title: string; sources: string[]; verified: string; updated: string };
 
 // Frontmatter of a content page, or why it is invalid. `sources: [a, b]` is a flow list; verified is a commit sha (hex), so
 // it can never be read as a git option.
@@ -133,7 +133,7 @@ const safe = (dir: string, path: string) => {
   return resolveIn(dir, path);
 };
 
-export type PageInfo = { path: string; title: string; summary: string; line: string; sources: string[]; verified: string; updated: string; stale: string | null };
+type PageInfo = { path: string; title: string; summary: string; line: string; sources: string[]; verified: string; updated: string; stale: string | null };
 
 // Why the page's `verified` or `sources` don't name what is in the project repo (a missing source never shows up in a diff),
 // or null.
@@ -301,7 +301,7 @@ export function editPage(ws: string, path: string, body: string, email: string, 
 
 // --- maintainer tasks (the first user message of a wiki run) ---
 
-export const MAX_DIFF = 15_000;
+const MAX_DIFF = 15_000;
 
 export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
   repo: string; sha: string; index: string;

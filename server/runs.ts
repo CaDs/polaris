@@ -28,7 +28,7 @@ const PRICES: Record<string, { input: number; output: number; cache_read: number
 };
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
-export const controllers = new Map<string, AbortController>();
+const controllers = new Map<string, AbortController>();
 
 const TICKET_STATUS: Record<RunStatus, string> = { passed: "review", failed: "failed", cancelled: "todo" };
 const MAX_ATTEMPTS = 3; // gate failures retry automatically, with the failure fed back, up to this attempt
@@ -42,7 +42,7 @@ const GATE_FIX_ROUNDS = 1;
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
 
-export type Settings = {
+type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
@@ -1010,7 +1010,7 @@ export async function moveTicket(id: string, to: string) {
   if (status(t.parent_id) === "running" && (JSON.parse(t.depends_on) as string[]).every((d) => status(d) === "done")) await startChild(id);
 }
 
-export type StartOptions = {
+type StartOptions = {
   root: string;
   model?: string;
   baseUrl?: string;

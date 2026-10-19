@@ -7,7 +7,7 @@ import { httpError, retryable, withRetry } from "./retry.ts";
 // dropping them costs a lot of quality.
 type Item = Record<string, any>;
 
-export function toInput(messages: Msg[]): Item[] {
+function toInput(messages: Msg[]): Item[] {
   const input: Item[] = [];
   for (const m of messages) {
     let text: string[] = [];

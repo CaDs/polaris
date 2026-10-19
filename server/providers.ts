@@ -7,7 +7,7 @@ import { chatgptBase, logins, refreshTokens, startLogin, type Tokens } from "./o
 import { decrypt, encrypt, SecretKeyError } from "./secrets.ts";
 import { AgentError, type Provider } from "./agent/types.ts";
 
-export type ProviderRow = {
+type ProviderRow = {
   id: string; workspace_id: string; name: string; kind: "anthropic" | "openai" | "ollama"; auth_type: "api_key" | "oauth" | "none";
   encrypted_secret: string | null; base_url: string | null; context_window: number; created_at: number;
 };

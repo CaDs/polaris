@@ -3,9 +3,9 @@
 export type TextBlock = { type: "text"; text: string };
 // invalid_input: the raw argument text when the provider sent JSON that did not parse (truncated); input is {} then.
 export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: Record<string, unknown>; invalid_input?: string };
-export type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 // Provider-owned data (e.g. Anthropic thinking blocks with signatures). Sent back to that provider verbatim.
-export type ReasoningBlock = { type: "reasoning"; provider: string; data: unknown };
+type ReasoningBlock = { type: "reasoning"; provider: string; data: unknown };
 export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
 
 export type Msg = { role: "user" | "assistant"; content: Block[] };

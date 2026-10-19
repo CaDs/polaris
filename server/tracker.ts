@@ -11,10 +11,10 @@ import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 type Env = { Variables: { userId: string; workspaceId: string } };
 export const trackerRoutes = new Hono<Env>();
 
-export const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink"];
-export const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
+const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink"];
+const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
 export const ESTIMATES = [1, 2, 3, 5, 8];
-export const SORTS = ["manual", "priority", "updated", "created", "due"];
+const SORTS = ["manual", "priority", "updated", "created", "due"];
 export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
 export const KINDS = ["task", "epic"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
@@ -386,7 +386,7 @@ trackerRoutes.delete("/milestones/:id", (c) => {
 
 type Cycle = { id: string; workspace_id: string; number: number; name: string; starts_at: string; ends_at: string };
 const stateOf = (y: Cycle, now = today()) => (y.starts_at > now ? "upcoming" : y.ends_at < now ? "past" : "current");
-export const currentCycle = (ws: string) =>
+const currentCycle = (ws: string) =>
   db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND starts_at <= ? AND ends_at >= ?").get(ws, today(), today()) as Cycle | undefined;
 
 // A cycle with its state, progress, and scope change: tickets that entered it after it started.

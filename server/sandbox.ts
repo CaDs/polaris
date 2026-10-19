@@ -35,7 +35,7 @@ export function ensureImage(image: string) {
 
 // Killing the local `docker exec` client does not stop the command inside the container. So the command runs under
 // `setsid` (new process group) and records the group leader's pid; timeout/abort kills that whole group in there.
-export function dockerExec(name: string): Exec {
+function dockerExec(name: string): Exec {
   return (command, { timeoutMs, signal }) => {
     const pidFile = `/tmp/.polaris-exec-${randomUUID()}`;
     const wrapped = `echo $$ > ${pidFile}; exec sh -c "$1"`;
@@ -69,7 +69,7 @@ export async function openSandbox(runId: string, worktree: string, protectedPath
   return { name, exec: dockerExec(name), close: () => removeContainer(name) };
 }
 
-export const removeContainer = (name: string) => execFileP("docker", ["rm", "-f", name]).then(() => {}, () => {});
+const removeContainer = (name: string) => execFileP("docker", ["rm", "-f", name]).then(() => {}, () => {});
 
 // Startup: containers left by a dead process of this harness (same data dir). Other instances' containers are untouched.
 export async function removeStaleContainers() {
