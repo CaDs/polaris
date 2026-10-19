@@ -195,7 +195,6 @@ an Apple M4 Max:
   - drag and drop ordering.
 - **Hardening:**
   - containers run as root;
-  - a planner round that crashes does not restart by itself;
   - no spending caps per epic or workspace;
   - the Anthropic and OpenAI APIs and the ChatGPT sign-in are tested only against mocks, not with real keys.
 - **Not in scope yet:** multi-user deployment, hosting, backups.

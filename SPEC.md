@@ -162,29 +162,33 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
   `create_ticket {title, spec, depends_on?: [sibling keys], kind?: task|epic, test_command?}`, `list_children {}`, `finish_round {notes}`
   and `complete_epic {summary}` (M9: gated by the epic gate). System prompt: `prompts/planner.md`, a file, not versioned like the worker prompt: there is
   no eval that could score planning, so the M6 promotion loop would have nothing to gate on. Planner runs go through the
-  same FIFO queue; no test gate, commit, review, retry or reflection; the checkout is always removed. *Workers* are normal
+  same FIFO queue; no test gate, commit, review or reflection (a failed round is retried once, see Ending); the checkout is always removed. *Workers* are normal
   ticket runs; a child's first user message names its epic and asks for a final `## Handoff` section (results, concerns,
   findings).
 - **Rounds = the feedback loop.** Round 1 plans, creates children, `finish_round`. The epic stays `running` ("waiting for
-  children"). Whenever a child **settles** (done = merged, failed after its retries, or rejected, which counts as failed
-  and appends the note to its handoff) and no round is queued or running, the next round starts as a **new run** (fresh
-  conversation; conversations stay append-only). Its first message: environment (checkout commit, test gate, limits),
+  children"). When a child **settles** (done = merged, failed after its retries, or rejected, which counts as failed
+  and appends the note to its handoff) and the planner has something to act on, i.e. a child failed or no child is open
+  any more (or a child was deleted), and no round is queued or running, the next round starts as a **new run** (fresh
+  conversation; conversations stay append-only). A child that is done while siblings are still open starts no round:
+  the harness queues its dependents and the next round reads its handoff, so rounds grow with failures, not children. Its first message: environment (checkout commit, test gate, limits),
   skills, lessons, a reviewer's note if the epic was sent back, the epic, the notes of every earlier round, and every child
   with status, latest run, dependencies and handoff, those settled since the previous round started marked new. Rounds
   never overlap: children settling while a round is queued are seen by it; children settling while it runs start the next
   round as soon as it ends, so one round handles all of them (`tickets.settled_at` vs the round's start).
   `finish_round`/`complete_epic` end the run at once (loop `finished` check, no extra turn).
 - **Ending.** `complete_epic` is refused (tool error listing them) while a child is open: queued, running, in review,
-  waiting on dependencies, or stopped by a cancel. A child whose dependency failed or is blocked is *blocked*, not open:
+  waiting on dependencies, or stopped by a cancel. A child whose dependency failed, was deleted or is blocked is *blocked*, not open:
   it never starts on its own; the planner replaces it or leaves it out. Completed → epic `review` with the summary
   (`tickets.handoff`) → **Approve** marks it `done` (nothing to merge: children were merged one by one); **Reject** sends it
   back to `todo`, and the note goes to the next round (Run planner). An epic `failed`s with its reason in `handoff` when a
-  round fails (provider error, budget), the round limit is reached, or a round ends without `complete_epic` while nothing
+  round fails twice in a row (provider error, budget, crash: a failed round is retried once by a fresh round, after an
+  `error` event saying so), the round limit is reached, or a round ends without `complete_epic` while nothing
   is open (nothing would ever wake it). `finish_round` with nothing open is refused for the same reason.
 - **Scheduling.** A child is queued when created, unless a `depends_on` ticket is not `done`; it is queued when its last
   dependency becomes done. Children branch from the base branch when they start, so they see merged dependencies.
   Dependents of a failed child are not started. A child that cannot be queued fails with the reason (the planner hears of
-  it). Children inherit the epic's provider/model choice.
+  it). Children inherit the epic's provider/model choice and its own `test_command`. While the epic is running, a todo
+  child without runs whose dependencies are done is always queued (a task moved in by hand at once, else when a round starts). `create_ticket` after `finish_round`/`complete_epic` in the same turn is refused.
 - **Limits.** ≤ 12 children per epic (`MAX_CHILDREN`), ≤ 8 rounds (`MAX_ROUNDS`, `server/planner.ts`); epics nest to depth
   2: a root epic's planner may create sub-epics, whose planners cannot. A sub-epic is a child like any other: its summary
   is its handoff, its approval settles it.
@@ -199,7 +203,8 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
   (the test gate and the human reviewer do); re-planning of children already running.
 - **API.** `POST /api/tickets {kind}`; `GET /api/tickets/:id` of an epic adds `children` (every descendant with its state
   label and dependency keys); `POST /api/tickets/:id/runs` on an epic queues its next round; approve/reject as for tasks;
-  deleting an epic deletes its children (refused while any of their runs is active); `auto_approve_children` in
+  deleting an epic deletes its children (refused while any of their runs is active or one is an eval case); deleting a
+  child wakes its planner (its dependents are blocked: "dependency deleted"); `auto_approve_children` in
   `/api/settings`. Events: `handoff {text}` on a child's last run, `round_finished {round, notes, completed}` on a round.
 
 ## Orchestration: the test gate
@@ -252,7 +257,7 @@ Local models (27–35B) finish small tickets and fail large ones, so the harness
 whose planner splits it into tickets of a size the worker model can finish. Migration 010.
 
 - **Per-child test command.** `create_ticket` takes an optional `test_command` (validated like the API: a string of ≤ 2,000
-  chars, `""` = none) stored as the child's `tickets.test_command`, which replaces the workspace command in its gate. The
+  chars, `""` = none) stored as the child's `tickets.test_command` (default: the epic's own, if it has one), which replaces the workspace command in its gate. The
   planner gives one to a child whose part can't pass the full suite until later children land (a single test file, a
   `--test-name-pattern`, `npx tsc --noEmit`). The children list shows each child's command.
 - **Epic gate.** `complete_epic` (after the open-children check) runs the epic's test command (its own `test_command`,
@@ -379,7 +384,7 @@ is a 400 in a body and matches nothing in a filter).
 - **Parent epic by hand** (`parent_id`): only a todo task without runs moves (the planner owns everything else), into an
   epic that is todo or running and has fewer than `MAX_CHILDREN` children; never out of an epic when a sibling depends on
   it, or when it is the last open child of a running epic (its planner would wait forever). Moving clears `depends_on`
-  (sibling ids).
+  (sibling ids); a task moved into a running epic is queued at once (into a todo epic: when its next round starts).
 - **Filters** on `GET /api/tickets` (AND across fields, OR within one, comma-separated): `status`, `label` + `label_mode`
   any|all, `priority`, `assignee` (ids, `me`, `none`), `project`, `milestone`, `cycle` (ids, `current`, `none`), `kind`,
   `parent` (id, `none`), `due_before` / `due_after` (inclusive). Unknown params are ignored (the UI keeps `layout` and

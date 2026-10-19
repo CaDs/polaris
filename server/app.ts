@@ -7,8 +7,8 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval } from "./runs.ts";
-import { withStates } from "./planner.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, reject, reviewRun, settingsFor, startEval, startReady, wake } from "./runs.ts";
+import { OWN_RUNS, withStates } from "./planner.ts";
 import { SANDBOX_IMAGE } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
 import { applyTracker, hydrate, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
@@ -41,7 +41,7 @@ const STATUSES = ["todo", "running", "review", "done", "failed"];
 
 // Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
-const OWN = "ticket_id = t.id AND eval_run_id IS NULL AND role <> 'wiki'"; // wiki runs (M10) are listed in the ticket but never change its state or totals
+const OWN = `ticket_id = t.id AND ${OWN_RUNS}`; // wiki runs (M10) are listed in the ticket but never change its state or totals
 const TICKETS = `
   SELECT t.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
     (SELECT status FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_status,
@@ -158,6 +158,7 @@ app.patch("/api/tickets/:id", async (c) => {
     v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
   );
   applyTracker(t.id, v.tracker);
+  if (v.tracker.parent_id) await startReady(v.tracker.parent_id); // moved into a running epic: queued like a planner's ticket
   return c.json(ticketIn(c));
 });
 
@@ -168,9 +169,11 @@ app.delete("/api/tickets/:id", async (c) => {
   const ids = (db.prepare(`${TREE} SELECT id FROM d`).all(t.id) as { id: string }[]).map((r) => r.id);
   const active = db.prepare("SELECT 1 FROM runs WHERE status IN ('queued', 'running') AND ticket_id IN (SELECT value FROM json_each(?))").get(JSON.stringify(ids));
   if (active) return c.json({ error: ids.length > 1 ? "cancel the running runs of this epic and its children first" : "cancel the running run first" }, 409);
-  if (t.eval_case_id) return c.json({ error: "This ticket is an eval case. Remove it from the evals (Improvement page) first." }, 409);
+  if (db.prepare("SELECT 1 FROM eval_cases WHERE ticket_id IN (SELECT value FROM json_each(?))").get(JSON.stringify(ids)))
+    return c.json({ error: `${ids.length > 1 ? "This epic or one of its children" : "This ticket"} is an eval case. Remove it from the evals (Improvement page) first.` }, 409);
   for (const id of ids) await cleanupTicket(id, c.get("workspaceId"));
   db.prepare("DELETE FROM tickets WHERE id = ?").run(t.id);
+  if (t.parent_id) wake(t.parent_id, true); // its planner replans (its dependents are blocked now) or completes
   return c.body(null, 204);
 });
 

@@ -110,6 +110,6 @@
 - [ ] Separate reviewer model per workspace
 - [ ] Spending caps per epic and per workspace
 - [ ] Sandbox containers run as a non-root user
-- [ ] A planner round that crashes is restarted
+- [x] A planner round that crashes is restarted (once, by a fresh round; a second failure in a row fails the epic)
 - [ ] Ticket comments and notifications
 - [ ] Candidate-harness pipeline: benchmark a proposed harness change against the stable one; human promotion with rollback
