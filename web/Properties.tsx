@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Popover } from "./Filters.tsx";
-import { Alert, COLUMNS, DateField, api, type Status, type Ticket } from "./ui.tsx";
+import { Alert, DateField, api, type Status, type Ticket } from "./ui.tsx";
 import { COLORS, cycleName, ESTIMATES, LabelChip, PRIORITIES, PRIORITY_ORDER, useTracker } from "./tracker.tsx";
+
+const MANUAL: string[] = ["todo", "done", "failed"];
 
 // The ticket's properties sidebar. Native selects keep it keyboard-friendly; on the ticket page s / p / a open status,
 // priority and assignee, l the label picker. The agent run controls stay in TicketView.
@@ -41,6 +43,10 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
   }
 
   const t = tracker;
+  // The moves the server allows by hand (moveTicket in runs.ts): between todo, done and failed, and review back to todo; none
+  // while a run is queued or running. Running and review otherwise belong to Run, Cancel, Approve and Reject.
+  const active = ticket.run_status === "queued" || ticket.run_status === "running";
+  const moves = active ? [] : ticket.status === "review" ? ["todo"] : MANUAL.includes(ticket.status) ? MANUAL.filter((s) => s !== ticket.status) : [];
   const milestones = t?.projects.find((p) => p.id === ticket.project?.id)?.milestones ?? [];
   // Moving between epics by hand: only a todo task without runs (the server enforces the rest of the planner's rules).
   const movable = ticket.kind === "task" && ticket.status === "todo" && !ticket.run_count;
@@ -55,8 +61,9 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
   return (
     <aside className="props-panel" aria-label="Properties">
       {prop("Status", (
-        <select ref={status} aria-label="Status" value={ticket.status} onChange={(e) => patch({ status: e.target.value as Status })}>
-          {COLUMNS.map((s) => <option key={s}>{s}</option>)}
+        <select ref={status} aria-label="Status" value={ticket.status} disabled={!moves.length} title={moves.length ? undefined : "Set by its runs: Run, Cancel, Approve or Reject"}
+          onChange={(e) => patch({ status: e.target.value as Status })}>
+          {[ticket.status, ...moves].map((s) => <option key={s}>{s}</option>)}
         </select>
       ), "s")}
       {prop("Priority", (

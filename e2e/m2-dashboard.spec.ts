@@ -36,6 +36,7 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await expect(transcript.getByText("read_file")).toBeVisible();
   await expect(tokens).toContainText("in 400 · out 80 · cached 40");
   await expect(page.getByLabel("Status")).toHaveValue("review");
+  await expect(page.getByLabel("Status").locator("option")).toHaveText(["review", "todo"]); // by hand, review only goes back to todo
 
   await page.getByRole("link", { name: "Board" }).click();
   await expect(column("review").getByRole("button", { name: /First ticket edited/ })).toBeVisible();
@@ -44,6 +45,7 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   // A slow run can be cancelled; the ticket goes back to todo.
   await column("todo").getByRole("button", { name: /Slow ticket/ }).click();
   await page.getByRole("button", { name: "Run agent" }).click();
+  await expect(page.getByLabel("Status")).toBeDisabled(); // a running ticket's status belongs to its run
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(transcript).toContainText("cancelled");
   await expect(page.getByLabel("Status")).toHaveValue("todo");

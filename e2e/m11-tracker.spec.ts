@@ -144,6 +144,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(props.locator(".menu-anchor > .chip", { hasText: "regression" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByLabel("Status")).toHaveValue("todo"); // the status select moved into the sidebar
+  // Only the moves allowed by hand are offered; a refusal (e.g. a run started meanwhile) reads as a sentence.
+  await expect(page.getByLabel("Status").locator("option")).toHaveText(["todo", "done", "failed"]);
+  await page.route("**/api/tickets/*", (r) => r.request().method() === "PATCH" ? r.fulfill({ status: 409, json: { error: "invalid_transition", from: "running", to: "done" } }) : r.fallback(), { times: 1 });
+  await page.getByLabel("Status").selectOption("done");
+  await expect(props.getByRole("alert")).toHaveText(/^A running ticket can't be set to done by hand\./);
+  await page.getByLabel("Status").selectOption("done");
+  await expect(page.getByLabel("Status").locator("option")).toHaveText(["done", "todo", "failed"]);
+  await page.getByLabel("Status").selectOption("todo");
+  await expect(page.getByLabel("Status")).toHaveValue("todo");
   await expect(page.getByRole("button", { name: "Run agent" })).toBeVisible(); // agent controls unchanged
   await shot("ticket-properties");
 
