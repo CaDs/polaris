@@ -12,7 +12,8 @@ import { ticketKey } from "./tracker.ts";
 // 1. reflection after a run series → a new lessons version (applies to the next run at once; easy to restore);
 // 2. eval cases = frozen approved tickets that fail at their base commit; eval runs score a prompt version on them;
 // 3. prompt versions: proposed by a no-tools call or written by a human, promoted only by a human click and only when
-//    their eval beats the active version's on the same case set.
+//    their eval beats the active version's on the same case set (the one exception: a new built-in replacing an
+//    unmodified built-in, see activePrompt).
 // Everything here lives in the DB. Agents have no tool that reads or writes it; reflection/proposal calls get no tools.
 
 export const LESSONS_MAX = 8000; // chars, ≈ 2,000 tokens
