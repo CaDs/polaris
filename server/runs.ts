@@ -4,13 +4,13 @@ import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
 import { createRun, eventLog } from "./agent/events.ts";
 import { listSkills, skillsText, type Skill } from "./agent/context.ts";
-import { runAgent, type RunResult } from "./agent/loop.ts";
+import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
@@ -178,7 +178,9 @@ function feedback(t: TicketRow, runId: string, attempt: number) {
     const f = last("run_finished");
     const p = last("test_result");
     const r = last("model_review");
-    if (f)
+    const stuck = /stuck: (\w+) \(([\s\S]*)\)$/.exec(f?.reason ?? "");
+    if (stuck) parts.push(`Previous attempt was stopped because it ${stuck[1] === "no_progress" ? "made no progress:" : "repeated"} ${stuck[2]}. Do not repeat that; take a different approach.`);
+    else if (f)
       parts.push([
         `Previous attempt failed: ${f.reason ?? f.status}`,
         ...(p && !p.passed ? [`\`\`\`\n${p.output}\n\`\`\``] : []),
@@ -421,8 +423,10 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
   }
 }
 
-type Result = Omit<RunResult, "messages">;
+type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"] };
 type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog> };
+// An agent call's events, minus the ones the pipeline writes itself once for the whole run.
+const relay = (log: Ctx["log"]) => (e: AgentEvent) => void (e.type !== "run_finished" && e.type !== "run_metrics" && log(e));
 
 // What every queued run (worker, eval case, planner round, wiki maintainer) shares: `work` fills res, which starts failed
 // with nothing used; a throw fails it (logged unless cancelled), and a cancel wins over any outcome. Then `ending` (before
@@ -439,6 +443,7 @@ async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx
   } finally {
     if (c.signal.aborted) [res.status, res.reason] = ["cancelled", "cancelled"];
     await ending(res, c);
+    if (res.metrics) c.log({ type: "run_metrics", payload: { ...res.metrics, input: res.usage.input, output: res.usage.output, cache_read: res.usage.cache_read } });
     c.log({ type: "run_finished", payload: { status: res.status, reason: res.reason, turns: res.turns, usage: res.usage } });
     recordCost(runId, model, res.usage);
     await after(res);
@@ -473,6 +478,9 @@ async function execute(runId: string) {
   const ev = run.eval_case_id ? (db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(run.eval_case_id) as EvalCase | undefined) : undefined;
   const cfg = run.eval_run_id ? ev : s; // repo_path, setup/test command, protected paths, image
   const attemptStart = Date.now();
+  // Turns and minutes are per attempt: fix rounds get what is left (turns: at least FIX_ROUND_MIN_TURNS).
+  const limits = ev || !s ? EVAL_WORKER : s;
+  let diffBase: string | undefined; // base_sha, for files_changed
   let retry = false;
   let sandbox: Sandbox | undefined;
   let branch: string | undefined;
@@ -491,7 +499,7 @@ async function execute(runId: string) {
       branch = `polaris/${t.key}-${run.attempt}-${runId.slice(0, 8)}`;
       base_sha = await addWorktree(cfg.repo_path, s!.base_branch, worktree, branch);
     }
-    db.prepare("UPDATE runs SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?").run(worktree, branch ?? null, base_sha, runId);
+    db.prepare("UPDATE runs SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?").run(worktree, branch ?? null, (diffBase = base_sha), runId);
     log({ type: "setup", payload: { step: "worktree", branch: branch ?? "", base_sha } });
     // M10: the wiki's HEAD as a read-only snapshot (a broken wiki must not stop the work: fail-open). Not for frozen eval cases.
     let wiki = "";
@@ -527,8 +535,6 @@ async function execute(runId: string) {
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
-    // Turns and minutes are per attempt: fix rounds get what is left (turns: at least FIX_ROUND_MIN_TURNS).
-    const limits = ev || !s ? EVAL_WORKER : s;
     const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
       budget: { turns: limits.max_turns, minutes: limits.max_minutes }, skills, lessons: lessons?.body, wiki,
@@ -536,13 +542,16 @@ async function execute(runId: string) {
     const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
-      onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e), // this pipeline writes the final run_finished
+      onEvent: relay(log), // this pipeline writes run_metrics and run_finished
     };
     const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
     let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
-    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason } = a);
+    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
-    if (res.status !== "passed") return;
+    if (res.status !== "passed") {
+      retry = !ev && res.status === "failed" && !!res.reason?.startsWith("stuck:") && run.attempt < MAX_ATTEMPTS; // unlike a budget failure
+      return;
+    }
 
     // Runs the tests and the protected-path check, logging test_result. A failure that is not a protected-path change is
     // re-run once at once (flaky).
@@ -562,6 +571,7 @@ async function execute(runId: string) {
     const fixRound = async (why: string, message: string) => {
       a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: { ...workerBudget, maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - res.turns) }, finishHint: WORKER_FINISH });
       addUsage(res.usage, a.usage);
+      res.metrics = addMetrics(res.metrics!, a.metrics);
       res.turns += a.turns;
       reply = finalText(a.messages);
       if (a.status === "passed") return true;
@@ -624,7 +634,14 @@ async function execute(runId: string) {
       if (!(await fixRound("model review requested changes", message)) || !(await gate())) return;
     }
     if (!ev) log({ type: "commit", payload: { sha: await commitAll(worktree, `${t.key}: ${t.title}`), branch: branch! } });
-  }, async ({ status, reason, turns }, { signal, log }) => {
+  }, async (res, { signal, log }) => {
+    const { status, reason, turns } = res;
+    // The attempt's budget use (not the last call's) and the change's size, before the worktree goes.
+    if (res.metrics && diffBase)
+      res.metrics = {
+        ...res.metrics, files_changed: (await changedPaths(worktree, diffBase).catch(() => [])).length, turns_pct: Math.round((turns / limits.max_turns) * 100),
+        minutes: Math.round((Date.now() - attemptStart) / 6_000) / 10, minutes_pct: Math.round(((Date.now() - attemptStart) / (limits.max_minutes * 60_000)) * 100),
+      };
     await sandbox?.close();
     if (signal.aborted) retry = false;
     if (!run.eval_run_id && s && !retry && status !== "cancelled")
@@ -639,8 +656,8 @@ async function execute(runId: string) {
     if ((status !== "passed" || run.eval_run_id) && cfg) await removeWorktree(cfg.repo_path, worktree, branch ?? null, dataDir());
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
     else if (retry) queue(t, run.model, run.attempt + 1, run.provider_id); // same provider and model
-    // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors).
-    else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
+    // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors, stuck).
+    else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
     else {
       setTicket(t.id, TICKET_STATUS[status]);
       if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
@@ -700,9 +717,9 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
       compactAt,
       finished: () => outcome.notes !== undefined || outcome.summary !== undefined,
       finishHint: "Call finish_round (or complete_epic) now with your notes.",
-      onEvent: (e) => e.type !== "run_finished" && log(e),
+      onEvent: relay(log),
     });
-    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason } = a);
+    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
   }, ({ status }, { log }) => {
     if (status === "passed") log({ type: "round_finished", payload: { round: run.attempt, notes: outcome.summary ?? outcome.notes ?? reply, completed: outcome.summary !== undefined } });
@@ -898,11 +915,12 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
       const common = {
         provider: providerFor(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
-        protectedPaths: WIKI_PROTECTED, signal, cacheKey: ws, compactAt, onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e),
+        protectedPaths: WIKI_PROTECTED, signal, cacheKey: ws, compactAt, onEvent: relay(log),
       };
       let a = await runAgent({ ...common, budget: WIKI_BUDGET });
       for (let fix = 0; ; fix++) {
         addUsage(res.usage, a.usage);
+        res.metrics = res.metrics ? addMetrics(res.metrics, a.metrics) : a.metrics;
         res.turns += a.turns;
         ({ status: res.status, reason: res.reason } = a);
         if (a.status !== "passed") return;

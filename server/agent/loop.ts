@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { compactedTask, CONTINUE_REQUEST, historyMarkdown, readPaths, SUMMARY_REQUEST, workState } from "./context.ts";
 import { runTool, hostExec, writeScratch, type Exec, type Tool } from "./tools.ts";
-import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type Msg, type Provider, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
+import { addUsage, AgentError, noUsage, stable, type AgentEvent, type Block, type Msg, type Provider, type RunMetrics, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
 
 export type RunOptions = {
   provider: Provider;
@@ -27,10 +27,38 @@ export type RunOptions = {
   onStream?: (e: StreamEvent) => void;
 };
 
-export type RunResult = { status: RunStatus; reason?: string; turns: number; usage: Usage; messages: Msg[] };
+export type RunResult = { status: RunStatus; reason?: string; turns: number; usage: Usage; messages: Msg[]; metrics: RunMetrics };
 
 const user = (text: string): Msg => ({ role: "user", content: [{ type: "text", text }] });
 const MAX_CONTINUES = 2;
+
+// Stuck monitor, checked after each turn's tool calls: the first detection nudges (a [harness] note with the results), the
+// next ends the run failed with `stuck: <signal> (<detail>)`. Counters restart at the nudge and per runAgent call (resume).
+const STUCK = {
+  window: 6, // repeat_call: turns looked back over
+  repeats: 3, // repeat_call: the same call (name + input) with the same result in this many of them
+  errors: 3, // repeat_error: the same tool error this many times in a row
+  idle: 8, // no_progress: turns in a row of only reads, searches and failed calls (a shell call that succeeds may have written)
+  explore: 12, // no_progress before the first write: only after this turn
+  persist: 4, // no_progress after its own nudge: this many more idle turns end the run
+};
+const WRITES = ["edit_file", "apply_patch", "delete_file"];
+const NUDGE = {
+  repeat_call: (d: string) => `You called ${d}. Calling it again will not change the result: take a different step, or finish with what you have.`,
+  repeat_error: (d: string) => `You repeated ${d}. Retrying it the same way fails the same way: take a different step, or finish with what you have.`,
+  no_progress: (d: string) => `No progress: ${d}. More reading will not finish the task: make the change now, or finish with what you have.`,
+};
+const callKey = (b: { name: string; input: unknown }) => `${b.name} ${JSON.stringify(stable(b.input))}`;
+
+// Metrics of consecutive calls on one run (a worker and its fix rounds): counts add up, the later call's turns are offset
+// by the earlier's. Percentages and tokens are the later call's (the pipeline sets its own).
+export const addMetrics = (a: RunMetrics, b: RunMetrics): RunMetrics => ({
+  ...b,
+  turns: a.turns + b.turns, tool_calls: a.tool_calls + b.tool_calls, tool_errors: a.tool_errors + b.tool_errors,
+  repeated_calls: a.repeated_calls + b.repeated_calls, repeated_reads: a.repeated_reads + b.repeated_reads, compactions: a.compactions + b.compactions,
+  first_edit_turn: a.first_edit_turn ?? (b.first_edit_turn && a.turns + b.first_edit_turn), minutes: Math.round((a.minutes + b.minutes) * 10) / 10,
+  stuck: b.stuck ? { ...b.stuck, turn: a.turns + b.stuck.turn } : a.stuck,
+});
 
 // Conversations are append-only: thinking blocks are bound to the exact history that produced them, and editing or
 // reordering earlier messages busts the prompt cache. So nothing in `messages` is ever changed, and compaction does not
@@ -47,6 +75,18 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   let continues = 0;
   let turns = 0;
   let hinted = false;
+  const m = { tool_calls: 0, tool_errors: 0, repeated_calls: 0, repeated_reads: 0, compactions: 0, first_edit_turn: null as number | null };
+  const seen = new Set(o.resume?.messages.flatMap((msg) => msg.content.flatMap((b) => (b.type === "tool_use" ? [callKey(b)] : []))));
+  // Stuck monitor (see STUCK): call+result pairs of the recent turns, idle turns in a row, the same-error streak.
+  let recent: string[][] = [];
+  const outputs = new Map<string, string>(); // latest result per call, so a dedupe stub matches the read it points at
+  let idle = 0;
+  let errors = 0;
+  let lastError = "";
+  let wrote = false;
+  let nudged: keyof typeof NUDGE | undefined;
+  let stuck: RunMetrics["stuck"] = null;
+  const canWrite = o.tools.some((t) => WRITES.includes(t.def.name)); // no_progress only for roles that edit (not planner, reviewer)
   const now = o.now ?? Date.now;
   const began = now();
   let status: RunStatus = "failed";
@@ -57,6 +97,16 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     e.type === "retry"
       ? o.onEvent({ type: "error", payload: { kind: "ProviderError", message: `${e.message} (retry ${e.attempt}/${e.max} in ${e.delay_ms} ms)`, retrying: true } })
       : o.onStream?.(e);
+
+  function detect(): { signal: keyof typeof NUDGE; detail: string } | undefined {
+    if (errors >= STUCK.errors) return { signal: "repeat_error", detail: `a call that failed ${errors} times in a row with: ${lastError.slice(0, 200)}` };
+    const counts = new Map<string, number>();
+    for (const t of recent) for (const p of t) counts.set(p, (counts.get(p) ?? 0) + 1);
+    const rep = [...counts].find(([, n]) => n >= STUCK.repeats);
+    if (rep) return { signal: "repeat_call", detail: `${rep[0].split("\0")[0].slice(0, 200)} ${rep[1]} times in the last ${recent.length} turns with the same result` };
+    if (canWrite && idle >= (nudged === "no_progress" ? STUCK.persist : STUCK.idle) && (wrote || turns > STUCK.explore))
+      return { signal: "no_progress", detail: `${idle} turns of only reads and searches${wrote ? " since the last edit" : ", no edit yet"}` };
+  }
 
   // One model call: appends the reply to the current conversation and books its usage.
   async function turn() {
@@ -88,6 +138,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     messages = [user(compactedTask(o.resume ? `${o.task}\n\n${o.resume.message}` : o.task, summary, histories, state, readPaths(messages)))];
     reads = new Map(); // the earlier outputs are no longer in the conversation
     contextTokens = 0;
+    m.compactions++;
     o.onEvent({ type: "compaction", payload: { n, tokens_before: before, summary_chars: summary.length, history_path: path } });
   }
 
@@ -137,6 +188,8 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
       }
       continues = 0;
       const results: Block[] = [];
+      const pairs = new Set<string>();
+      let busy = false; // a write, or a shell call that may have written
       for (const call of calls) {
         o.onEvent({ type: "tool_call", payload: { id: call.id, name: call.name, input: call.input } });
         const r = o.signal?.aborted
@@ -144,7 +197,24 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
           : await runTool(o.tools, call, { ...ctx, turn: turns, reads });
         o.onEvent({ type: "tool_result", payload: { tool_use_id: call.id, content: r.content, is_error: r.is_error, error_kind: r.kind } });
         results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error });
+        const key = callKey(call);
+        if (seen.has(key)) m.repeated_calls++;
+        seen.add(key);
+        const unchanged = call.name === "read_file" && r.content.startsWith("[unchanged since"); // the dedupe stub: same output as before
+        if (unchanged) m.repeated_reads++;
+        else outputs.set(key, r.content);
+        pairs.add(`${key}\0${outputs.get(key) ?? r.content}`);
+        m.tool_calls++;
+        if (r.is_error) m.tool_errors++;
+        errors = r.is_error ? (r.content === lastError ? errors + 1 : 1) : 0;
+        lastError = r.is_error ? r.content : "";
+        if (!r.is_error && WRITES.includes(call.name)) (wrote = true), (m.first_edit_turn ??= turns);
+        if (!r.is_error && (call.name === "shell" || WRITES.includes(call.name))) busy = true;
       }
+      recent = [...recent, [...pairs]].slice(-STUCK.window);
+      idle = busy ? 0 : idle + 1;
+      const found = detect();
+      if (found && !nudged) results.push({ type: "text", text: `[harness] ${NUDGE[found.signal](found.detail)}` });
       // Time is nearly up when under 10% of this call's window (min 2 minutes) remains; once, whichever limit comes first.
       const left = deadline === undefined ? Infinity : deadline - now();
       const lowTime = left < Math.max(120_000, ((deadline ?? 0) - began) / 10);
@@ -157,6 +227,15 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
         status = "passed";
         break;
       }
+      if (found) {
+        stuck = { turn: turns, signal: found.signal, action: nudged ? "stop" : "nudge" };
+        o.onEvent({ type: "stuck", payload: { ...stuck, detail: found.detail } });
+        if (nudged) {
+          reason = `stuck: ${found.signal} (${found.detail})`;
+          break;
+        }
+        [nudged, recent, idle, errors] = [found.signal, [], 0, 0];
+      }
     }
   } catch (e) {
     if (o.signal?.aborted) {
@@ -168,6 +247,14 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
       o.onEvent({ type: "error", payload: { kind, message: (e as Error).message } });
     }
   }
+  const { deadline } = o.budget;
+  const metrics: RunMetrics = {
+    turns, ...m, files_changed: null, turns_pct: Math.round((turns / o.budget.maxTurns) * 100),
+    minutes: Math.round((now() - began) / 6_000) / 10,
+    minutes_pct: deadline === undefined ? null : Math.round(((now() - began) / Math.max(1, deadline - began)) * 100),
+    input: usage.input, output: usage.output, cache_read: usage.cache_read, stuck,
+  };
+  o.onEvent({ type: "run_metrics", payload: metrics });
   o.onEvent({ type: "run_finished", payload: { status, reason, turns, usage } });
-  return { status, reason, turns, usage, messages };
+  return { status, reason, turns, usage, messages, metrics };
 }

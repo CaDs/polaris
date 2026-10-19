@@ -51,6 +51,38 @@ defaults (120/60), not the workspace's values, so scores stay comparable when Se
 - A tool call whose JSON arguments were cut off is answered with an `InvalidArguments` tool_result; the tool does not run.
 - Error classes: `InvalidArguments`, `UnexpectedEnvironment`, `ProviderError`, `Timeout`, `UserAborted`; anything else is a harness bug.
 
+## Stuck monitor and run metrics (M12)
+
+A benchmark worker once spent all 120 turns repeating one cheap call (no errors, no diff, 12k input tokens); only the turn
+budget ended it. The loop now watches for that, without a decision model. Constants: `STUCK` in `loop.ts`.
+
+- **Signals**, checked after each turn's tool calls:
+  `repeat_call`: the same call (name + canonical JSON input) with the same result in ≥ 3 of the last 6 turns (a
+  `read_file` dedupe stub counts as the output it points at; a test command whose output changed after an edit does not repeat);
+  `repeat_error`: the same tool error ≥ 3 times in a row;
+  `no_progress`: ≥ 8 turns in a row of only reads, searches and failed calls (a successful `shell` may have written, so it
+  counts as progress), after a successful `edit_file`/`apply_patch`/`delete_file`, or after turn 12 if there was none; only for
+  tool sets with a write tool (not the planner or reviewer).
+  `no_tool` is reserved: a reply without tool calls already ends the run (passed, refused, or "continue" ≤ 2 times on `max_tokens`).
+- **First detection** → `stuck {turn, signal, detail, action: "nudge"}` and a `[harness]` note with that turn's tool results:
+  what it repeated, that the result will not change, take a different step or finish with what it has. Counters restart.
+- **Next detection** (any signal; `no_progress` after its own nudge already after 4 more idle turns) → `stuck {…, action:
+  "stop"}` and the run fails `stuck: <signal> (<detail>)`. Each `runAgent` call has its own monitor (a fix round starts fresh).
+- **Worker**: a `stuck:` failure is retried fresh while attempts remain (a plain budget failure of the first call is not),
+  fed back as "Previous attempt was stopped because it repeated … / made no progress: …". Never split on it (like
+  provider/environment errors).
+- **`run_metrics`**, one per run right before `run_finished`: `{turns, tool_calls, tool_errors, repeated_calls (same name +
+  input as an earlier call of the run), repeated_reads (dedupe stubs), compactions, first_edit_turn (1-based), files_changed
+  (worker: paths changed against base incl. untracked, minus `.polaris` scratch; else null), turns_pct, minutes, minutes_pct
+  (null without a deadline), input, output, cache_read, stuck: null | {turn, signal, action}}`. Percentages are 0–100 of the
+  budget; `minutes` is elapsed wall time (1 decimal). The loop logs it for direct runs (CLI); the pipeline logs one for the
+  whole run instead: fix rounds add up (their turns offset), worker turns/minutes are of the attempt's budget, tokens are
+  the run's (`run_finished` usage, reviewer included).
+- **API**: `GET /api/runs/:id/metrics` (the payload, 404 before there is one); `metrics` on each run of `GET
+  /api/tickets/:id`; `GET /api/metrics?days=14` (1..90): `{days, rows: [{day, model, runs, passed, failed, cancelled, measured,
+  mean_turns_pct, sum_turns_pct, stuck, tool_calls, tool_errors, tool_error_rate (0–1), mean_files_changed}]}` per UTC day of
+  run start and model, newest first; `measured` = runs with `run_metrics` (the averages and sums are over those).
+
 ## Context management (M5)
 
 **Conversations are append-only.** Current Claude models bind thinking blocks to the exact conversation that produced them:

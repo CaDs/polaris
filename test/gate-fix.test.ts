@@ -119,3 +119,17 @@ test("max_turns is per attempt: a fix round gets the turns the worker left, not 
   await settings({ max_turns: 120 });
   assert.match(events(t.runs[0].id, "run_finished")[0].reason, /the fix round ended: turn budget exhausted \(16\)/);
 });
+
+test("a worker stopped as stuck is retried fresh (unlike a budget failure), with what it repeated fed back", async () => {
+  await settings();
+  const t = await ticketRun("STUCK-LOOP change");
+  assert.equal(t.status, "review");
+  assert.deepEqual(t.runs.map((r: any) => r.attempt), [1, 2]);
+  const [a1, a2] = t.runs;
+  const detail = 'read_file {"path":"README.md"} 3 times in the last 3 turns with the same result';
+  assert.equal(events(a1.id, "run_finished")[0].reason, `stuck: repeat_call (${detail})`);
+  assert.deepEqual(events(a1.id, "stuck").map((e) => [e.turn, e.action]), [[3, "nudge"], [6, "stop"]]);
+  assert.deepEqual(a1.metrics.stuck, { turn: 6, signal: "repeat_call", action: "stop" });
+  assert.deepEqual([a1.metrics.files_changed, a2.metrics.files_changed, a2.metrics.stuck], [0, 2, null]); // notes.txt, ok.txt
+  assert.match(events(a2.id, "run_started")[0].task, new RegExp(`Previous attempt was stopped because it repeated ${detail.replace(/[{}()]/g, "\\$&")}\\. Do not repeat that`));
+});

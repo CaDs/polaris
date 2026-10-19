@@ -72,7 +72,7 @@ test("reflection: a separate no-tools conversation, capped, injected into the ne
   assert.deepEqual([v1.version, v1.source, v1.ticket_key, v1.run_attempt], [1, "reflection", "RIT-1", 1]);
   const ev = events(one.run.id);
   assert.deepEqual(ev.find((e) => e.type === "reflection")!.p, { lessons_id: v1.id, version: 1, chars: v1.body.length, unchanged: false, usage: { input: 10, output: 5, cache_read: 0, cache_write: 0 } });
-  assert.deepEqual(ev.slice(-2).map((e) => e.type), ["reflection", "run_finished"]); // before run_finished: live in the transcript
+  assert.deepEqual(ev.slice(-3).map((e) => e.type), ["reflection", "run_metrics", "run_finished"]); // before run_finished: live in the transcript
   assert.equal(runRow(one.run.id).tokens_out, 5); // the reflection is not booked on the run
 
   // The next run: lessons in the first user message, system prompt untouched (prompt v1 = worker.md).
@@ -119,7 +119,7 @@ test("a reject with a note is reflected on too; the event lands after run_finish
   assert.match(seriesDigest(run.id, undefined, "keep it smaller"), /^Ticket: REX-1 too much\nFinal status: rejected after 1 attempt\nReviewer note: keep it smaller\n/);
   const sse = await (await app.request(`/api/runs/${run.id}/events`, { headers: { cookie: rex, origin } })).text();
   const types = sse.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)).type);
-  assert.deepEqual(types.slice(-4), ["reflection", "run_finished", "review", "reflection"]);
+  assert.deepEqual(types.slice(-5), ["reflection", "run_metrics", "run_finished", "review", "reflection"]);
 });
 
 // Shared by the eval tests below: alice's repo (gate `test -f ok.txt`) and her approved case.

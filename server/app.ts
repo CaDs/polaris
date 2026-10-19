@@ -86,6 +86,9 @@ const TREE = "WITH RECURSIVE d(id) AS (SELECT ? UNION ALL SELECT t.id FROM ticke
 const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
   hydrate(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined);
 
+// The run r's latest run_metrics payload (M12), null before it finished.
+const METRICS = "SELECT payload FROM events WHERE run_id = r.id AND seq = (SELECT MAX(seq) FROM events WHERE run_id = r.id AND type = 'run_metrics')";
+
 // Runs are only reachable through a ticket in the caller's workspace.
 const runIn = (c: Context<Env>) =>
   db.prepare("SELECT r.* FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.id = ? AND t.workspace_id = ?").get(c.req.param("id") as string, c.get("workspaceId")) as
@@ -162,7 +165,8 @@ app.post("/api/tickets", async (c) => {
 app.get("/api/tickets/:id", (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
-  const runs = db.prepare("SELECT r.*, p.auth_type AS auth_type FROM runs r LEFT JOIN providers p ON p.id = r.provider_id WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid").all(t.id);
+  const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
+    WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({ ...r, metrics: r.metrics && JSON.parse(r.metrics) }));
   if (t.kind !== "epic") return c.json({ ...t, runs });
   const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id).map((r) => hydrate(r)) as any[];
   return c.json({ ...t, runs, children: withStates(tree) });
@@ -324,6 +328,24 @@ app.get("/api/usage", (c) => {
        WHERE t.workspace_id = ? AND t.hidden = 0 AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
     ).map((r) => withRate(r as any)),
   });
+});
+
+// M12 failure mining: per UTC day (run start, the last `days` incl. today, default 14, max 90) and model, newest first. Run
+// counts by status; the rest from runs with a run_metrics event (`measured`): percentages 0-100, tool_error_rate 0-1, sums
+// for weighting across rows.
+app.get("/api/metrics", (c) => {
+  const days = Math.min(90, Math.max(1, Math.floor(Number(c.req.query("days") ?? 14)) || 14));
+  const since = Date.parse(new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10));
+  const m = (k: string) => `json_extract(m.payload, '$.${k}')`;
+  const rows = db.prepare(`SELECT strftime('%Y-%m-%d', r.started_at / 1000, 'unixepoch') AS day, r.model, COUNT(*) AS runs,
+      SUM(r.status = 'passed') AS passed, SUM(r.status = 'failed') AS failed, SUM(r.status = 'cancelled') AS cancelled, COUNT(m.payload) AS measured,
+      AVG(${m("turns_pct")}) AS mean_turns_pct, COALESCE(SUM(${m("turns_pct")}), 0) AS sum_turns_pct, COALESCE(SUM(${m("stuck")} IS NOT NULL), 0) AS stuck,
+      COALESCE(SUM(${m("tool_calls")}), 0) AS tool_calls, COALESCE(SUM(${m("tool_errors")}), 0) AS tool_errors,
+      1.0 * SUM(${m("tool_errors")}) / NULLIF(SUM(${m("tool_calls")}), 0) AS tool_error_rate, AVG(${m("files_changed")}) AS mean_files_changed
+    FROM runs r JOIN tickets t ON t.id = r.ticket_id LEFT JOIN events m ON m.run_id = r.id AND m.type = 'run_metrics'
+      AND m.seq = (SELECT MAX(seq) FROM events WHERE run_id = r.id AND type = 'run_metrics')
+    WHERE t.workspace_id = ? AND r.started_at >= ? GROUP BY day, r.model ORDER BY day DESC, r.model`).all(c.get("workspaceId"), since);
+  return c.json({ days, rows });
 });
 
 // --- M6 self-improvement: lessons, prompt versions, evals. Workspace-scoped like everything else; humans only (agents have
@@ -517,6 +539,12 @@ for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const
 app.get("/api/runs/:id", (c) => {
   const r = runIn(c);
   return r ? c.json(r) : c.json({ error: "not_found" }, 404);
+});
+
+app.get("/api/runs/:id/metrics", (c) => {
+  const r = runIn(c);
+  const m = r && (db.prepare(`SELECT (${METRICS}) AS payload FROM runs r WHERE r.id = ?`).get(r.id) as { payload: string | null });
+  return m?.payload ? c.json(JSON.parse(m.payload)) : c.json({ error: "not_found" }, 404);
 });
 
 app.post("/api/runs/:id/cancel", (c) => {

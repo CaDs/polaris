@@ -58,7 +58,7 @@ test("fake provider drives the loop to create and edit a file, run a shell comma
     "assistant_message", "usage", "tool_call", "tool_result",
     "assistant_message", "usage", "tool_call", "tool_result", "tool_call", "tool_result",
     "assistant_message", "usage",
-    "run_finished",
+    "run_metrics", "run_finished",
   ]);
   assert.equal(JSON.parse(ev.at(-1)!.payload).status, "passed");
 
@@ -69,7 +69,7 @@ test("fake provider drives the loop to create and edit a file, run a shell comma
 });
 
 test("turn and token budgets stop the run", async () => {
-  const forever = Array(20).fill([use("x", "shell", { command: "true" })]);
+  const forever = Array.from({ length: 20 }, (_, i) => [use("x", "shell", { command: `echo ${i}` })]);
   const turns = await run(forever, { budget: { maxTurns: 2, maxTokens: 1e6 } }).done;
   assert.equal(turns.status, "failed");
   assert.match(turns.reason!, /turn budget/);
@@ -123,7 +123,7 @@ test("resume continues a conversation with a new user message; the earlier messa
 });
 
 test("finishHint is appended to the tool results when 2 turns are left, once", async () => {
-  const sh = (id: string) => [use(id, "shell", { command: "true" })];
+  const sh = (id: string) => [use(id, "shell", { command: `echo ${id}` })];
   const { fake, done } = run([sh("a"), sh("b"), sh("c"), sh("d"), sh("e")], { budget: { maxTurns: 5, maxTokens: 1e6 }, finishHint: "Wrap up." });
   assert.equal((await done).reason, "turn budget exhausted (5)");
   const notes = (i: number) => fake.requests[i].messages.at(-1)!.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text);
@@ -134,7 +134,7 @@ test("finishHint is appended to the tool results when 2 turns are left, once", a
 // Wall-clock budget: the clock is injected and each scripted turn advances it by a minute.
 function timed(turns: number, opts: Partial<RunOptions>) {
   let clock = 0;
-  const sh = (i: number) => (): ToolUseBlock[] => ((clock += 60_000), [use(`t${i}`, "shell", { command: "true" })]);
+  const sh = (i: number) => (): ToolUseBlock[] => ((clock += 60_000), [use(`t${i}`, "shell", { command: `echo ${i}` })]);
   return run(Array.from({ length: turns }, (_, i) => sh(i)), { now: () => clock, ...opts });
 }
 const noteAt = (fake: { requests: { messages: { content: { type: string; text?: string }[] }[] }[] }, i: number) =>
@@ -163,4 +163,55 @@ test("finishHint also fires when under 10% of the time (min 2 minutes) is left, 
   const n = timed(5, { budget: { maxTurns: 5, maxTokens: 1e6, deadline: 60 * 60_000 }, finishHint: "Wrap up." });
   assert.equal((await n.done).reason, "turn budget exhausted (5)");
   assert.deepEqual(noteAt(n.fake, 3), ["[harness] Only 2 turns are left in your budget. Wrap up."]);
+});
+
+// Stuck monitor: turn 1 writes a.txt (20 lines), then the scripted reads.
+const lines = Array.from({ length: 20 }, (_, i) => `l${i + 1}`).join("\n") + "\n";
+const write = [use("w", "edit_file", { path: "a.txt", old_string: "", new_string: lines })];
+const stuckEvents = (runId: string) => events(runId).filter((e) => e.type === "stuck").map((e) => JSON.parse(e.payload));
+const metricsOf = (runId: string) => JSON.parse(events(runId).find((e) => e.type === "run_metrics")!.payload);
+
+test("repeat_call: the third identical read with the same result gets a nudge; a new step after it passes", async () => {
+  const read = (id: string) => [use(id, "read_file", { path: "a.txt" })];
+  const t = run([write, read("r1"), read("r2"), read("r3"), [use("e", "edit_file", { path: "a.txt", old_string: "l1\n", new_string: "one\n" })], [{ type: "text", text: "done" }]]);
+  const r = await t.done;
+  assert.equal(r.status, "passed");
+  assert.deepEqual(stuckEvents(t.runId), [{ turn: 4, signal: "repeat_call", action: "nudge", detail: 'read_file {"path":"a.txt"} 3 times in the last 4 turns with the same result' }]);
+  assert.deepEqual(t.fake.requests[4].messages.at(-1)!.content.at(-1), {
+    type: "text", text: '[harness] You called read_file {"path":"a.txt"} 3 times in the last 4 turns with the same result. Calling it again will not change the result: take a different step, or finish with what you have.',
+  });
+  assert.deepEqual(r.metrics, {
+    turns: 6, tool_calls: 5, tool_errors: 0, repeated_calls: 2, repeated_reads: 2, compactions: 0, first_edit_turn: 1, files_changed: null,
+    turns_pct: 60, minutes: 0, minutes_pct: null, input: 600, output: 120, cache_read: 42, stuck: { turn: 4, signal: "repeat_call", action: "nudge" },
+  });
+  assert.deepEqual(metricsOf(t.runId), r.metrics);
+});
+
+test("repeat_call: a model that ignores the nudge is stopped with the reason", async () => {
+  const t = run([write, ...Array.from({ length: 20 }, (_, i) => [use(`r${i}`, "read_file", { path: "a.txt" })])], { budget: { maxTurns: 30, maxTokens: 1e6 } });
+  const r = await t.done;
+  assert.deepEqual([r.status, r.turns, r.reason], ["failed", 7, 'stuck: repeat_call (read_file {"path":"a.txt"} 3 times in the last 3 turns with the same result)']);
+  assert.deepEqual(stuckEvents(t.runId).map((e) => [e.turn, e.action]), [[4, "nudge"], [7, "stop"]]);
+  assert.deepEqual(events(t.runId).slice(-3).map((e) => e.type), ["stuck", "run_metrics", "run_finished"]);
+  assert.deepEqual(r.metrics.stuck, { turn: 7, signal: "repeat_call", action: "stop" });
+});
+
+test("no_progress: 8 read-only turns after a write nudge, 4 more stop; before any write only after turn 12; repeat_error", async () => {
+  const reads = (n: number) => Array.from({ length: n }, (_, i) => [use(`r${i}`, "read_file", { path: "a.txt", offset: i + 1, limit: 1 })]);
+  const t = run([write, ...reads(19)], { budget: { maxTurns: 30, maxTokens: 1e6 } });
+  const r = await t.done;
+  assert.deepEqual(stuckEvents(t.runId).map((e) => [e.turn, e.signal, e.action, e.detail]), [
+    [9, "no_progress", "nudge", "8 turns of only reads and searches since the last edit"],
+    [13, "no_progress", "stop", "4 turns of only reads and searches since the last edit"],
+  ]);
+  assert.match(noteAt(t.fake, 9).join(), /^\[harness\] No progress: 8 turns .* make the change now/);
+  assert.equal(r.reason, "stuck: no_progress (4 turns of only reads and searches since the last edit)");
+
+  const never = run(Array.from({ length: 20 }, (_, i) => [use(`n${i}`, "read_file", { path: `missing${i}.txt` })]), { budget: { maxTurns: 30, maxTokens: 1e6 } });
+  await never.done;
+  assert.deepEqual(stuckEvents(never.runId)[0], { turn: 13, signal: "no_progress", action: "nudge", detail: "13 turns of only reads and searches, no edit yet" });
+
+  const failing = run(Array.from({ length: 5 }, (_, i) => [use(`f${i}`, "edit_file", { path: "nope.txt", old_string: `x${i}`, new_string: "y" })]));
+  await failing.done;
+  assert.deepEqual(stuckEvents(failing.runId)[0], { turn: 3, signal: "repeat_error", action: "nudge", detail: "a call that failed 3 times in a row with: InvalidArguments: file not found: nope.txt" });
 });
