@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { compactedTask, CONTINUE_REQUEST, historyMarkdown, readPaths, SUMMARY_REQUEST, workState } from "./context.ts";
 import { runTool, hostExec, writeScratch, type Exec, type Tool } from "./tools.ts";
-import { AgentError, type AgentEvent, type Block, type Msg, type Provider, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
+import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type Msg, type Provider, type RunStatus, type StreamEvent, type Usage } from "./types.ts";
 
 export type RunOptions = {
   provider: Provider;
@@ -38,7 +38,7 @@ const MAX_CONTINUES = 2;
 // Tools and system prompt never change either.
 export async function runAgent(o: RunOptions): Promise<RunResult> {
   let messages: Msg[] = o.resume ? [...o.resume.messages, user(o.resume.message)] : [user(o.task)];
-  const usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const usage = noUsage();
   const ctx = { root: o.root, exec: o.exec ?? hostExec, signal: o.signal, protectedPaths: o.protectedPaths };
   let reads = new Map<string, { out: string; turn: number }>(); // read_file dedupe; belongs to the current conversation (see compact)
   const system = [{ type: "text" as const, text: o.system }];
@@ -63,7 +63,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     const res = await o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream);
     turns++;
     messages.push(res.message);
-    for (const k of Object.keys(usage) as (keyof Usage)[]) usage[k] += res.usage[k];
+    addUsage(usage, res.usage);
     contextTokens = res.usage.input + res.usage.cache_read + res.usage.cache_write;
     o.onEvent({ type: "assistant_message", payload: { message: res.message, stop_reason: res.stopReason } });
     o.onEvent({ type: "usage", payload: res.usage });

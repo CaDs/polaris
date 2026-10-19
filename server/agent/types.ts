@@ -11,6 +11,8 @@ export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
 export type Msg = { role: "user" | "assistant"; content: Block[] };
 export type ToolDef = { name: string; description: string; input_schema: Record<string, unknown> };
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number };
+export const noUsage = (): Usage => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+export const addUsage = (into: Usage, u: Usage) => (Object.keys(into) as (keyof Usage)[]).forEach((k) => (into[k] += u[k]));
 
 // Live deltas for transcripts. The final Msg is authoritative.
 export type StreamEvent =
