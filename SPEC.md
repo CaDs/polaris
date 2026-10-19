@@ -482,6 +482,49 @@ bootstrap (existing pages stay readable in the UI).
   worker writing the wiki directly (only approved, linted, serialized changes land); LLM lint on a schedule (a button);
   multi-file human edits (a new page has to be linked from the index in the same commit, so humans edit existing pages).
 
+## Chat (M13)
+
+A side panel (Cmd/Ctrl+J, or **Ask Polaris** in the top bar) where a member talks with the project, modeled on Notion's
+AI chat. The agent reads the code and the wiki, asks what is unclear and **proposes** tickets; nothing becomes a ticket
+until the member files it. Migration 021, server in `server/chat.ts`, prompt `server/agent/prompts/chat.md`.
+
+- **Data.** `chats(id, workspace_id, user_id, title, messages, …)`: private to their member; `title` is the first line of
+  the first message; `messages` is the provider conversation, resumed by the next message. `chat_events(chat_id, seq,
+  type, payload)`: what the panel shows, append-only (`user_message {text, context}`, the loop's `assistant_message`,
+  `tool_call`, `tool_result`, `error`, `compaction`, `stuck`, `proposal {proposal_id, number}`, `turn_finished {status,
+  reason}`). `chat_proposals(id, chat_id, number, payload, status open|filed|dismissed|superseded, ticket_id)`.
+- **A turn** (one per user message, one at a time per chat): `runAgent` with the chat prompt, `read_file`/`search` on a
+  fresh detached checkout of the base branch head (removed afterwards; the wiki materialized into `.polaris/wiki`), and
+  the tools `list_tickets`, `read_ticket`, `propose_ticket`. The workspace's default provider and model
+  (`metaProvider`); usage is background, purpose `chat` (workspace caps apply). Budget: 40 turns and 10 minutes per
+  message. The first message carries the environment and the wiki index; later ones resume the conversation unchanged
+  (prompt cache). A turn that fails or is stopped appends the user's message and a `[harness]` note instead of the
+  partial conversation, so a dangling tool call is never resumed; a failed first turn leaves the conversation empty.
+  At startup, a chat whose last event is not `turn_finished` gets one (`interrupted: the server restarted`).
+- **Context.** The panel sends the page the member is on (`{ticket: key}`, `{project: id}` or `{cycle: id}`); the
+  server resolves it in the caller's workspace (unknown ids are dropped) and puts a `# Context` block ahead of the message:
+  a ticket's status, kind, test command, latest run and its finish reason, tracker fields, an epic's children and the
+  spec (4000 chars); a project's or cycle's open tickets. `@KEY` mentions in the text (up to 5) are expanded the same way.
+  The member can leave the page out with the chip's ×.
+- **Proposals.** `propose_ticket {title, spec, kind?, test_command?, priority?, estimate?, replaces?}` validates like
+  the planner's `create_ticket` and stores P1, P2, … per chat; `replaces: "P1"` marks an open P1 `superseded`. The panel
+  renders each as a card: **File**, **File and run**, **Edit** (title, spec, test command), **Dismiss**.
+  `POST /api/chats/proposals/:id/file` takes the (possibly edited) ticket fields and validates them like
+  `POST /api/tickets` (shared `insertTicket`); the spec gets a last line `From chat: <title>`; `run: true` also queues
+  the first run (a refused run returns the ticket with `run_error`). A proposal is filed once (409 after that, also for
+  dismiss).
+- **Routes** (`/api/chats`, the caller's own chats in the active workspace; others 404): `GET /` (newest first, 50),
+  `POST / {message, context?}` (creates the chat and starts its turn, 201), `GET /:id` (`busy`, `events`, `proposals`),
+  `POST /:id/messages {message, context?}` (202; 409 while a turn runs), `POST /:id/cancel`, `DELETE /:id`,
+  `POST /proposals/:id/dismiss`, and `GET /:id/stream`: SSE that replays the stored events, then live ones (de-duped by
+  seq), plus `event: delta {text}` with the reply's text as it streams (never stored); stays open across turns.
+- **Panel** (`web/Chat.tsx`): a third grid column (full screen under 720 px); a conversation picker; user messages,
+  replies (the wiki's Markdown subset), a "Looked at …" line for each run of read-only calls, proposal cards, errors;
+  the streamed reply while a turn runs, Stop. The composer sends on Enter (Shift+Enter: new line); `@` opens a ticket
+  picker (the palette's matching). The open state and the current chat are remembered in localStorage.
+- **Demo** (`POLARIS_PROVIDER=fake`): a chat turn reads README.md, proposes a ticket titled after the message's last
+  paragraph, then replies; `NO-PROPOSAL` only replies, `REPLACE-P<n>` replaces P<n>.
+
 ## Comments, notifications and the live board (M12)
 
 Migration 019: `comments(id, ticket_id, author_id, body, created_at)` and `notifications(id, workspace_id, ticket_id,

@@ -16,6 +16,7 @@ import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
 import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
+import { chatRoutes, proposalIn } from "./chat.ts";
 
 migrate();
 backfillUsage();
@@ -62,6 +63,7 @@ app.use("/api/*", async (c, next) => {
 
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, views, members
+app.route("/api/chats", chatRoutes); // M13: chat (filing a proposal is below, next to POST /api/tickets)
 
 // Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
@@ -170,15 +172,42 @@ app.get("/api/tickets", (c) => {
   return c.json(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.hidden = 0${q.where} ORDER BY ${q.order}`).all(c.get("workspaceId"), ...q.params, ...q.orderParams).map((t) => hydrate(t)));
 });
 
+// A new ticket from validated fields (parse); returns its id.
+function insertTicket(c: Context<Env>, v: Fields) {
+  const id = randomUUID();
+  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command, cap_usd, cap_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    id, c.get("workspaceId"), v.kind ?? "task", v.title!, v.spec ?? "", v.provider_id ?? null, v.model ?? null, v.test_command ?? null, v.cap_usd ?? null, v.cap_tokens ?? null,
+  );
+  applyTracker(id, v.tracker);
+  touch(c.get("workspaceId"), { type: "ticket", id });
+  return id;
+}
+
 app.post("/api/tickets", async (c) => {
   const p = await parse(c, false);
   if ("error" in p) return c.json(p, 400);
-  const id = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command, cap_usd, cap_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null, p.v.cap_usd ?? null, p.v.cap_tokens ?? null,
-  );
-  applyTracker(id, p.v.tracker);
-  touch(c.get("workspaceId"), { type: "ticket", id });
+  return c.json(ticketIn(c, insertTicket(c, p.v)), 201);
+});
+
+// M13: files a chat proposal as a ticket. The body is the ticket (the card may have been edited), validated like
+// POST /api/tickets; run: true also queues its first run. A proposal is filed once (409 after that).
+app.post("/api/chats/proposals/:id/file", async (c) => {
+  const prop = proposalIn(c);
+  if (!prop) return c.json({ error: "not_found" }, 404);
+  if (prop.status !== "open") return c.json({ error: `this proposal is already ${prop.status}` }, 409);
+  const p = await parse(c, false);
+  if ("error" in p) return c.json(p, 400);
+  const run = (await c.req.json())?.run === true; // Hono caches the parsed body
+  // No await from the status check to the claim, so a double click cannot file twice.
+  if (!db.prepare("SELECT 1 FROM chat_proposals WHERE id = ? AND status = 'open'").get(prop.id)) return c.json({ error: "this proposal was just filed" }, 409);
+  const card = { title: p.v.title ?? "", spec: p.v.spec ?? "" }; // the card keeps showing what was filed, edits included
+  p.v.spec = `${p.v.spec ?? ""}\n\nFrom chat: ${prop.chat_title}`.trim();
+  const id = insertTicket(c, p.v);
+  db.prepare("UPDATE chat_proposals SET status = 'filed', ticket_id = ?, payload = json_set(payload, '$.title', ?, '$.spec', ?) WHERE id = ?").run(id, card.title, card.spec, prop.id);
+  if (run) {
+    const r = await enqueueRun(id);
+    if ("error" in r) return c.json({ ...ticketIn(c, id), run_error: r.error }, 201);
+  }
   return c.json(ticketIn(c, id), 201);
 });
 

@@ -120,6 +120,16 @@
 - [x] Mock OAuth/provider, accounting and browser acceptance; live Ollama protected-test/review/approval smoke test
 - [x] Live ChatGPT (`gpt-6.1-sol`) and Ollama (`qwen3.8:27b-mlx`) protected-test/review/approval smoke tests in separate disposable repositories, with reconciled execution/background usage
 
+## M13 — Chat
+- [x] Chat panel (Cmd/Ctrl+J): private chats per member, resumed conversations, streamed replies (migration 021, `server/chat.ts`)
+- [x] Page context (ticket, project, cycle) and `@KEY` mentions resolved server-side into a `# Context` block
+- [x] Read-only checkout of the base branch per turn, wiki materialized; `list_tickets`, `read_ticket`, `propose_ticket`
+- [x] Proposal cards: File, File and run, Edit, Dismiss; filing validates like New ticket (shared `insertTicket`), once
+- [x] Chat usage metered as background, purpose `chat`; demo chat script; API tests and `e2e/m13-chat.spec.ts`
+- [ ] Test-first proposals: the agent drafts the acceptance test, checked to fail at the base commit, locked as a protected path for the ticket
+- [ ] Wiki page context (the open page is not in the URL yet)
+- [ ] Rename and delete chats in the panel (the API has DELETE)
+
 ## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
 - [x] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
 - [x] One turn budget per attempt: fix rounds get what is left (at least 10 turns)

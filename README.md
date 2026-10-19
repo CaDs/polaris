@@ -69,6 +69,7 @@ cost per run, and replay any transcript.
 
 | Area | What you get |
 |---|---|
+| **Chat** | A side panel (Cmd/Ctrl+J) to talk with the project. It knows the page you're on, takes `@` mentions of tickets, reads the code and the wiki, asks what's unclear, and proposes tickets as cards. Nothing is filed until you click **File** (or **File and run**); you can edit a proposal first. Replies stream; chats are private and resumable. |
 | **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
 | **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace (one repository each). The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
 | **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
@@ -130,7 +131,7 @@ Or as a single process: `npm run build && npm start` (everything on http://local
    command (e.g. `npm ci`) and a test command (e.g. `npm test`). Protected paths default to `tests/,evals/`.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
-4. **New ticket**, describe the change, **Run agent**. Watch the transcript, then **Approve** to merge into your base
+4. **New ticket**, describe the change, **Run agent**. Or open the chat (Cmd/Ctrl+J), describe what you want, and file the ticket it proposes. Watch the transcript, then **Approve** to merge into your base
    branch or **Reject** with a note for the next attempt.
 
 For bigger work, choose **Epic** when creating the ticket and click **Run planner**.

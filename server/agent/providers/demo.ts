@@ -29,9 +29,29 @@ import { fakeProvider } from "./fake.ts";
 // page; each also lists the page in index.md. A page that exists is updated line by line (sources, verified, updated).
 // WIKI-WRITE in a ticket makes a worker write .polaris/wiki/x with the shell (the gate must fail it); WIKI-NOTES adds a
 // "## Wiki notes" section to its final reply; WIKI-BAD / WIKI-FIXME make the maintainer of its ingest produce an invalid wiki.
+// M13: requests with propose_ticket are chat turns (chatScript), one step per request: read README.md, propose a ticket
+// titled after the user's message, then reply. A message containing NO-PROPOSAL only replies; REPLACE-P<n> replaces P<n>.
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
 const say = (text: string): TextBlock => ({ type: "text", text });
 const lastResult = (req: ProviderRequest) => req.messages.at(-1)!.content.flatMap((b) => (b.type === "tool_result" ? [b.content] : [])).join("\n");
+
+const chatScript: Provider = {
+  async stream(req, onEvent) {
+    const at = req.messages.findLastIndex((m) => m.role === "user" && m.content.some((b) => b.type === "text"));
+    const said = req.messages[at];
+    const text = said.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
+    const message = text.slice(text.lastIndexOf("\n\n") + 2).trim(); // the user's own words come last
+    const called = req.messages.at(-2)?.content.find((b) => b.type === "tool_use")?.name;
+    const id = `c${req.messages.length}`;
+    const content =
+      at === req.messages.length - 1 ? [say("Let me look at the code first."), use(id, "read_file", { path: "README.md" })]
+      : called === "read_file" && message.includes("NO-PROPOSAL") ? [say(`README.md says: ${lastResult(req).split("\n")[0]}`)]
+      : called === "read_file" ? [use(id, "propose_ticket", { title: message.split("\n")[0].slice(0, 60), spec: `${message}\n\nAcceptance: the test gate passes.`, estimate: 2, ...(/REPLACE-(P\d+)/.test(message) ? { replaces: /REPLACE-(P\d+)/.exec(message)![1] } : {}) })]
+      : [say(`I proposed a ticket for that. ${lastResult(req).split(".")[0]}. **File** it when it looks right.`)];
+    for (const b of content) if (b.type === "text") for (const w of b.text.split(/(?<= )/)) onEvent({ type: "text", text: w }); // word by word, so streaming shows
+    return { message: { role: "assistant", content }, usage: { input: 100, output: 20, cache_read: 10, cache_write: 0 }, stopReason: content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn" };
+  },
+};
 
 // Round 1 (no children yet): read README.md, create A ("Create a.txt"), then B ("Create b.txt", depends on A unless the
 // epic says PARALLEL), finish_round. FAIL-GATE in the epic is passed on to B's spec. Later rounds: list_children; anything
@@ -257,7 +277,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
       const gateFix = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Tests failed"));
-      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript(task) : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
+      scripted ??= req.tools.some((t) => t.name === "propose_ticket") ? chatScript : req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript(task) : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delayMs);
         req.signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });
