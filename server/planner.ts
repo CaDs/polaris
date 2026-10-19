@@ -50,6 +50,8 @@ type Child = {
 
 // A ticket's own runs: not eval case runs (M6) or wiki runs (M10), which hang off a ticket but never change its state or totals.
 export const OWN_RUNS = "eval_run_id IS NULL AND role <> 'wiki'";
+// d = the ticket bound to ? and all of its descendants (epic → children → a sub-epic's children).
+export const TREE = "WITH RECURSIVE d(id) AS (SELECT ? UNION ALL SELECT t.id FROM tickets t JOIN d ON t.parent_id = d.id)";
 
 export const childrenOf = (epicId: string) =>
   db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, ${ticketKey()} AS key,

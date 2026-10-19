@@ -122,3 +122,47 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+test("Spending caps: a monthly cap in Settings, its bar on the Usage page, a ticket over it fails with the reason; an epic's cap", async ({ page }) => {
+  test.setTimeout(120_000);
+  const repo = tempRepo();
+  await signUp(page, "Capped");
+  // The demo worker's first call uses 520 tokens and leaves the gate failing (no ok.txt): its fix round is over the cap.
+  await saveSettings(page, repo, "test -f ok.txt", async () => {
+    await expect(page.getByLabel("Monthly cap (tokens)")).toHaveValue("");
+    await page.getByLabel("Monthly cap (tokens)").fill("500");
+    await page.getByLabel("Model review before human review").uncheck();
+  });
+  await expect(page.getByLabel("Monthly cap (tokens)")).toHaveValue("500");
+
+  await page.getByRole("link", { name: "Usage" }).click();
+  const cap = page.getByRole("region", { name: "Spending cap" });
+  await expect(cap).toContainText("Tokens: 0 of 500");
+
+  await newTicket(page, "Over budget", "GATE-FIX-ONCE");
+  await openTicket(page, "Over budget");
+  await page.getByRole("button", { name: "Run agent" }).click();
+  await expect(page.getByLabel("Status")).toHaveValue("failed", { timeout: 60_000 });
+  const month = new Date().toISOString().slice(0, 7);
+  const transcript = page.getByRole("region", { name: "Transcript" });
+  await expect(transcript).toContainText("Tests failed");
+  await expect(transcript).toContainText(`SpendingCap: spending cap reached: workspace ${month} tokens 520/500`);
+  await expect(transcript).toContainText(`Run failed (SpendingCap: spending cap reached: workspace ${month} tokens 520/500) after 4 turns.`);
+  await expect(page.getByRole("table").locator("tbody tr")).toHaveCount(1); // not retried
+
+  await page.getByRole("link", { name: "Usage" }).click();
+  await expect(cap).toContainText("Tokens: 520 of 500 — reached, new runs are refused");
+  await expect(cap.getByRole("meter", { name: "Tokens cap used" })).toHaveAttribute("aria-valuenow", "100");
+
+  // An epic's own cap, edited in its header: "spent … of …" over its whole tree (nothing yet).
+  await page.getByRole("link", { name: "Board" }).click();
+  await newTicket(page, "Capped epic", undefined, (d) => d.getByRole("radio", { name: "Epic" }).check());
+  await openTicket(page, "Capped epic");
+  await page.getByLabel("Epic cap (tokens)").fill("1000");
+  await page.getByLabel("Epic cap (tokens)").blur();
+  await expect(page.getByLabel("Epic cap", { exact: true })).toHaveText("spent 0 of 1.0k tokens");
+  await page.reload();
+  await expect(page.getByLabel("Epic cap (tokens)")).toHaveValue("1000");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});

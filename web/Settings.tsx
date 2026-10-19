@@ -7,6 +7,7 @@ type WorkspaceSettings = {
   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
   auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
+  monthly_cap_usd: number | null; monthly_cap_tokens: number | null;
 };
 
 export function Settings() {
@@ -80,6 +81,21 @@ export function Settings() {
         Max minutes per attempt
         <input name="max_minutes" type="number" min={5} max={600} step={1} defaultValue={s.max_minutes} required />
         <span className="hint">Wall-clock limit for the whole attempt, fix rounds included, counted from its start. Fast models run out of turns first; slow ones out of minutes.</span>
+      </label>
+
+      <h2>Spending caps</h2>
+      <label>
+        Monthly cap (USD)
+        <input name="monthly_cap_usd" type="number" min={0} step="any" defaultValue={s.monthly_cap_usd ?? ""} placeholder="No cap" />
+        <span className="hint">
+          Spend of every run this UTC calendar month, priced as on the Usage page (models without a price count $0). Once reached, no new run starts
+          and a running one stops before its next model call; its ticket fails with the reason. Empty: no cap.
+        </span>
+      </label>
+      <label>
+        Monthly cap (tokens)
+        <input name="monthly_cap_tokens" type="number" min={0} step={1} defaultValue={s.monthly_cap_tokens ?? ""} placeholder="No cap" />
+        <span className="hint">The same for tokens (in + out + cached, every model, Ollama included). A warning is logged on a run at 80%. Epics can have their own cap.</span>
       </label>
 
       <h2>Context</h2>

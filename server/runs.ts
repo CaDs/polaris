@@ -16,7 +16,7 @@ import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_I
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { ticketKey, today, trackerHeader } from "./tracker.ts";
-import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
+import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
 // Anthropic prices are from the claude-api skill's model table (2026-10-06): opus-5-5 $4/$20, sonnet-5-5 $2/$10, cache reads $0.20.
@@ -48,12 +48,14 @@ type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
+  monthly_cap_usd: number | null; monthly_cap_tokens: number | null;
 };
 // The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
 export const SETTINGS_DEFAULTS = {
   repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
   compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
+  monthly_cap_usd: null as number | null, monthly_cap_tokens: null as number | null, // spending caps; null = none
 };
 // Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
 const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
@@ -90,11 +92,67 @@ function providerConfig(opts: { model?: string; baseUrl?: string }) {
   return { model, provider: (task: string) => (fake ? demoProvider(task) : anthropic({ apiKey: apiKey!, baseUrl })) };
 }
 
-function recordCost(runId: string, model: string, usage: Usage) {
+// USD for tokens as the runs row counts them (input incl. cache writes, output, cache reads); 0 without a price.
+const price = (model: string, input: number, output: number, cached: number) => {
   const p = PRICES[model];
-  if (!p) return;
-  const cost = (usage.input + usage.cache_write) * p.input + usage.output * p.output + usage.cache_read * p.cache_read;
-  db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(cost / 1e6, runId);
+  return p ? (input * p.input + output * p.output + cached * p.cache_read) / 1e6 : 0;
+};
+
+function recordCost(runId: string, model: string, usage: Usage) {
+  if (PRICES[model]) db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(price(model, usage.input + usage.cache_write, usage.output, usage.cache_read), runId);
+}
+
+// --- Spending caps (see SPEC "Spending caps") ---
+
+// What the runs matching `where` (over runs r JOIN tickets t) spent: tokens = in + out + cached (as /api/usage counts them),
+// USD priced from those tokens (= cost_usd once a run finished; a run in flight counts what it has used so far).
+function spend(where: string, ...params: (string | number)[]) {
+  const rows = db.prepare(`SELECT r.model, SUM(r.tokens_in) AS i, SUM(r.tokens_out) AS o, SUM(r.tokens_cached) AS c FROM runs r JOIN tickets t ON t.id = r.ticket_id
+    WHERE ${where} GROUP BY r.model`).all(...params) as { model: string; i: number; o: number; c: number }[];
+  return rows.reduce((a, r) => ({ usd: a.usd + price(r.model, r.i, r.o, r.c), tokens: a.tokens + r.i + r.o + r.c }), { usd: 0, tokens: 0 });
+}
+// The workspace's spend in the current UTC calendar month (by run start; every run, eval cases and wiki runs included).
+export function monthSpend(ws: string) {
+  const month = new Date().toISOString().slice(0, 7);
+  return { month, ...spend("t.workspace_id = ? AND r.started_at >= ?", ws, Date.parse(`${month}-01T00:00:00Z`)) };
+}
+// A ticket's own runs and every descendant's: an epic's planner rounds + its whole tree of children. Any month.
+export const treeSpend = (id: string) => spend(`t.id IN (${TREE} SELECT id FROM d) AND ${OWN_RUNS}`, id);
+
+const money = (n: number) => `$${Number(n.toFixed(4))}`;
+
+// The one cap check, before every model call of a pipeline run but those inside one agent call: at the run's start and at
+// each later boundary (fix round, reviewer, wiki fix round; a planner round is its own run). Caps: the workspace's monthly
+// USD and tokens, and the caps of the ticket and of each epic above it (ticketId: the run's own ticket; none for eval case
+// and wiki runs). Reached (used >= cap) → an error event SpendingCap with the numbers, then it throws: the run fails with
+// "SpendingCap: spending cap reached: <which> <used>/<cap>". At 80% → one SpendingCapWarning per run.
+function capCheck(ws: string, ticketId: string | undefined, runId: string, log: Ctx["log"]) {
+  const s = settingsFor(ws);
+  const caps: { which: string; used: number; cap: number; usd: boolean }[] = [];
+  if (s && (s.monthly_cap_usd !== null || s.monthly_cap_tokens !== null)) {
+    const m = monthSpend(ws);
+    if (s.monthly_cap_usd !== null) caps.push({ which: `workspace ${m.month} cost`, used: m.usd, cap: s.monthly_cap_usd, usd: true });
+    if (s.monthly_cap_tokens !== null) caps.push({ which: `workspace ${m.month} tokens`, used: m.tokens, cap: s.monthly_cap_tokens, usd: false });
+  }
+  const capped = !ticketId ? [] : db.prepare(`WITH RECURSIVE a(id) AS (SELECT ? UNION ALL SELECT t.parent_id FROM tickets t JOIN a ON t.id = a.id WHERE t.parent_id IS NOT NULL)
+    SELECT t.id, t.cap_usd, t.cap_tokens, ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id
+    WHERE t.id IN (SELECT id FROM a) AND (t.cap_usd IS NOT NULL OR t.cap_tokens IS NOT NULL)`).all(ticketId) as { id: string; cap_usd: number | null; cap_tokens: number | null; key: string }[];
+  for (const e of capped) {
+    const t = treeSpend(e.id);
+    if (e.cap_usd !== null) caps.push({ which: `${e.key} cost`, used: t.usd, cap: e.cap_usd, usd: true });
+    if (e.cap_tokens !== null) caps.push({ which: `${e.key} tokens`, used: t.tokens, cap: e.cap_tokens, usd: false });
+  }
+  const text = (c: (typeof caps)[number]) => `${c.which} ${c.usd ? `${money(c.used)}/${money(c.cap)}` : `${c.used}/${c.cap}`}`;
+  const numbers = ({ which, used, cap }: (typeof caps)[number]) => ({ which, used, cap });
+  const over = caps.find((c) => c.used >= c.cap);
+  if (over) {
+    const message = `spending cap reached: ${text(over)}`;
+    log({ type: "error", payload: { kind: "SpendingCap", message, cap: numbers(over) } });
+    throw new AgentError("SpendingCap", message);
+  }
+  const near = caps.find((c) => c.used >= 0.8 * c.cap);
+  if (near && !db.prepare("SELECT 1 FROM events WHERE run_id = ? AND type = 'error' AND json_extract(payload, '$.kind') = 'SpendingCapWarning'").get(runId))
+    log({ type: "error", payload: { kind: "SpendingCapWarning", message: `80% of a spending cap used: ${text(near)}`, cap: numbers(near) } });
 }
 
 const tail = (r: ExecResult, n = 4000) => truncate((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim(), n, "tail");
@@ -424,22 +482,26 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
 }
 
 type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"] };
-type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog> };
+type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog>; cap: () => void }; // cap: capCheck for this run (throws)
 // An agent call's events, minus the ones the pipeline writes itself once for the whole run.
 const relay = (log: Ctx["log"]) => (e: AgentEvent) => void (e.type !== "run_finished" && e.type !== "run_metrics" && log(e));
 
 // What every queued run (worker, eval case, planner round, wiki maintainer) shares: `work` fills res, which starts failed
 // with nothing used; a throw fails it (logged unless cancelled), and a cancel wins over any outcome. Then `ending` (before
 // run_finished: reflection, handoff, round notes), run_finished with its cost, and `after` (cleanup, what happens next).
+// The spending caps are checked first: a run over one fails before its worktree, sandbox or first call.
 async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx) => Promise<void>, ending: (res: Result, c: Ctx) => Promise<void> | void, after: (res: Result) => Promise<void>) {
-  const c: Ctx = { signal: controllers.get(runId)!.signal, log: eventLog(runId) };
+  const r = db.prepare(`SELECT t.workspace_id, r.ticket_id, ${OWN_RUNS} AS own FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.id = ?`).get(runId) as { workspace_id: string; ticket_id: string; own: number };
+  const log = eventLog(runId);
+  const c: Ctx = { signal: controllers.get(runId)!.signal, log, cap: () => capCheck(r.workspace_id, r.own ? r.ticket_id : undefined, runId, log) };
   const res: Result = { status: "failed", turns: 0, usage: noUsage() };
   try {
+    c.cap();
     await work(res, c);
   } catch (e) {
     const kind = e instanceof AgentError ? e.kind : "UnexpectedEnvironment";
     [res.status, res.reason] = ["failed", `${kind}: ${(e as Error).message}`];
-    if (!c.signal.aborted) c.log({ type: "error", payload: { kind, message: (e as Error).message } });
+    if (!c.signal.aborted && kind !== "SpendingCap") c.log({ type: "error", payload: { kind, message: (e as Error).message } }); // capCheck logged it with its numbers
   } finally {
     if (c.signal.aborted) [res.status, res.reason] = ["cancelled", "cancelled"];
     await ending(res, c);
@@ -487,7 +549,7 @@ async function execute(runId: string) {
   let reply = ""; // the agent's final text (handoff)
   let gateOutput = "";
   const worktree = join(dataDir(), "worktrees", runId);
-  return pipeline(runId, run.model, async (res, { signal, log }) => {
+  return pipeline(runId, run.model, async (res, { signal, log, cap }) => {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "no repository configured for this workspace");
     // The ticket's own test_command (when set) overrides the workspace one; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
@@ -569,6 +631,7 @@ async function execute(runId: string) {
     };
     // A fix round (FIX_ROUNDS): resumes the worker's own conversation with `message`; false = it ended the attempt.
     const fixRound = async (why: string, message: string) => {
+      cap();
       a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: { ...workerBudget, maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - res.turns) }, finishHint: WORKER_FINISH });
       addUsage(res.usage, a.usage);
       res.metrics = addMetrics(res.metrics!, a.metrics);
@@ -608,6 +671,7 @@ async function execute(runId: string) {
     // M8 model review: the same model reviews the uncommitted change; findings go back to the worker in its own conversation.
     // A reviewer that errors or never submits is logged and skipped (fail-open): the human still reviews.
     for (let round = 1; !ev && s!.model_review; round++) {
+      cap();
       const out: { review?: Review } = {};
       const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
       const lines = await changedLines(worktree, base_sha);
@@ -644,7 +708,7 @@ async function execute(runId: string) {
       };
     await sandbox?.close();
     if (signal.aborted) retry = false;
-    if (!run.eval_run_id && s && !retry && status !== "cancelled")
+    if (!run.eval_run_id && s && !retry && status !== "cancelled" && !reason?.startsWith("SpendingCap:")) // reflecting is a model call too
       log({ type: "reflection", payload: await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
     if (t.parent_id && !run.eval_run_id && !retry && status !== "cancelled") {
       const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${truncate(gateOutput, 1000, "tail")}\n\`\`\`` : ""}`);
@@ -656,8 +720,9 @@ async function execute(runId: string) {
     if ((status !== "passed" || run.eval_run_id) && cfg) await removeWorktree(cfg.repo_path, worktree, branch ?? null, dataDir());
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
     else if (retry) queue(t, run.model, run.attempt + 1, run.provider_id); // same provider and model
-    // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors, stuck).
-    else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
+    // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors, stuck,
+    // a spending cap).
+    else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck|SpendingCap):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
     else {
       setTicket(t.id, TICKET_STATUS[status]);
       if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
@@ -734,6 +799,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
 // otherwise the epic keeps waiting for children (wake).
 async function afterRound(t: TicketRow, runId: string, status: RunStatus, reason: string | undefined, summary?: string) {
   if (status === "cancelled") return setTicket(t.id, "todo");
+  if (reason?.startsWith("SpendingCap:")) return failEpic(t.id, reason); // a fresh round would be refused too
   if (status !== "passed") {
     const [last, prev] = rounds(t.id, 2);
     if (prev?.status === "failed" || last.attempt >= MAX_ROUNDS) return failEpic(t.id, `A planner round failed${prev?.status === "failed" ? " twice in a row" : ""}: ${reason}`);
@@ -872,7 +938,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
   const ws = t.workspace_id;
   const s = settingsFor(ws);
   const root = join(dataDir(), "worktrees", runId);
-  return pipeline(runId, run.model, async (res, { signal, log }) => {
+  return pipeline(runId, run.model, async (res, { signal, log, cap }) => {
     if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
     await wikiSerial(ws, async () => {
       if (signal.aborted) throw new AgentError("UserAborted", "cancelled");
@@ -933,6 +999,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
           log({ type: "error", payload: { kind: "InvalidArguments", message: `${res.reason}:\n${r.problems.join("\n")}` } });
           return;
         }
+        cap();
         const resume = { messages: a.messages, message: `# Wiki check failed\n\nThe harness found these problems in your wiki changes:\n${r.problems.map((p) => `- ${p}`).join("\n")}\n\nFix them with edit_file or delete_file, then reply with a short summary. The check runs again.` };
         a = await runAgent({ ...common, resume, budget: WIKI_FIX_BUDGET });
       }

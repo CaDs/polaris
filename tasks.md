@@ -122,7 +122,7 @@
 - [x] Stuck monitor: repeated call/error and no-progress heuristics; nudge, then end the attempt (retried fresh)
 - [ ] Stuck monitor: a decision model checks every few turns whether the agent is stuck
 - [ ] Separate reviewer model per workspace
-- [ ] Spending caps per epic and per workspace
+- [x] Spending caps per epic and per workspace
 - [x] Sandbox containers run as a non-root user
 - [x] A planner round that crashes is restarted (once, by a fresh round; a second failure in a row fails the epic)
 - [ ] Ticket comments and notifications

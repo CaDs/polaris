@@ -49,7 +49,7 @@ defaults (120/60), not the workspace's values, so scores stay comparable when Se
 - A reply that stops on `max_tokens` without a tool call is not an answer: a "continue" user message is appended (≤ 2 in a row, then the run fails).
 - A reply with `stop_reason: refusal` fails the run (`ProviderError`), it does not count as passed.
 - A tool call whose JSON arguments were cut off is answered with an `InvalidArguments` tool_result; the tool does not run.
-- Error classes: `InvalidArguments`, `UnexpectedEnvironment`, `ProviderError`, `Timeout`, `UserAborted`; anything else is a harness bug.
+- Error classes: `InvalidArguments`, `UnexpectedEnvironment`, `ProviderError`, `Timeout`, `UserAborted`, `SpendingCap` (see Spending caps); anything else is a harness bug.
 
 ## Stuck monitor and run metrics (M12)
 
@@ -82,6 +82,27 @@ budget ended it. The loop now watches for that, without a decision model. Consta
   /api/tickets/:id`; `GET /api/metrics?days=14` (1..90): `{days, rows: [{day, model, runs, passed, failed, cancelled, measured,
   mean_turns_pct, sum_turns_pct, stuck, tool_calls, tool_errors, tool_error_rate (0–1), mean_files_changed}]}` per UTC day of
   run start and model, newest first; `measured` = runs with `run_metrics` (the averages and sums are over those).
+
+## Spending caps (M12)
+
+- **Caps.** Workspace settings `monthly_cap_usd` and `monthly_cap_tokens` (default `null` = no cap; non-negative, tokens
+  whole; `""` from the form clears) over the current UTC calendar month by run start, every run of the workspace (eval
+  cases and wiki runs included). Per ticket `cap_usd` / `cap_tokens` (ticket POST/PATCH, edited in an epic's header)
+  over the ticket's own runs and every descendant's, any month: an epic's covers its planner rounds and the whole tree.
+  Children inherit nothing; a ticket is checked against its own cap and every capped epic above it.
+- **Measure.** Tokens = in + out + cached, as `/api/usage` counts them. USD from the same `PRICES` that books `cost_usd`,
+  computed from the runs rows' tokens, so a run in flight counts what it used so far; a model without a price (Ollama,
+  demo) costs $0 but its tokens count.
+- **Enforcement**: one function, `capCheck` (`server/runs.ts`), called by `pipeline()` before a run's work (no worktree,
+  sandbox or call yet) and before every later model call of a run: a gate or review fix round, each reviewer, a wiki fix
+  round (a planner round is its own run). A call in flight always finishes. Reached (used ≥ cap): an `error` event `{kind:
+  "SpendingCap", message, cap: {which, used, cap}}` and the run fails `SpendingCap: spending cap reached: <which>
+  <used>/<cap>` (which: `workspace <YYYY-MM> cost|tokens` or `<KEY> cost|tokens`). Never retried, never split, no
+  reflection (another call); a child hands off the reason and its planner's next round is refused too, which fails the
+  epic at once (no fresh-round retry). At 80% of any cap: one `error` event `SpendingCapWarning` per run.
+- **Visibility.** `GET /api/usage` has `cap: {usd, tokens, used_usd, used_tokens, month}` (the Usage page shows a bar per
+  set cap); an epic's `GET /api/tickets/:id` has `spent: {usd, tokens}` (its header: "spent $x of $y").
+- Not capped: CLI runs (`npm run agent`, no pipeline) and triage calls (Ollama, free).
 
 ## Context management (M5)
 
@@ -339,7 +360,7 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
   epic is open in its place; the planner hears of both when something next settles). The task's label is `split into
   KEY (failed as one ticket)`, not open. Not split: children of a sub-epic (the new epic would be a third level), a
   child whose epic already has `MAX_CHILDREN`, a ticket that was already split once (a manual re-run that fails stays
-  failed), and failures that a smaller ticket would hit too (`ProviderError`, `UnexpectedEnvironment`, `Unknown`). The
+  failed), and failures that a smaller ticket would hit too (`ProviderError`, `UnexpectedEnvironment`, `Unknown`, `SpendingCap`). The
   UI shows "Escalated to KEY" on the task and "Split from KEY" on the epic. A split epic that can't be queued fails with
   the reason, which wakes the parent.
 - **Size hint.** Workspace setting `child_size_hint` (default "at most 3 files and about 60 changed lines, finishable in

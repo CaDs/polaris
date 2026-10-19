@@ -3,6 +3,7 @@ import { Loading, api, cost, fmt, hitRate, useApi } from "./ui.tsx";
 
 type Row = { runs: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number };
 type Usage = {
+  cap: { usd: number | null; tokens: number | null; used_usd: number; used_tokens: number; month: string };
   totals: Row;
   days: (Row & { day: string })[];
   models: (Row & { model: string })[];
@@ -102,6 +103,30 @@ function Runs() {
   );
 }
 
+// The workspace's monthly spending caps (Settings), when set: used / cap, full and red once reached.
+function Caps({ cap }: { cap: Usage["cap"] }) {
+  const bars = [
+    cap.usd !== null && { label: "Cost", used: cap.used_usd, max: cap.usd, text: `$${cap.used_usd.toFixed(2)} of $${cap.usd.toFixed(2)}` },
+    cap.tokens !== null && { label: "Tokens", used: cap.used_tokens, max: cap.tokens, text: `${fmt(cap.used_tokens)} of ${fmt(cap.tokens)}` },
+  ].filter((b) => !!b);
+  if (!bars.length) return null;
+  return (
+    <section aria-label="Spending cap">
+      <h3>Spending cap <span className="muted">{cap.month} (UTC)</span></h3>
+      {bars.map((b) => {
+        const share = b.max ? Math.min(100, (100 * b.used) / b.max) : 100;
+        return (
+          <p key={b.label} className={b.used >= b.max ? "error" : share >= 80 ? "warn" : undefined}>
+            {b.label}: <span className="bar" style={{ width: 160 }} role="meter" aria-label={`${b.label} cap used`} aria-valuenow={Math.round(share)} aria-valuemin={0} aria-valuemax={100}>
+              <span style={{ width: `${share}%`, background: b.used >= b.max ? "var(--error)" : share >= 80 ? "var(--warn)" : undefined }} />
+            </span> {b.text}{b.used >= b.max && " — reached, new runs are refused"}
+          </p>
+        );
+      })}
+    </section>
+  );
+}
+
 export function UsagePage() {
   const [u, setU] = useState<Usage | null>(null);
   const [error, setError] = useState("");
@@ -117,6 +142,7 @@ export function UsagePage() {
       <section className="stats" aria-label="Totals">
         {stats.map(([k, v]) => <div key={k}><span className="muted">{k}</span><strong>{v}</strong></div>)}
       </section>
+      <Caps cap={u.cap} />
       <Runs />
       <Table label="Per day" first="Day (UTC)" rows={u.days.map((d) => ({ key: d.day, cell: <span className="mono">{d.day}</span>, row: d }))} />
       <Table label="Per model" first="Model" rows={u.models.map((m) => ({ key: m.model, cell: <span className="mono">{m.model}</span>, row: m }))} />

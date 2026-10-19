@@ -8,8 +8,8 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake, type Choice } from "./runs.ts";
-import { OWN_RUNS, withStates } from "./planner.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, monthSpend, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
+import { OWN_RUNS, TREE, withStates } from "./planner.ts";
 import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
 import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
@@ -80,8 +80,6 @@ const TICKETS = `
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id) AS child_count,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done,${TRACKER_COLS}
   FROM tickets t JOIN organization o ON o.id = t.workspace_id`;
-// d = the ticket bound to ? and all of its descendants (epic → children → a sub-epic's children).
-const TREE = "WITH RECURSIVE d(id) AS (SELECT ? UNION ALL SELECT t.id FROM tickets t JOIN d ON t.parent_id = d.id)";
 
 const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
   hydrate(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined);
@@ -112,7 +110,18 @@ function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v:
 
 // Validated fields of a JSON body, or an error message.
 // cur: the ticket being patched (its tracker fields are validated against it).
-type Fields = { title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null; tracker: TrackerFields };
+type Fields = {
+  title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null; cap_usd?: number | null; cap_tokens?: number | null;
+  tracker: TrackerFields;
+};
+// A spending cap: a non-negative number (tokens: whole), null or "" (an empty form field) = no cap; undefined = invalid.
+const CAPS: Record<string, [boolean, string]> = { cap_usd: [false, "Cap (USD)"], cap_tokens: [true, "Cap (tokens)"], monthly_cap_usd: [false, "Monthly cap (USD)"], monthly_cap_tokens: [true, "Monthly cap (tokens)"] };
+function capOf(x: unknown, whole: boolean) {
+  if (x === null || x === "") return null;
+  const n = typeof x === "number" || (typeof x === "string" && x.trim()) ? Number(x) : NaN;
+  return Number.isFinite(n) && n >= 0 && (!whole || Number.isInteger(n)) ? n : undefined;
+}
+const capError = (k: string) => `${CAPS[k][1]} must be a non-negative ${CAPS[k][0] ? "whole number" : "number"}, or empty for no cap`;
 async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any>): Promise<{ error: string } | { v: Fields }> {
   const b = await c.req.json().catch(() => null);
   if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };
@@ -139,6 +148,12 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
     if (b.test_command !== null && (typeof b.test_command !== "string" || b.test_command.length > 2000)) return { error: "test_command must be a string of at most 2000 chars or null" };
     v.test_command = b.test_command || null;
   }
+  for (const k of ["cap_usd", "cap_tokens"] as const)
+    if (b[k] !== undefined) {
+      const n = capOf(b[k], CAPS[k][0]);
+      if (n === undefined) return { error: capError(k) };
+      v[k] = n;
+    }
   const tracker = trackerFields(c.get("workspaceId"), b, v.kind ?? cur?.kind ?? "task", cur as any);
   return "error" in tracker ? tracker : { v: { ...v, tracker } };
 }
@@ -154,8 +169,8 @@ app.post("/api/tickets", async (c) => {
   const p = await parse(c, false);
   if ("error" in p) return c.json(p, 400);
   const id = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null,
+  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command, cap_usd, cap_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null, p.v.cap_usd ?? null, p.v.cap_tokens ?? null,
   );
   applyTracker(id, p.v.tracker);
   return c.json(ticketIn(c, id), 201);
@@ -169,7 +184,7 @@ app.get("/api/tickets/:id", (c) => {
     WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({ ...r, metrics: r.metrics && JSON.parse(r.metrics) }));
   if (t.kind !== "epic") return c.json({ ...t, runs });
   const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id).map((r) => hydrate(r)) as any[];
-  return c.json({ ...t, runs, children: withStates(tree) });
+  return c.json({ ...t, runs, children: withStates(tree), spent: treeSpend(t.id) }); // spent: what its caps measure
 });
 
 app.patch("/api/tickets/:id", async (c) => {
@@ -180,9 +195,9 @@ app.patch("/api/tickets/:id", async (c) => {
   const v = p.v;
   const moved = v.status === undefined ? undefined : await moveTicket(t.id, v.status); // first: a refused move changes nothing
   if (moved) return c.json(moved, 409);
-  db.prepare("UPDATE tickets SET title = ?, spec = ?, provider_id = ?, model = ?, test_command = ?, updated_at = ? WHERE id = ?").run(
+  db.prepare("UPDATE tickets SET title = ?, spec = ?, provider_id = ?, model = ?, test_command = ?, cap_usd = ?, cap_tokens = ?, updated_at = ? WHERE id = ?").run(
     v.title ?? t.title, v.spec ?? t.spec, v.provider_id === undefined ? t.provider_id : v.provider_id, v.model === undefined ? t.model : v.model,
-    v.test_command === undefined ? t.test_command : v.test_command, Date.now(), t.id,
+    v.test_command === undefined ? t.test_command : v.test_command, v.cap_usd === undefined ? t.cap_usd : v.cap_usd, v.cap_tokens === undefined ? t.cap_tokens : v.cap_tokens, Date.now(), t.id,
   );
   applyTracker(t.id, v.tracker);
   if (v.tracker.parent_id) await startReady(v.tracker.parent_id); // moved into a running epic: queued like a planner's ticket
@@ -277,7 +292,10 @@ app.put("/api/settings", async (c) => {
     const x = b[k];
     if (x === undefined) continue;
     if (x === null) v[k] = SETTINGS_DEFAULTS[k];
-    else if (TOGGLES.has(k)) v[k] = x === true || x === 1 || x === "1" || x === "on" ? 1 : 0;
+    else if (CAPS[k]) {
+      v[k] = capOf(x, CAPS[k][0]);
+      if (v[k] === undefined) return c.json({ error: capError(k) }, 400);
+    } else if (TOGGLES.has(k)) v[k] = x === true || x === 1 || x === "1" || x === "on" ? 1 : 0;
     else if (LIMITS[k]) {
       const [lo, hi, label] = LIMITS[k];
       v[k] = typeof x === "number" || (typeof x === "string" && x.trim()) ? Number(x) : NaN; // form posts send strings
@@ -293,15 +311,16 @@ app.put("/api/settings", async (c) => {
   if ("error" in repo) return c.json(repo, 400);
   db.prepare(
     `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, model_review,
-       auto_split, child_size_hint, triage_model, wiki, max_turns, max_minutes, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       auto_split, child_size_hint, triage_model, wiki, max_turns, max_minutes, monthly_cap_usd, monthly_cap_tokens, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (workspace_id) DO UPDATE SET repo_path = excluded.repo_path, base_branch = excluded.base_branch, setup_command = excluded.setup_command,
        test_command = excluded.test_command, protected_paths = excluded.protected_paths, image = excluded.image, compact_at_tokens = excluded.compact_at_tokens,
        auto_approve_children = excluded.auto_approve_children, model_review = excluded.model_review, auto_split = excluded.auto_split,
-       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, max_turns = excluded.max_turns, max_minutes = excluded.max_minutes, updated_at = excluded.updated_at`,
+       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, max_turns = excluded.max_turns, max_minutes = excluded.max_minutes,
+       monthly_cap_usd = excluded.monthly_cap_usd, monthly_cap_tokens = excluded.monthly_cap_tokens, updated_at = excluded.updated_at`,
   ).run(
     c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, v.compact_at_tokens, v.auto_approve_children,
-    v.model_review, v.auto_split, v.child_size_hint, v.triage_model, v.wiki, v.max_turns, v.max_minutes, Date.now(),
+    v.model_review, v.auto_split, v.child_size_hint, v.triage_model, v.wiki, v.max_turns, v.max_minutes, v.monthly_cap_usd, v.monthly_cap_tokens, Date.now(),
   );
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });
@@ -319,7 +338,10 @@ app.get("/api/usage", (c) => {
     const day = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
     return withRate((byDay.get(day) ?? { day, runs: 0, tokens_in: 0, tokens_out: 0, tokens_cached: 0, cost_usd: 0 }) as any);
   });
+  const s = settingsFor(ws);
+  const m = monthSpend(ws);
   return c.json({
+    cap: { usd: s?.monthly_cap_usd ?? null, tokens: s?.monthly_cap_tokens ?? null, used_usd: m.usd, used_tokens: m.tokens, month: m.month }, // what capCheck measures
     totals: withRate(rows(`SELECT ${SUMS} ${FROM_RUNS}`)[0] as any),
     days,
     models: rows(`SELECT r.model, ${SUMS} ${FROM_RUNS} GROUP BY r.model ORDER BY SUM(r.tokens_in + r.tokens_out + r.tokens_cached) DESC, r.model`).map((r) => withRate(r as any)),

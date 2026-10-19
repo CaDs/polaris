@@ -40,7 +40,8 @@ export interface Provider {
 }
 
 // Anything not one of these is a harness bug and reported as "Unknown".
-export type ErrorKind = "InvalidArguments" | "UnexpectedEnvironment" | "ProviderError" | "Timeout" | "UserAborted" | "Unknown";
+// SpendingCap / SpendingCapWarning: the harness refused (warned about) a call over (at 80% of) a spending cap (runs.ts capCheck).
+export type ErrorKind = "InvalidArguments" | "UnexpectedEnvironment" | "ProviderError" | "Timeout" | "UserAborted" | "Unknown" | "SpendingCap" | "SpendingCapWarning";
 
 export class AgentError extends Error {
   kind: ErrorKind;
@@ -81,7 +82,8 @@ export type EventPayloads = {
   tool_call: { id: string; name: string; input: Record<string, unknown> };
   tool_result: { tool_use_id: string; content: string; is_error: boolean; error_kind?: ErrorKind };
   usage: Usage;
-  error: { kind: ErrorKind; message: string; retrying?: boolean }; // retrying: a provider call failed and is being retried
+  // retrying: a provider call failed and is being retried. cap: a SpendingCap(Warning)'s numbers (usd or tokens).
+  error: { kind: ErrorKind; message: string; retrying?: boolean; cap?: { which: string; used: number; cap: number } };
   // Conversation n was summarized and replaced by a fresh one (see loop.ts).
   compaction: { n: number; tokens_before: number; summary_chars: number; history_path: string };
   run_finished: { status: RunStatus; reason?: string; turns: number; usage: Usage };
