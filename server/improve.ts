@@ -6,6 +6,7 @@ import { parseProtected } from "./agent/tools.ts";
 import type { EventPayloads, Provider } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
+import { ticketKey } from "./tracker.ts";
 
 // M6 self-improvement, three loops (see SPEC "Self-improvement (M6)"):
 // 1. reflection after a run series → a new lessons version (applies to the next run at once; easy to restore);
@@ -68,7 +69,7 @@ export function addPrompt(ws: string, body: string, from: { source: "human" | "p
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const tailOf = (s: string, n: number) => (s.length > n ? `[...]${s.slice(-n)}` : s);
 const ticketOf = (runId: string) =>
-  db.prepare(`SELECT upper(substr(o.slug, 1, 3)) || '-' || t.number AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
+  db.prepare(`SELECT ${ticketKey()} AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
     JOIN organization o ON o.id = t.workspace_id WHERE r.id = ?`).get(runId) as { key: string; title: string };
 
 // One run from its event log: outcome, counts, tool errors (name + class + first line), setup/gate failures with output tails.

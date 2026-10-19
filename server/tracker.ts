@@ -67,6 +67,9 @@ const update = (table: string, rowId: string, v: Record<string, SQLInputValue>) 
 
 // --- ticket fields ---
 
+// SQL for a ticket's key: the first 3 letters of its workspace's slug + its number (POL-12). Needs organization joined as o.
+export const ticketKey = (t = "t") => `upper(substr(o.slug, 1, 3)) || '-' || ${t}.number`;
+
 // The tracker's part of ticket JSON. hydrate parses these columns.
 export const TRACKER_COLS = `
     (SELECT json_group_array(json_object('id', l.id, 'name', l.name, 'color', l.color) ORDER BY l.name COLLATE NOCASE) FROM ticket_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.ticket_id = t.id) AS labels,

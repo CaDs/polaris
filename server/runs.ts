@@ -15,7 +15,7 @@ import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordE
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
-import { today, trackerHeader } from "./tracker.ts";
+import { ticketKey, today, trackerHeader } from "./tracker.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
@@ -63,7 +63,7 @@ type TicketRow = {
   escalated_to: string | null;
 };
 const ticketRow = (id: string) =>
-  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key
+  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, ${ticketKey()} AS key
     FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as TicketRow | undefined;
 // Every ticket status change goes through here. Becoming done or failed settles a child: its planner may react (settled).
 // quiet: no reaction (a child replaced by a "Split:" epic: that epic is open in its place, nothing to wake up for).

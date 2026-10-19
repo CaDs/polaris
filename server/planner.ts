@@ -4,7 +4,7 @@ import { db } from "./db.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
-import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, trackerHeader } from "./tracker.ts";
+import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, ticketKey, trackerHeader } from "./tracker.ts";
 
 // M7 planner (see SPEC "Planner (M7)"). An epic's runs are planner rounds: each a fresh conversation with a read-only
 // checkout, the planner prompt file and the tools below. Children are ordinary tickets with parent_id = the epic; each
@@ -52,7 +52,7 @@ export type Child = {
 export const OWN_RUNS = "eval_run_id IS NULL AND role <> 'wiki'";
 
 export const childrenOf = (epicId: string) =>
-  db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
+  db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, ${ticketKey()} AS key,
       (SELECT COUNT(*) FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS}) AS run_count,
       r.status AS run_status, r.attempt, r.model, COALESCE(r.tokens_in + r.tokens_out, 0) AS tokens
     FROM tickets t JOIN organization o ON o.id = t.workspace_id
@@ -225,7 +225,7 @@ export function plannerTools(
         id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice and test command
       );
       applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
-      const key = `${epic.key.split("-")[0]}-${(db.prepare("SELECT number FROM tickets WHERE id = ?").get(id) as { number: number }).number}`;
+      const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;
       const error = await queue(id);

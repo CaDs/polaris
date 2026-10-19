@@ -11,7 +11,7 @@ import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvide
 import { OWN_RUNS, withStates } from "./planner.ts";
 import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
-import { applyTracker, hydrate, KINDS, STATUSES, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
+import { applyTracker, hydrate, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 
 migrate();
@@ -53,7 +53,7 @@ app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, 
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
 const OWN = `ticket_id = t.id AND ${OWN_RUNS}`; // wiki runs (M10) are listed in the ticket but never change its state or totals
 const TICKETS = `
-  SELECT t.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
+  SELECT t.*, ${ticketKey()} AS key,
     (SELECT status FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_status,
     (SELECT model FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_model,
     (SELECT p.auth_type FROM runs r JOIN providers p ON p.id = r.provider_id WHERE r.${OWN} ORDER BY r.rowid DESC LIMIT 1) AS run_auth,
@@ -63,9 +63,9 @@ const TICKETS = `
     (SELECT COALESCE(SUM(tokens_cached), 0) FROM runs WHERE ${OWN}) AS tokens_cached,
     (SELECT COALESCE(SUM(cost_usd), 0) FROM runs WHERE ${OWN}) AS cost_usd,
     (SELECT id FROM eval_cases WHERE ticket_id = t.id) AS eval_case_id,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || p.number FROM tickets p WHERE p.id = t.parent_id) AS parent_key,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || e.number FROM tickets e WHERE e.id = t.escalated_to) AS escalated_key,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || s.number FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
+    (SELECT ${ticketKey("p")} FROM tickets p WHERE p.id = t.parent_id) AS parent_key,
+    (SELECT ${ticketKey("e")} FROM tickets e WHERE e.id = t.escalated_to) AS escalated_key,
+    (SELECT ${ticketKey("s")} FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id) AS child_count,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done,${TRACKER_COLS}
   FROM tickets t JOIN organization o ON o.id = t.workspace_id`;
@@ -314,7 +314,7 @@ app.get("/api/usage", (c) => {
     days,
     models: rows(`SELECT r.model, ${SUMS} ${FROM_RUNS} GROUP BY r.model ORDER BY SUM(r.tokens_in + r.tokens_out + r.tokens_cached) DESC, r.model`).map((r) => withRate(r as any)),
     tickets: rows(
-      `SELECT t.id, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
+      `SELECT t.id, ${ticketKey()} AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
        WHERE t.workspace_id = ? AND t.hidden = 0 AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
     ).map((r) => withRate(r as any)),
   });
@@ -337,7 +337,7 @@ async function textBody(c: Context<Env>, max: number, what: string): Promise<{ e
 app.get("/api/lessons", (c) =>
   c.json({
     max: LESSONS_MAX,
-    versions: db.prepare(`SELECT l.*, r.attempt AS run_attempt, upper(substr(o.slug, 1, 3)) || '-' || t.number AS ticket_key, t.number AS ticket_number
+    versions: db.prepare(`SELECT l.*, r.attempt AS run_attempt, ${ticketKey()} AS ticket_key, t.number AS ticket_number
       FROM lessons l LEFT JOIN runs r ON r.id = l.run_id LEFT JOIN tickets t ON t.id = r.ticket_id LEFT JOIN organization o ON o.id = t.workspace_id
       WHERE l.workspace_id = ? ORDER BY l.version DESC`).all(c.get("workspaceId")),
   }),
@@ -422,7 +422,7 @@ app.get("/api/evals", (c) => {
   const caseRuns = db.prepare(`SELECT r.*, res.passed AS case_passed, res.turns, res.duration_ms, c.title AS case_title FROM runs r JOIN eval_runs er ON er.id = r.eval_run_id
     LEFT JOIN eval_results res ON res.run_id = r.id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE er.workspace_id = ? ORDER BY r.rowid`).all(ws) as Record<string, any>[];
   return c.json({
-    cases: db.prepare(`SELECT c.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
+    cases: db.prepare(`SELECT c.*, ${ticketKey()} AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
       JOIN organization o ON o.id = c.workspace_id WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
     runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id) })),
   });
@@ -472,7 +472,7 @@ app.get("/api/wiki", async (c) => {
   const s = settingsFor(ws);
   const base = s && (await headOf(s));
   const runs = db.prepare(`SELECT r.id, r.wiki_op, r.status, r.model, r.started_at, r.ended_at, r.tokens_in, r.tokens_out, r.tokens_cached, t.hidden,
-      CASE WHEN t.hidden THEN NULL ELSE upper(substr(o.slug, 1, 3)) || '-' || t.number END AS ticket_key, t.number AS ticket_number,
+      CASE WHEN t.hidden THEN NULL ELSE ${ticketKey()} END AS ticket_key, t.number AS ticket_number,
       (SELECT payload FROM events e WHERE e.run_id = r.id AND e.type = 'wiki' ORDER BY e.seq DESC LIMIT 1) AS result
     FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id WHERE t.workspace_id = ? AND r.role = 'wiki' ORDER BY r.rowid DESC LIMIT 20`).all(ws) as Record<string, any>[];
   return c.json({
