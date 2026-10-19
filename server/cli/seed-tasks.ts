@@ -23,11 +23,11 @@ export function parseTasks(md: string) {
   return items;
 }
 
-export function seedTasks(workspaceId: string, md: string) {
+export function seedTasks(ws: string, md: string) {
   let created = 0;
   for (const it of parseTasks(md)) {
-    if (db.prepare("SELECT 1 FROM tickets WHERE workspace_id = ? AND title = ?").get(workspaceId, it.title)) continue;
-    db.prepare("INSERT INTO tickets (id, workspace_id, title, spec) VALUES (?, ?, ?, ?)").run(randomUUID(), workspaceId, it.title, it.spec);
+    if (db.prepare("SELECT 1 FROM tickets WHERE workspace_id = ? AND title = ?").get(ws, it.title)) continue;
+    db.prepare("INSERT INTO tickets (id, workspace_id, title, spec) VALUES (?, ?, ?, ?)").run(randomUUID(), ws, it.title, it.spec);
     created++;
   }
   return created;

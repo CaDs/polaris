@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { capture, hostExec, type Exec } from "./agent/tools.ts";
+import { capture, hostExec, truncate, type Exec } from "./agent/tools.ts";
 import { git } from "./git.ts";
 
 // One Docker container per run: the worktree is bind-mounted at /work, protected paths are re-mounted read-only on
@@ -12,6 +12,7 @@ import { git } from "./git.ts";
 // the host instead (unit tests only: no isolation at all).
 const execFileP = promisify(execFile);
 export const SANDBOX_IMAGE = "polaris-sandbox:1";
+export const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
 // A docker image reference ([host[:port]/]path[:tag][@sha256:digest]), so a setting can't smuggle `docker run` flags.
 export const IMAGE_REF = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d+)?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?$/;
 export const dataDir = () => resolve(process.env.POLARIS_DATA_DIR ?? "data");
@@ -26,7 +27,7 @@ export function ensureImage(image: string) {
   building ??= execFileP("docker", ["image", "inspect", image]).catch(() =>
     execFileP("docker", ["build", "-q", "-t", image, "-f", join(dockerDir, "sandbox.Dockerfile"), dockerDir], { maxBuffer: 50e6 }).catch((e) => {
       building = undefined;
-      throw new Error(`building ${image} failed: ${String(e.stderr || e.message).slice(-2000)}`);
+      throw new Error(`building ${image} failed: ${truncate(String(e.stderr || e.message), 2000, "tail")}`);
     }),
   );
   return building;
@@ -34,7 +35,7 @@ export function ensureImage(image: string) {
 
 // Killing the local `docker exec` client does not stop the command inside the container. So the command runs under
 // `setsid` (new process group) and records the group leader's pid; timeout/abort kills that whole group in there.
-export function dockerExec(name: string): Exec {
+function dockerExec(name: string): Exec {
   return (command, { timeoutMs, signal }) => {
     const pidFile = `/tmp/.polaris-exec-${randomUUID()}`;
     const wrapped = `echo $$ > ${pidFile}; exec sh -c "$1"`;
@@ -68,7 +69,7 @@ export async function openSandbox(runId: string, worktree: string, protectedPath
   return { name, exec: dockerExec(name), close: () => removeContainer(name) };
 }
 
-export const removeContainer = (name: string) => execFileP("docker", ["rm", "-f", name]).then(() => {}, () => {});
+const removeContainer = (name: string) => execFileP("docker", ["rm", "-f", name]).then(() => {}, () => {});
 
 // Startup: containers left by a dead process of this harness (same data dir). Other instances' containers are untouched.
 export async function removeStaleContainers() {

@@ -4,19 +4,19 @@ import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
 import { createRun, eventLog } from "./agent/events.ts";
 import { listSkills, skillsText, type Skill } from "./agent/context.ts";
-import { runAgent } from "./agent/loop.ts";
+import { runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
-import { parseProtected, tools, toolsFor, wikiTools, type ExecResult } from "./agent/tools.ts";
-import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
+import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
+import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
-import { dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
-import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
-import { trackerHeader } from "./tracker.ts";
-import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
+import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { ticketKey, today, trackerHeader } from "./tracker.ts";
+import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
 // Anthropic prices are from the claude-api skill's model table (2026-10-06): opus-5-5 $4/$20, sonnet-5-5 $2/$10, cache reads $0.20.
@@ -28,14 +28,11 @@ const PRICES: Record<string, { input: number; output: number; cache_read: number
 };
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
-export const controllers = new Map<string, AbortController>();
+const controllers = new Map<string, AbortController>();
 
 const TICKET_STATUS: Record<RunStatus, string> = { passed: "review", failed: "failed", cancelled: "todo" };
 const MAX_ATTEMPTS = 3; // gate failures retry automatically, with the failure fed back, up to this attempt
-const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
-const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
-// Eval case runs use these frozen defaults (the migration's), not the workspace's: a score must not move when someone edits Settings.
-const EVAL_WORKER = { max_turns: 120, max_minutes: 60 };
+export const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
 // FIX_ROUNDS, one rule for both kinds: a fix round resumes the worker's own conversation within the attempt, at most
 // GATE_FIX_ROUNDS times after a failed gate (counted across the whole attempt) and MAX_REVIEW_ROUNDS - 1 times after
 // review findings. One that ends without finishing (budget, provider) fails the attempt as "<why>; the fix round ended:
@@ -45,7 +42,7 @@ const GATE_FIX_ROUNDS = 1;
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
 
-export type Settings = {
+type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
@@ -56,15 +53,17 @@ export const SETTINGS_DEFAULTS = {
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
   compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
 };
-export const settingsFor = (workspaceId: string) =>
-  db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
+// Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
+const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
+export const settingsFor = (ws: string) =>
+  db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as Settings | undefined;
 
 type TicketRow = {
   id: string; workspace_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string; test_command: string | null;
   escalated_to: string | null;
 };
 const ticketRow = (id: string) =>
-  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key
+  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, ${ticketKey()} AS key
     FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as TicketRow | undefined;
 // Every ticket status change goes through here. Becoming done or failed settles a child: its planner may react (settled).
 // quiet: no reaction (a child replaced by a "Split:" epic: that epic is open in its place, nothing to wake up for).
@@ -96,10 +95,7 @@ function recordCost(runId: string, model: string, usage: Usage) {
   db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(cost / 1e6, runId);
 }
 
-const tail = (r: ExecResult, n = 4000) => {
-  const s = (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim();
-  return s.length > n ? `[...]\n${s.slice(-n)}` : s;
-};
+const tail = (r: ExecResult, n = 4000) => truncate((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim(), n, "tail");
 
 // A failing test command (non-zero exit or timeout) is run once more at once: passing then means a flake, not a failure.
 // again is only called after a failure; the second result is the failure when it fails too.
@@ -196,10 +192,10 @@ function queue(t: TicketRow, model: string, attempt: number, providerId: string 
   return runId;
 }
 
-export type Pick = { provider_id?: string | null; model?: string | null };
+export type Choice = { provider_id?: string | null; model?: string | null };
 
 // Provider + model for a new run: the first of explicit choice → ticket → workspace default that sets either; none → env.
-function choose(t: TicketRow, s: Settings, pick?: Pick): { provider_id: string | null; model: string } {
+function choose(t: TicketRow, s: Settings, pick?: Choice): { provider_id: string | null; model: string } {
   const level = [pick, t, { provider_id: s.default_provider_id, model: s.default_model }].find((l) => l && (l.provider_id || l.model));
   if (!level?.provider_id) return { provider_id: null, model: providerConfig({ model: level?.model ?? undefined }).model };
   const p = providerById(level.provider_id);
@@ -219,7 +215,7 @@ export function metaProvider(ws: string) {
 // Queues attempt 1 of a ticket (an epic: its next planner round) after checking the workspace's repo settings. Errors are user-facing.
 // M9: a top-level task's first run is triaged first when the workspace has a triage model; too large → split instead (the
 // returned run is the new epic's round 1, which logs the triage that split it: `triaged`).
-export async function enqueueRun(ticketId: string, pick?: Pick, triaged?: EventPayloads["triage"]): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
+export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: EventPayloads["triage"]): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
   const t = ticketRow(ticketId);
   if (!t) return { error: "not_found", status: 400 };
   const s = settingsFor(t.workspace_id);
@@ -320,10 +316,10 @@ function previousAttempt(ticketId: string, reply: string) {
     all("run_finished").map((f) => `- Attempt ${f.attempt}: ${f.status}${f.reason && f.reason !== f.status ? ` (${f.reason})` : ""}, ${f.turns} turns`).join("\n"),
   ];
   const gate = all("test_result").findLast((g) => !g.passed);
-  if (gate) parts.push(`Last test gate failure: ${gateFailure(gate)}\n\`\`\`\n${gate.output.slice(-2000)}\n\`\`\``);
+  if (gate) parts.push(`Last test gate failure: ${gateFailure(gate)}\n\`\`\`\n${truncate(gate.output, 2000, "tail")}\n\`\`\``);
   const review = all("model_review").findLast((r) => r.verdict === "request_changes");
   if (review) parts.push(`Last model review findings:\n${findingsText(review.findings)}`);
-  if (reply) parts.push(`The worker's final reply:\n${reply.length > 4000 ? `${reply.slice(0, 4000)}\n[… truncated]` : reply}`);
+  if (reply) parts.push(`The worker's final reply:\n${truncate(reply, 4000, "head")}`);
   return parts.join("\n\n");
 }
 
@@ -417,6 +413,41 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
   }
 }
 
+type Result = Omit<RunResult, "messages">;
+type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog> };
+
+// What every queued run (worker, eval case, planner round, wiki maintainer) shares: `work` fills res, which starts failed
+// with nothing used; a throw fails it (logged unless cancelled), and a cancel wins over any outcome. Then `ending` (before
+// run_finished: reflection, handoff, round notes), run_finished with its cost, and `after` (cleanup, what happens next).
+async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx) => Promise<void>, ending: (res: Result, c: Ctx) => Promise<void> | void, after: (res: Result) => Promise<void>) {
+  const c: Ctx = { signal: controllers.get(runId)!.signal, log: eventLog(runId) };
+  const res: Result = { status: "failed", turns: 0, usage: noUsage() };
+  try {
+    await work(res, c);
+  } catch (e) {
+    const kind = e instanceof AgentError ? e.kind : "UnexpectedEnvironment";
+    [res.status, res.reason] = ["failed", `${kind}: ${(e as Error).message}`];
+    if (!c.signal.aborted) c.log({ type: "error", payload: { kind, message: (e as Error).message } });
+  } finally {
+    if (c.signal.aborted) [res.status, res.reason] = ["cancelled", "cancelled"];
+    await ending(res, c);
+    c.log({ type: "run_finished", payload: { status: res.status, reason: res.reason, turns: res.turns, usage: res.usage } });
+    recordCost(runId, model, res.usage);
+    await after(res);
+  }
+}
+
+// The run's stored provider (deleted: the run fails), its context window and compaction threshold (logged), and the
+// provider for a task (the env fallback is per task: the demo provider scripts by it).
+async function modelFor(run: RunRow, capTokens: number | undefined, log: Ctx["log"]) {
+  const stored = run.provider_id ? providerById(run.provider_id) : undefined;
+  if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
+  const w = await runWindow(stored, run.model);
+  const compactAt = compactThreshold(capTokens, w.window);
+  log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
+  return { stored, compactAt, providerFor: (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task)) };
+}
+
 // queued → worktree + sandbox → setup command → agent loop → test gate + protected-path check → commit.
 // Pass: ticket → review. Gate failure: next attempt queued (≤ MAX_ATTEMPTS), else ticket → failed (M9: and split, with
 // auto_split on). Cancel: ticket → todo.
@@ -433,20 +464,14 @@ async function execute(runId: string) {
   const s = settingsFor(t.workspace_id);
   const ev = run.eval_case_id ? (db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(run.eval_case_id) as EvalCase | undefined) : undefined;
   const cfg = run.eval_run_id ? ev : s; // repo_path, setup/test command, protected paths, image
-  const signal = controllers.get(runId)!.signal;
-  const log = eventLog(runId);
   const attemptStart = Date.now();
-  let usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-  let turns = 0;
-  let status: RunStatus = "failed";
-  let reason: string | undefined;
   let retry = false;
   let sandbox: Sandbox | undefined;
   let branch: string | undefined;
   let reply = ""; // the agent's final text (handoff)
   let gateOutput = "";
   const worktree = join(dataDir(), "worktrees", runId);
-  try {
+  return pipeline(runId, run.model, async (res, { signal, log }) => {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "no repository configured for this workspace");
     // The ticket's own test_command (when set) overrides the workspace one; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
@@ -497,24 +522,18 @@ async function execute(runId: string) {
     const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
-    const stored = run.provider_id ? providerById(run.provider_id) : undefined;
-    if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
-    const w = await runWindow(stored, run.model);
-    const compactAt = compactThreshold(s?.compact_at_tokens, w.window);
-    log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
+    const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
       onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e), // this pipeline writes the final run_finished
     };
-    const providerFor = (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task));
-    const addUsage = (u: Usage) => (Object.keys(u) as (keyof Usage)[]).forEach((k) => (usage[k] += u[k]));
     // Turns count per agent call (initial run, each fix round); the minutes run from the attempt's start, across all of them.
     const limits = ev || !s ? EVAL_WORKER : s;
     const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
     let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
-    ({ usage, turns, status, reason } = a);
+    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason } = a);
     reply = finalText(a.messages);
-    if (status !== "passed") return;
+    if (res.status !== "passed") return;
 
     // Runs the tests and the protected-path check, logging test_result. A failure that is not a protected-path change is
     // re-run once at once (flaky).
@@ -533,11 +552,11 @@ async function execute(runId: string) {
     // A fix round (FIX_ROUNDS): resumes the worker's own conversation with `message`; false = it ended the attempt.
     const fixRound = async (why: string, message: string) => {
       a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
-      addUsage(a.usage);
-      turns += a.turns;
+      addUsage(res.usage, a.usage);
+      res.turns += a.turns;
       reply = finalText(a.messages);
       if (a.status === "passed") return true;
-      [status, reason] = [a.status, `${why}; the fix round ended: ${a.reason}`];
+      [res.status, res.reason] = [a.status, `${why}; the fix round ended: ${a.reason}`];
       retry = a.status === "failed" && run.attempt < MAX_ATTEMPTS;
       return false;
     };
@@ -558,8 +577,8 @@ async function execute(runId: string) {
         ({ result, test } = await check());
       }
       if (!result.passed) {
-        status = "failed";
-        reason = gateFailure(result);
+        res.status = "failed";
+        res.reason = gateFailure(result);
         gateOutput = result.output;
         retry = !ev && run.attempt < MAX_ATTEMPTS;
       }
@@ -577,7 +596,7 @@ async function execute(runId: string) {
       log({ type: "model_review_started", payload: { round, budget: budget.maxTurns, lines } });
       const before = await snapshot(worktree);
       const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
-      addUsage(r.usage);
+      addUsage(res.usage, r.usage);
       abortCheck();
       if ((await snapshot(worktree)) !== before) {
         await restore(worktree, before);
@@ -587,8 +606,8 @@ async function execute(runId: string) {
       log({ type: "model_review", payload: { round, verdict: review?.verdict ?? "error", findings: review?.findings ?? [], ...(review ? {} : { message: r.reason ?? "the reviewer ended without calling submit_review" }) } });
       if (review?.verdict !== "request_changes") break;
       if (round === MAX_REVIEW_ROUNDS) {
-        status = "failed";
-        reason = `model review: changes still requested after ${MAX_REVIEW_ROUNDS} rounds`;
+        res.status = "failed";
+        res.reason = `model review: changes still requested after ${MAX_REVIEW_ROUNDS} rounds`;
         retry = run.attempt < MAX_ATTEMPTS;
         return;
       }
@@ -596,22 +615,17 @@ async function execute(runId: string) {
       if (!(await fixRound("model review requested changes", message)) || !(await gate())) return;
     }
     if (!ev) log({ type: "commit", payload: { sha: await commitAll(worktree, `${t.key}: ${t.title}`), branch: branch! } });
-  } catch (e) {
-    status = "failed";
-    reason = `${e instanceof AgentError ? e.kind : "UnexpectedEnvironment"}: ${(e as Error).message}`;
-    if (!signal.aborted) log({ type: "error", payload: { kind: e instanceof AgentError ? e.kind : "UnexpectedEnvironment", message: (e as Error).message } });
-  } finally {
+  }, async ({ status, reason, turns }, { signal, log }) => {
     await sandbox?.close();
-    if (signal.aborted) [status, reason, retry] = ["cancelled", "cancelled", false];
+    if (signal.aborted) retry = false;
     if (!run.eval_run_id && s && !retry && status !== "cancelled")
       log({ type: "reflection", payload: await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
     if (t.parent_id && !run.eval_run_id && !retry && status !== "cancelled") {
-      const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${gateOutput.slice(-1000)}\n\`\`\`` : ""}`);
+      const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${truncate(gateOutput, 1000, "tail")}\n\`\`\`` : ""}`);
       db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(text, t.id);
       log({ type: "handoff", payload: { text } });
     }
-    log({ type: "run_finished", payload: { status, reason, turns, usage } });
-    recordCost(runId, run.model, usage);
+  }, async ({ status, reason, turns }) => {
     // Passing ticket runs keep worktree + branch for review; anything else is cleaned up now (output is in the event log).
     if ((status !== "passed" || run.eval_run_id) && cfg) await removeWorktree(cfg.repo_path, worktree, branch ?? null, dataDir());
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
@@ -622,7 +636,7 @@ async function execute(runId: string) {
       setTicket(t.id, TICKET_STATUS[status]);
       if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
     }
-  }
+  });
 }
 
 // Auto-approve (M7 workspace setting): the Approve button's merge path. A failed merge leaves the child in review.
@@ -636,20 +650,14 @@ async function autoApprove(ticketId: string, runId: string) {
 // No gate, commit, review or reflection; the checkout is always removed. afterRound decides what the epic does next (a retry too).
 async function plan(runId: string, run: RunRow, t: TicketRow) {
   const s = settingsFor(t.workspace_id);
-  const signal = controllers.get(runId)!.signal;
-  const log = eventLog(runId);
   const worktree = join(dataDir(), "worktrees", runId);
   const prev = db.prepare("SELECT started_at FROM runs WHERE ticket_id = ? AND role = 'planner' AND rowid < (SELECT rowid FROM runs WHERE id = ?) ORDER BY rowid DESC LIMIT 1").get(t.id, runId) as
     | { started_at: number | null }
     | undefined;
   const since = prev?.started_at ?? 0; // children that settled after the previous round started are new to this one
   const outcome: Outcome = {};
-  let usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-  let turns = 0;
-  let status: RunStatus = "failed";
-  let reason: string | undefined;
   let reply = "";
-  try {
+  return pipeline(runId, run.model, async (res, { signal, log }) => {
     if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     const base_sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
@@ -676,33 +684,23 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
       repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
       lessons: lessons?.body, wiki, round: run.attempt, notes, review: reviewNote(t.id), since,
     });
-    const stored = run.provider_id ? providerById(run.provider_id) : undefined;
-    if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
-    const w = await runWindow(stored, run.model);
-    const compactAt = compactThreshold(s.compact_at_tokens, w.window);
-    log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
+    const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
     const a = await runAgent({
-      provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, system: PLANNER_PROMPT, task,
+      provider: providerFor(task), model: run.model, system: PLANNER_PROMPT, task,
       tools: plannerTools(t, outcome, since, startChild, () => epicGate(s, gateCommand, log, signal)), root: worktree, budget: BUDGET, signal, cacheKey: t.id,
       compactAt,
       finished: () => outcome.notes !== undefined || outcome.summary !== undefined,
       finishHint: "Call finish_round (or complete_epic) now with your notes.",
       onEvent: (e) => e.type !== "run_finished" && log(e),
     });
-    ({ usage, turns, status, reason } = a);
+    ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason } = a);
     reply = finalText(a.messages);
-  } catch (e) {
-    status = "failed";
-    reason = `${e instanceof AgentError ? e.kind : "UnexpectedEnvironment"}: ${(e as Error).message}`;
-    if (!signal.aborted) log({ type: "error", payload: { kind: e instanceof AgentError ? e.kind : "UnexpectedEnvironment", message: (e as Error).message } });
-  } finally {
-    if (signal.aborted) [status, reason] = ["cancelled", "cancelled"];
+  }, ({ status }, { log }) => {
     if (status === "passed") log({ type: "round_finished", payload: { round: run.attempt, notes: outcome.summary ?? outcome.notes ?? reply, completed: outcome.summary !== undefined } });
-    log({ type: "run_finished", payload: { status, reason, turns, usage } });
-    recordCost(runId, run.model, usage);
+  }, async ({ status, reason }) => {
     if (s) await removeWorktree(s.repo_path, worktree, null, dataDir());
     await afterRound(t, runId, status, reason, outcome.summary);
-  }
+  });
 }
 
 // Cancelled → epic todo (Run planner starts the next round); failed (provider error, budget, crash) → a fresh round
@@ -824,7 +822,7 @@ export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint
     if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
     if (op === "lint" && !(await pageList(ws, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
   }
-  let chosen: { provider_id: string | null; model: string };
+  let chosen: ReturnType<typeof choose>;
   try {
     const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
     chosen = prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
@@ -847,14 +845,8 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
   const op = run.wiki_op as "ingest" | "bootstrap" | "lint";
   const ws = t.workspace_id;
   const s = settingsFor(ws);
-  const signal = controllers.get(runId)!.signal;
-  const log = eventLog(runId);
   const root = join(dataDir(), "worktrees", runId);
-  const usage: Usage = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-  let turns = 0;
-  let status: RunStatus = "failed";
-  let reason: string | undefined;
-  try {
+  return pipeline(runId, run.model, async (res, { signal, log }) => {
     if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
     await wikiSerial(ws, async () => {
       if (signal.aborted) throw new AgentError("UserAborted", "cancelled");
@@ -887,52 +879,41 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       } else {
         const stale = (await pageList(ws, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
         if (!stale.length) {
-          status = "passed"; // re-verified (or edited) since it was queued: nothing to do
+          res.status = "passed"; // re-verified (or edited) since it was queued: nothing to do
           return void log({ type: "wiki", payload: { op, unchanged: true } });
         }
         task = wikiTask("lint", { repo, sha, index, stale });
         message = `lint: re-verify ${stale.length} stale page${stale.length === 1 ? "" : "s"} at ${sha8}`;
         entry = `## [${today()}] lint | re-verified ${stale.map((p) => p.path).join(", ")} at ${sha8}`;
       }
-      const stored = run.provider_id ? providerById(run.provider_id) : undefined;
-      if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
-      const w = await runWindow(stored, run.model);
-      const compactAt = compactThreshold(s.compact_at_tokens, w.window);
-      log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
+      const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
       const common = {
-        provider: stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
+        provider: providerFor(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
         protectedPaths: WIKI_PROTECTED, signal, cacheKey: ws, compactAt, onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e),
       };
       let a = await runAgent({ ...common, budget: WIKI_BUDGET });
       for (let fix = 0; ; fix++) {
-        for (const k of Object.keys(usage) as (keyof Usage)[]) usage[k] += a.usage[k];
-        turns += a.turns;
-        ({ status, reason } = a);
+        addUsage(res.usage, a.usage);
+        res.turns += a.turns;
+        ({ status: res.status, reason: res.reason } = a);
         if (a.status !== "passed") return;
         const r: Finished = await finishCopy(ws, wiki, message, entry, s.repo_path);
         if (!("problems" in r)) return void log({ type: "wiki", payload: { op, ...("sha" in r ? { commit: r.sha } : { unchanged: true }) } });
         if (fix === WIKI_FIX_ROUNDS) {
-          status = "failed";
-          reason = `the wiki check failed after ${WIKI_FIX_ROUNDS} fix rounds; nothing was committed`;
+          res.status = "failed";
+          res.reason = `the wiki check failed after ${WIKI_FIX_ROUNDS} fix rounds; nothing was committed`;
           log({ type: "wiki", payload: { op, problems: r.problems } });
-          log({ type: "error", payload: { kind: "InvalidArguments", message: `${reason}:\n${r.problems.join("\n")}` } });
+          log({ type: "error", payload: { kind: "InvalidArguments", message: `${res.reason}:\n${r.problems.join("\n")}` } });
           return;
         }
         const resume = { messages: a.messages, message: `# Wiki check failed\n\nThe harness found these problems in your wiki changes:\n${r.problems.map((p) => `- ${p}`).join("\n")}\n\nFix them with edit_file, then reply with a short summary. The check runs again.` };
         a = await runAgent({ ...common, resume, budget: WIKI_FIX_BUDGET });
       }
     });
-  } catch (e) {
-    status = "failed";
-    reason = `${e instanceof AgentError ? e.kind : "UnexpectedEnvironment"}: ${(e as Error).message}`;
-    if (!signal.aborted) log({ type: "error", payload: { kind: e instanceof AgentError ? e.kind : "UnexpectedEnvironment", message: (e as Error).message } });
-  } finally {
-    if (signal.aborted) [status, reason] = ["cancelled", "cancelled"];
-    log({ type: "run_finished", payload: { status, reason, turns, usage } });
-    recordCost(runId, run.model, usage);
+  }, () => {}, async () => {
     if (s) await removeWorktree(s.repo_path, join(root, "code"), null, dataDir());
     rmSync(root, { recursive: true, force: true });
-  }
+  });
 }
 
 export function cancelRun(runId: string) {
@@ -943,7 +924,7 @@ export function cancelRun(runId: string) {
   }
   const queued = db.prepare("SELECT ticket_id, eval_run_id, role FROM runs WHERE id = ? AND status = 'queued'").get(runId) as { ticket_id: string; eval_run_id: string | null; role: string } | undefined;
   if (!queued) return false;
-  eventLog(runId)({ type: "run_finished", payload: { status: "cancelled", reason: "cancelled while queued", turns: 0, usage: { input: 0, output: 0, cache_read: 0, cache_write: 0 } } });
+  eventLog(runId)({ type: "run_finished", payload: { status: "cancelled", reason: "cancelled while queued", turns: 0, usage: noUsage() } });
   if (queued.eval_run_id) recordEvalResult(runId, false, 0); // counts as failed; the source ticket is never touched
   else if (queued.role !== "wiki") setTicket(queued.ticket_id, "todo"); // a wiki run never changes its ticket
   return true;
@@ -956,8 +937,8 @@ export const reviewRun = (ticketId: string) =>
     | undefined;
 
 // Removes every worktree + branch the ticket's runs created (approve, reject, delete).
-export async function cleanupTicket(ticketId: string, workspaceId: string) {
-  const s = settingsFor(workspaceId);
+export async function cleanupTicket(ticketId: string, ws: string) {
+  const s = settingsFor(ws);
   if (!s) return;
   const runs = db.prepare("SELECT worktree, branch FROM runs WHERE ticket_id = ? AND branch IS NOT NULL").all(ticketId) as { worktree: string; branch: string }[];
   for (const r of runs) await removeWorktree(s.repo_path, r.worktree, r.branch, dataDir());
@@ -1020,7 +1001,7 @@ const MANUAL = ["todo", "done", "failed"];
 export async function moveTicket(id: string, to: string) {
   const t = db.prepare("SELECT status, workspace_id, parent_id, depends_on FROM tickets WHERE id = ?").get(id) as { status: string; workspace_id: string; parent_id: string | null; depends_on: string };
   if (t.status === to) return;
-  const active = db.prepare("SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki'").get(id);
+  const active = db.prepare(`SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND ${OWN_RUNS}`).get(id);
   if (active || !MANUAL.includes(to) || !(MANUAL.includes(t.status) || (t.status === "review" && to === "todo"))) return { error: "invalid_transition", from: t.status, to };
   if (t.status === "review") await cleanupTicket(id, t.workspace_id);
   setTicket(id, to);
@@ -1029,7 +1010,7 @@ export async function moveTicket(id: string, to: string) {
   if (status(t.parent_id) === "running" && (JSON.parse(t.depends_on) as string[]).every((d) => status(d) === "done")) await startChild(id);
 }
 
-export type StartOptions = {
+type StartOptions = {
   root: string;
   model?: string;
   baseUrl?: string;
@@ -1075,9 +1056,9 @@ export function startRun(ticketId: string, opts: StartOptions) {
 // planner round fails its epic). Queued runs stay queued and start now. A task left "running" with no active run (the
 // process died between run_finished and the ticket's transition) gets its latest run's ticket status.
 export function recoverOrphans() {
-  const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND eval_run_id IS NULL AND role <> 'wiki' ORDER BY rowid DESC LIMIT 1) AS last
+  const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1) AS last
     FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
-    AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki')`).all() as { id: string; last: RunStatus | null }[];
+    AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND ${OWN_RUNS})`).all() as { id: string; last: RunStatus | null }[];
   for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
   const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.workspace_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {

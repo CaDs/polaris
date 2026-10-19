@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 // backend the same way (see also github.com/numman-ali/opencode-openai-codex-auth). It can break any time.
 // All URLs are read at call time so tests can point them at local mock servers.
 export const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-export const authBase = () => (process.env.POLARIS_OPENAI_AUTH_URL ?? "https://auth.openai.com").replace(/\/$/, "");
+const authBase = () => (process.env.POLARIS_OPENAI_AUTH_URL ?? "https://auth.openai.com").replace(/\/$/, "");
 export const chatgptBase = () => (process.env.POLARIS_CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "");
 const loginPort = () => Number(process.env.POLARIS_OAUTH_PORT ?? 1455);
 

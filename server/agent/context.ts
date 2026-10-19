@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Exec } from "./tools.ts";
+import { truncate, type Exec } from "./tools.ts";
 import type { Msg } from "./types.ts";
 
 // Skills: markdown files with `name`/`description` frontmatter in <root>/.polaris/skills/ (committed by humans, with
@@ -39,7 +39,7 @@ export async function workState(exec: Exec, root: string, signal?: AbortSignal) 
     const diff = await git("git diff");
     const d = diff.code === 0 ? diff.stdout : "";
     return `\n\nCurrent state of your change (git status --short):\n${status.stdout.trimEnd()}` +
-      (d ? `\n\ngit diff (tracked files):\n${d.length > MAX_DIFF ? `${d.slice(0, MAX_DIFF)}\n[diff truncated at ${MAX_DIFF} chars; run git diff for the rest]` : d.trim()}` : "");
+      (d ? `\n\ngit diff (tracked files):\n${truncate(d.trim(), MAX_DIFF, "head", `[diff truncated at ${MAX_DIFF} chars; run git diff for the rest]`)}` : "");
   } catch {
     return "";
   }

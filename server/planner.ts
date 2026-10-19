@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { db } from "./db.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
-import { readOnlyTools, type Tool } from "./agent/tools.ts";
+import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
-import { applyTracker, ESTIMATES, Invalid, labelIds, trackerHeader } from "./tracker.ts";
+import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, ticketKey, trackerHeader } from "./tracker.ts";
 
 // M7 planner (see SPEC "Planner (M7)"). An epic's runs are planner rounds: each a fresh conversation with a read-only
 // checkout, the planner prompt file and the tools below. Children are ordinary tickets with parent_id = the epic; each
@@ -32,7 +32,7 @@ export const finalText = (messages: Msg[]) =>
 export function extractHandoff(text: string) {
   const m = /^#{1,6}[ \t]*Handoff\b[^\n]*$/im.exec(text);
   const s = (m ? text.slice(m.index + m[0].length) : text).trim();
-  return s.length > HANDOFF_MAX ? `${s.slice(0, HANDOFF_MAX)}\n[… truncated]` : s;
+  return truncate(s, HANDOFF_MAX, "head", "[… truncated]");
 }
 
 // failure: why the series failed (reason + gate output tail), appended to whatever the worker handed off.
@@ -43,7 +43,7 @@ export function handoffText(reply: string, failure?: string) {
 
 // --- children ---
 
-export type Child = {
+type Child = {
   id: string; key: string; title: string; kind: string; status: string; depends_on: string; handoff: string | null; settled_at: number | null;
   test_command: string | null; escalated_to: string | null; run_count: number; run_status: string | null; attempt: number | null; model: string | null; tokens: number;
 };
@@ -52,7 +52,7 @@ export type Child = {
 export const OWN_RUNS = "eval_run_id IS NULL AND role <> 'wiki'";
 
 export const childrenOf = (epicId: string) =>
-  db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
+  db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, ${ticketKey()} AS key,
       (SELECT COUNT(*) FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS}) AS run_count,
       r.status AS run_status, r.attempt, r.model, COALESCE(r.tokens_in + r.tokens_out, 0) AS tokens
     FROM tickets t JOIN organization o ON o.id = t.workspace_id
@@ -65,7 +65,7 @@ type Sibling = { id: string; key: string; status: string; depends_on: string; ru
 // What each sibling is doing, as the planner and the epic view show it. Open children keep the epic from completing.
 // A todo child whose dependency failed, was deleted or is itself blocked is blocked: it never starts on its own, so it is not open.
 // A child replaced by a "Split:" epic (M9) is not open either; its dependents were moved to that epic.
-export function childStates(kids: Sibling[]) {
+function childStates(kids: Sibling[]) {
   const byId = new Map(kids.map((k) => [k.id, k]));
   const out = new Map<string, State>();
   const state = (k: Sibling): State => {
@@ -108,7 +108,7 @@ export function withStates<T extends Sibling & { parent_id: string | null }>(row
 
 // The children section of a round's first message and the list_children result. since: when the previous round started;
 // children that settled after it are marked new.
-export function childrenText(epicId: string, since: number) {
+function childrenText(epicId: string, since: number) {
   const kids = childrenOf(epicId);
   if (!kids.length) return "(none yet)";
   const states = childStates(kids);
@@ -164,10 +164,10 @@ const text = (input: Record<string, unknown>, key: string, max: number) => {
 };
 
 // read_file + search on the checkout, and the planner tools. finish_round/complete_epic fill `outcome`, which ends the run
-// (runAgent's finished check). queue: starts a new child; returns an error message if it could not be queued. gate: the epic
+// (runAgent's finished check). startChild: queues a new child; returns an error message if it could not be queued. gate: the epic
 // gate (M9) complete_epic runs first; returns why it failed.
 export function plannerTools(
-  epic: Epic, outcome: Outcome, since: number, queue: (ticketId: string) => Promise<string | undefined>, gate: () => Promise<string | undefined> = async () => undefined,
+  epic: Epic, outcome: Outcome, since: number, startChild: (ticketId: string) => Promise<string | undefined>, gate: () => Promise<string | undefined> = async () => undefined,
 ): Tool[] {
   const createTicket: Tool = {
     def: {
@@ -179,7 +179,7 @@ export function plannerTools(
           title: { type: "string", description: "Short imperative title" },
           spec: { type: "string", description: "Self-contained task: goal, files/areas, conventions, acceptance criteria in terms of what the test gate checks" },
           depends_on: { type: "array", items: { type: "string" }, description: "Keys of tickets in this epic that must be merged first" },
-          kind: { type: "string", enum: ["task", "epic"], description: "epic = a sub-planner owns this slice (default task)" },
+          kind: { type: "string", enum: KINDS, description: "epic = a sub-planner owns this slice (default task)" },
           test_command: { type: "string", description: "This ticket's own test gate (an epic: its epic gate) instead of the test gate in the first message (the default), e.g. one test file, a --test-name-pattern, or `npx tsc --noEmit`, when the full suite can't pass until later tickets land" },
           labels: { type: "array", items: { type: "string" }, description: "Label names (unknown ones are created)" },
           priority: { type: "integer", enum: [0, 1, 2, 3, 4], description: "0 none, 1 urgent, 2 high, 3 medium, 4 low (default: the epic's). Queued work starts by priority" },
@@ -225,10 +225,10 @@ export function plannerTools(
         id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice and test command
       );
       applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
-      const key = `${epic.key.split("-")[0]}-${(db.prepare("SELECT number FROM tickets WHERE id = ?").get(id) as { number: number }).number}`;
+      const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;
-      const error = await queue(id);
+      const error = await startChild(id);
       return error ? `Created ${key}, but it could not be queued (it counts as failed): ${error}` : `Created ${key} (queued).`;
     },
   };

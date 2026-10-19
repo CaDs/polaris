@@ -175,7 +175,7 @@ function wikiScript(task: string) {
 
 // Reflection: the current lessons plus one bullet naming the ticket and its outcome (deduped).
 // Proposal: the current prompt plus the ALWAYS-CREATE-OK marker, with a rationale.
-export function demoMeta(req: ProviderRequest): ProviderResponse {
+function demoMeta(req: ProviderRequest): ProviderResponse {
   const msg = req.messages[0].content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
   const tag = (name: string) => new RegExp(`<${name}>\\n?([\\s\\S]*?)\\n?</${name}>`).exec(msg)?.[1] ?? "";
   let text: string;

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
@@ -7,11 +8,11 @@ import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, withStates } from "./planner.ts";
-import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
+import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
-import { applyTracker, hydrate, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
+import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 
 migrate();
@@ -19,6 +20,16 @@ migrate();
 type Env = { Variables: { userId: string; workspaceId: string } };
 
 export const app = new Hono<Env>();
+
+// Every error a route throws is {error} JSON: a bad request (tracker Invalid, a wiki AgentError: bad path, unknown page)
+// is 400, a refused merge 409; anything else is a bug, logged, and 500 with a generic message.
+app.onError((e, c) => {
+  if (e instanceof Invalid || e instanceof AgentError) return c.json({ error: e.message }, 400);
+  if (e instanceof MergeError) return c.json({ error: e.message }, 409);
+  if (e instanceof HTTPException) return c.json({ error: e.message }, e.status);
+  console.error(e);
+  return c.json({ error: "internal error" }, 500);
+});
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
@@ -49,13 +60,11 @@ app.use("/api/*", async (c, next) => {
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, views, members
 
-const STATUSES = ["todo", "running", "review", "done", "failed"];
-
 // Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
 const OWN = `ticket_id = t.id AND ${OWN_RUNS}`; // wiki runs (M10) are listed in the ticket but never change its state or totals
 const TICKETS = `
-  SELECT t.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key,
+  SELECT t.*, ${ticketKey()} AS key,
     (SELECT status FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_status,
     (SELECT model FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_model,
     (SELECT p.auth_type FROM runs r JOIN providers p ON p.id = r.provider_id WHERE r.${OWN} ORDER BY r.rowid DESC LIMIT 1) AS run_auth,
@@ -65,9 +74,9 @@ const TICKETS = `
     (SELECT COALESCE(SUM(tokens_cached), 0) FROM runs WHERE ${OWN}) AS tokens_cached,
     (SELECT COALESCE(SUM(cost_usd), 0) FROM runs WHERE ${OWN}) AS cost_usd,
     (SELECT id FROM eval_cases WHERE ticket_id = t.id) AS eval_case_id,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || p.number FROM tickets p WHERE p.id = t.parent_id) AS parent_key,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || e.number FROM tickets e WHERE e.id = t.escalated_to) AS escalated_key,
-    (SELECT upper(substr(o.slug, 1, 3)) || '-' || s.number FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
+    (SELECT ${ticketKey("p")} FROM tickets p WHERE p.id = t.parent_id) AS parent_key,
+    (SELECT ${ticketKey("e")} FROM tickets e WHERE e.id = t.escalated_to) AS escalated_key,
+    (SELECT ${ticketKey("s")} FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id) AS child_count,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done,${TRACKER_COLS}
   FROM tickets t JOIN organization o ON o.id = t.workspace_id`;
@@ -84,8 +93,8 @@ const runIn = (c: Context<Env>) =>
     | undefined;
 
 // A provider_id/model choice: both optional, null = unset. Providers must belong to the caller's workspace.
-function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v: { provider_id?: string | null; model?: string | null } } {
-  const v: { provider_id?: string | null; model?: string | null } = {};
+function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v: Choice } {
+  const v: Choice = {};
   if (b.provider_id !== undefined) {
     if (b.provider_id !== null && (typeof b.provider_id !== "string" || !db.prepare("SELECT 1 FROM providers WHERE id = ? AND workspace_id = ?").get(b.provider_id, c.get("workspaceId"))))
       return { error: "provider not found" };
@@ -108,7 +117,7 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };
   if (b.kind !== undefined) {
-    if (partial || (b.kind !== "task" && b.kind !== "epic")) return { error: 'kind must be "task" or "epic" (set when the ticket is created)' };
+    if (partial || !KINDS.includes(b.kind)) return { error: 'kind must be "task" or "epic" (set when the ticket is created)' };
     v.kind = b.kind;
   }
   if (b.title !== undefined || !partial) {
@@ -219,13 +228,8 @@ app.post("/api/tickets/:id/approve", async (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
   if (t.status !== "review") return c.json({ error: "ticket is not in review" }, 409);
-  try {
-    const r = await approve(t.id);
-    if ("error" in r) return c.json(r, 409);
-  } catch (e) {
-    if (e instanceof MergeError) return c.json({ error: e.message }, 409);
-    throw e;
-  }
+  const r = await approve(t.id);
+  if ("error" in r) return c.json(r, 409);
   return c.json(ticketIn(c));
 });
 
@@ -277,7 +281,7 @@ app.put("/api/settings", async (c) => {
     } else if (typeof x !== "string" || x.length > 2000) return c.json({ error: `${k} must be a string of at most 2000 chars` }, 400);
     else v[k] = x.trim();
   }
-  if (!v.image) v.image = SANDBOX_IMAGE;
+  if (!v.image) v.image = SETTINGS_DEFAULTS.image;
   if (!IMAGE_REF.test(v.image)) return c.json({ error: "Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag" }, 400);
   if (v.protected_paths.split(",").some((p: string) => p.trim().startsWith("/") || p.split("/").includes("..")))
     return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);
@@ -316,7 +320,7 @@ app.get("/api/usage", (c) => {
     days,
     models: rows(`SELECT r.model, ${SUMS} ${FROM_RUNS} GROUP BY r.model ORDER BY SUM(r.tokens_in + r.tokens_out + r.tokens_cached) DESC, r.model`).map((r) => withRate(r as any)),
     tickets: rows(
-      `SELECT t.id, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
+      `SELECT t.id, ${ticketKey()} AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
        WHERE t.workspace_id = ? AND t.hidden = 0 AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
     ).map((r) => withRate(r as any)),
   });
@@ -339,7 +343,7 @@ async function textBody(c: Context<Env>, max: number, what: string): Promise<{ e
 app.get("/api/lessons", (c) =>
   c.json({
     max: LESSONS_MAX,
-    versions: db.prepare(`SELECT l.*, r.attempt AS run_attempt, upper(substr(o.slug, 1, 3)) || '-' || t.number AS ticket_key, t.number AS ticket_number
+    versions: db.prepare(`SELECT l.*, r.attempt AS run_attempt, ${ticketKey()} AS ticket_key, t.number AS ticket_number
       FROM lessons l LEFT JOIN runs r ON r.id = l.run_id LEFT JOIN tickets t ON t.id = r.ticket_id LEFT JOIN organization o ON o.id = t.workspace_id
       WHERE l.workspace_id = ? ORDER BY l.version DESC`).all(c.get("workspaceId")),
   }),
@@ -424,7 +428,7 @@ app.get("/api/evals", (c) => {
   const caseRuns = db.prepare(`SELECT r.*, res.passed AS case_passed, res.turns, res.duration_ms, c.title AS case_title FROM runs r JOIN eval_runs er ON er.id = r.eval_run_id
     LEFT JOIN eval_results res ON res.run_id = r.id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE er.workspace_id = ? ORDER BY r.rowid`).all(ws) as Record<string, any>[];
   return c.json({
-    cases: db.prepare(`SELECT c.*, upper(substr(o.slug, 1, 3)) || '-' || t.number AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
+    cases: db.prepare(`SELECT c.*, ${ticketKey()} AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
       JOIN organization o ON o.id = c.workspace_id WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
     runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id) })),
   });
@@ -463,18 +467,12 @@ app.delete("/api/evals/cases/:id", (c) => {
 // --- M10 project wiki (see SPEC "Project wiki (M10)", server/wiki.ts). Workspace-scoped like everything else; page paths are
 // checked against root .md / modules/ / howto/ and resolved with resolveIn.
 
-// A wiki function's AgentError is the caller's mistake (bad path, unknown page): 400.
-const wikiErr = (c: Context<Env>, e: unknown) => {
-  if (!(e instanceof AgentError)) throw e;
-  return c.json({ error: e.message }, 400);
-};
-
 app.get("/api/wiki", async (c) => {
   const ws = c.get("workspaceId");
   const s = settingsFor(ws);
   const base = s && (await headOf(s));
   const runs = db.prepare(`SELECT r.id, r.wiki_op, r.status, r.model, r.started_at, r.ended_at, r.tokens_in, r.tokens_out, r.tokens_cached, t.hidden,
-      CASE WHEN t.hidden THEN NULL ELSE upper(substr(o.slug, 1, 3)) || '-' || t.number END AS ticket_key, t.number AS ticket_number,
+      CASE WHEN t.hidden THEN NULL ELSE ${ticketKey()} END AS ticket_key, t.number AS ticket_number,
       (SELECT payload FROM events e WHERE e.run_id = r.id AND e.type = 'wiki' ORDER BY e.seq DESC LIMIT 1) AS result
     FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id WHERE t.workspace_id = ? AND r.role = 'wiki' ORDER BY r.rowid DESC LIMIT 20`).all(ws) as Record<string, any>[];
   return c.json({
@@ -485,12 +483,8 @@ app.get("/api/wiki", async (c) => {
 
 app.get("/api/wiki/page", async (c) => {
   const path = c.req.query("path") ?? "";
-  try {
-    const body = await readPage(c.get("workspaceId"), path);
-    return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
-  } catch (e) {
-    return wikiErr(c, e);
-  }
+  const body = await readPage(c.get("workspaceId"), path);
+  return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
 });
 
 // A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>". base: the
@@ -498,12 +492,8 @@ app.get("/api/wiki/page", async (c) => {
 app.put("/api/wiki/page", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (typeof b?.path !== "string" || typeof b?.body !== "string" || b.body.length > 20_000) return c.json({ error: "path and body (at most 20000 chars) are required" }, 400);
-  try {
-    const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
-    return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
-  } catch (e) {
-    return wikiErr(c, e);
-  }
+  const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
+  return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
 });
 
 app.get("/api/wiki/history", async (c) => c.json(await history(c.get("workspaceId"))));
@@ -512,7 +502,8 @@ app.get("/api/wiki/diff", async (c) => {
   try {
     return c.json({ diff: await wikiDiff(c.get("workspaceId"), c.req.query("sha") ?? "") });
   } catch (e) {
-    return e instanceof AgentError ? wikiErr(c, e) : c.json({ error: "not_found" }, 404);
+    if (e instanceof AgentError) throw e;
+    return c.json({ error: "not_found" }, 404); // no such commit
   }
 });
 

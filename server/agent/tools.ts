@@ -9,7 +9,7 @@ export type ExecResult = { stdout: string; stderr: string; code: number | null; 
 export type Exec = (command: string, opts: { cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<ExecResult>;
 // protectedPaths: repo-relative dirs/files edit_file must not write (tests/, evals/). The sandbox also mounts them read-only.
 // turn/callId/tool name the spill file of a long result (see spill below). reads: read_file outputs of the current conversation (loop.ts).
-export type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
+type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
 export type Tool = { def: ToolDef; run: (input: Record<string, unknown>, ctx: ToolContext) => Promise<string> };
 
 const MAX_OUTPUT = 30_000; // read_file only: shell/search output over SPILL_AT goes to a file instead
@@ -17,10 +17,12 @@ const MAX_CAPTURE = 20_000_000; // hard cap per stream on pathological output (i
 export const SPILL_AT = 8_000;
 const SPILL_TAIL = 2_000;
 
-export function truncate(s: string, max = MAX_OUTPUT) {
+// s cut to max chars around a marker line: its head and tail halves, or only its head or tail (keep). toWellFormed: a cut
+// by UTF-16 unit can leave half of a surrogate pair (emoji), which providers reject.
+export function truncate(s: string, max = MAX_OUTPUT, keep: "both" | "head" | "tail" = "both", marker = `[... ${s.length - max} chars truncated ...]`) {
   if (s.length <= max) return s;
-  const half = max / 2;
-  return `${s.slice(0, half)}\n[... ${s.length - max} chars truncated ...]\n${s.slice(-half)}`;
+  const cut = keep === "head" ? `${s.slice(0, max)}\n${marker}` : keep === "tail" ? `${marker}\n${s.slice(-max)}` : `${s.slice(0, max / 2)}\n${marker}\n${s.slice(-max / 2)}`;
+  return cut.toWellFormed();
 }
 
 // A result longer than SPILL_AT is written in full to .polaris/outputs/<turn>-<tool>-<id>.txt in the run root (visible as

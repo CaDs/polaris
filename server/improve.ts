@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "./db.ts";
-import { parseProtected } from "./agent/tools.ts";
+import { parseProtected, truncate } from "./agent/tools.ts";
 import type { EventPayloads, Provider } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
-import { dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
+import { ticketKey } from "./tracker.ts";
 
 // M6 self-improvement, three loops (see SPEC "Self-improvement (M6)"):
 // 1. reflection after a run series → a new lessons version (applies to the next run at once; easy to restore);
@@ -18,7 +19,7 @@ export const LESSONS_MAX = 8000; // chars, ≈ 2,000 tokens
 export const PROMPT_MAX = 20_000;
 const SEED = readFileSync(new URL("./agent/prompts/worker.md", import.meta.url), "utf8");
 
-export type Lessons = { id: string; workspace_id: string; version: number; body: string; source: string; run_id: string | null; author: string | null; restored_from: number | null; created_at: number };
+type Lessons = { id: string; workspace_id: string; version: number; body: string; source: string; run_id: string | null; author: string | null; restored_from: number | null; created_at: number };
 export type Prompt = { id: string; workspace_id: string; version: number; body: string; active: number; source: string; author: string | null; rationale: string | null; created_at: number };
 type Final = { status: string; reason?: string; turns: number };
 
@@ -66,14 +67,13 @@ export function addPrompt(ws: string, body: string, from: { source: "human" | "p
 // --- digests: what reflection and proposals see instead of transcripts ---
 
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-const tailOf = (s: string, n: number) => (s.length > n ? `[...]${s.slice(-n)}` : s);
 const ticketOf = (runId: string) =>
-  db.prepare(`SELECT upper(substr(o.slug, 1, 3)) || '-' || t.number AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
+  db.prepare(`SELECT ${ticketKey()} AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
     JOIN organization o ON o.id = t.workspace_id WHERE r.id = ?`).get(runId) as { key: string; title: string };
 
 // One run from its event log: outcome, counts, tool errors (name + class + first line), setup/gate failures with output tails.
 // final: the outcome when run_finished is not logged yet (reflection runs just before it).
-export function runDigest(runId: string, final?: Final) {
+function runDigest(runId: string, final?: Final) {
   const r = db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Record<string, any>;
   const ev = (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
   const fin: Final = final ?? ev.find((e) => e.type === "run_finished")?.p ?? { status: r.status, turns: 0 };
@@ -84,8 +84,8 @@ export function runDigest(runId: string, final?: Final) {
   if (errors.length > 10) out.push(`- … ${errors.length - 10} more tool errors`);
   for (const e of ev) {
     if (e.type === "error" && !e.p.retrying) out.push(`- ${e.p.kind}: ${short(e.p.message, 300)}`);
-    if (e.type === "setup" && e.p.step === "command" && e.p.code !== 0) out.push(`- setup \`${e.p.command}\` exited with ${e.p.code}:\n${tailOf(e.p.output, 1000)}`);
-    if (e.type === "test_result" && !e.p.passed) out.push(`- gate failed: ${gateFailure(e.p)}\n${tailOf(e.p.output, 1000)}`);
+    if (e.type === "setup" && e.p.step === "command" && e.p.code !== 0) out.push(`- setup \`${e.p.command}\` exited with ${e.p.code}:\n${truncate(e.p.output, 1000, "tail")}`);
+    if (e.type === "test_result" && !e.p.passed) out.push(`- gate failed: ${gateFailure(e.p)}\n${truncate(e.p.output, 1000, "tail")}`);
   }
   return out.join("\n");
 }
@@ -119,7 +119,7 @@ Reply with the full updated lessons document and nothing else. Rules:
 - Stay under ${LESSONS_MAX} characters (about 2,000 tokens): drop the least useful bullets to fit.
 - If nothing new was learned, return the current document unchanged.`;
 
-export const PROPOSE_SYSTEM = `You improve the system prompt of a coding agent that works tickets in a git repository inside a sandbox, gated by the repository's tests. You get its current system prompt, the lessons learned so far, and digests of recent failed runs (including eval runs).
+const PROPOSE_SYSTEM = `You improve the system prompt of a coding agent that works tickets in a git repository inside a sandbox, gated by the repository's tests. You get its current system prompt, the lessons learned so far, and digests of recent failed runs (including eval runs).
 
 Write a revised full system prompt that would avoid such failures in general, not just for these tickets. Keep what works, keep it concise, and keep repository-specific facts out (those belong in the lessons). Never include secrets. Stay under ${PROMPT_MAX} characters.
 
@@ -133,7 +133,7 @@ const SECRET = /\b(sk-[\w-]{16,}|ghp_\w{20,}|github_pat_\w{20,}|xox[abp]-[\w-]{1
 const scrub = (s: string) => s.replace(SECRET, "[redacted]"); // ponytail: common key shapes only; the prompt forbids the rest
 
 // Over the cap: cut at the last line break before it.
-export function capLessons(s: string) {
+function capLessons(s: string) {
   s = s.trim();
   if (s.length <= LESSONS_MAX) return s;
   const cut = s.slice(0, LESSONS_MAX);
@@ -195,7 +195,7 @@ export type EvalCase = {
   id: string; workspace_id: string; ticket_id: string; title: string; spec: string; repo_path: string; base_sha: string;
   setup_command: string; test_command: string; protected_paths: string; image: string; created_at: number;
 };
-export type EvalRun = {
+type EvalRun = {
   id: string; workspace_id: string; prompt_id: string; prompt_version: number; lessons_version: number | null; case_ids: string; model: string;
   status: "running" | "done"; passed: number | null; total: number | null; mean_tokens: number | null; started_at: number; ended_at: number | null;
 };
@@ -214,7 +214,7 @@ export async function validateCase(c: Omit<EvalCase, "id" | "workspace_id" | "ti
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     await addDetached(c.repo_path, c.base_sha, wt);
     sandbox = await openSandbox(id, wt, parseProtected(c.protected_paths), c.image);
-    const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: 10 * 60_000 });
+    const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: COMMAND_TIMEOUT });
     if (c.setup_command.trim()) {
       const s = await sh(c.setup_command);
       if (s.code !== 0) return `The setup command fails at ${c.base_sha.slice(0, 8)} (exit ${s.code}), so the case can't run.`;

@@ -11,25 +11,22 @@ import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 type Env = { Variables: { userId: string; workspaceId: string } };
 export const trackerRoutes = new Hono<Env>();
 
-export const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink"];
-export const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
+const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink"];
+const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
 export const ESTIMATES = [1, 2, 3, 5, 8];
-export const SORTS = ["manual", "priority", "updated", "created", "due"];
-const STATUSES = ["todo", "running", "review", "done", "failed"];
+const SORTS = ["manual", "priority", "updated", "created", "due"];
+export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
+export const KINDS = ["task", "epic"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 // Query params a filter (and a saved view) may hold. group only matters to the list layout.
 const FILTER_KEYS = ["status", "label", "label_mode", "priority", "assignee", "project", "milestone", "cycle", "kind", "parent", "due_before", "due_after", "q", "group"];
 
-// A bad request. Route handlers here throw it (onError → 400); app.ts gets {error} from the exported functions.
+// A bad request. Route handlers here throw it (app.ts onError → 400); app.ts gets {error} from the exported functions.
 class Invalid extends Error {}
 const fail = (message: string): never => {
   throw new Invalid(message);
 };
-trackerRoutes.onError((e, c) => {
-  if (e instanceof Invalid) return c.json({ error: e.message }, 400);
-  throw e;
-});
-const attempt = <T>(fn: () => T): T | { error: string } => {
+const orError = <T>(fn: () => T): T | { error: string } => {
   try {
     return fn();
   } catch (e) {
@@ -66,6 +63,9 @@ const update = (table: string, rowId: string, v: Record<string, SQLInputValue>) 
 
 // --- ticket fields ---
 
+// SQL for a ticket's key: the first 3 letters of its workspace's slug + its number (POL-12). Needs organization joined as o.
+export const ticketKey = (t = "t") => `upper(substr(o.slug, 1, 3)) || '-' || ${t}.number`;
+
 // The tracker's part of ticket JSON. hydrate parses these columns.
 export const TRACKER_COLS = `
     (SELECT json_group_array(json_object('id', l.id, 'name', l.name, 'color', l.color) ORDER BY l.name COLLATE NOCASE) FROM ticket_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.ticket_id = t.id) AS labels,
@@ -85,7 +85,7 @@ export type TrackerFields = {
 type Current = { id: string; kind: string; status: string; run_count: number; parent_id: string | null; project_id: string | null; milestone_id: string | null };
 
 // Validated tracker fields of a ticket body (cur: the ticket being patched; kind: its kind, or the new ticket's).
-export const trackerFields = (ws: string, b: Record<string, any>, kind: string, cur?: Current) => attempt(() => fields(ws, b, kind, cur));
+export const trackerFields = (ws: string, b: Record<string, any>, kind: string, cur?: Current) => orError(() => fields(ws, b, kind, cur));
 function fields(ws: string, b: Record<string, any>, kind: string, cur?: Current) {
   const v: TrackerFields = {};
   if (b.priority !== undefined) v.priority = Number.isInteger(b.priority) && b.priority >= 0 && b.priority <= 4 ? b.priority : fail("priority must be 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
@@ -181,7 +181,7 @@ const json = (a: unknown[]) => JSON.stringify(a);
 
 // WHERE (AND across fields, OR within one) + ORDER BY for the board/list query. Unknown params are ignored (the UI keeps
 // its layout in the same query string); unknown values of known params are a 400.
-export const ticketQuery = (ws: string, userId: string, q: Record<string, string>) => attempt(() => query(ws, userId, q));
+export const ticketQuery = (ws: string, userId: string, q: Record<string, string>) => orError(() => query(ws, userId, q));
 function query(ws: string, userId: string, q: Record<string, string>) {
   const where: string[] = [];
   const params: SQLInputValue[] = [];
@@ -195,7 +195,7 @@ function query(ws: string, userId: string, q: Record<string, string>) {
     if (ids.length) params.push(json(ids));
   };
   inList("t.status", oneOf("status", STATUSES));
-  inList("t.kind", oneOf("kind", ["task", "epic"]));
+  inList("t.kind", oneOf("kind", KINDS));
   inList("t.priority", oneOf("priority", ["0", "1", "2", "3", "4"]).map(Number));
   nullable("t.assignee_id", values(q.assignee).map((v) => (v === "me" ? userId : v)));
   nullable("t.project_id", values(q.project));
@@ -386,7 +386,7 @@ trackerRoutes.delete("/milestones/:id", (c) => {
 
 type Cycle = { id: string; workspace_id: string; number: number; name: string; starts_at: string; ends_at: string };
 const stateOf = (y: Cycle, now = today()) => (y.starts_at > now ? "upcoming" : y.ends_at < now ? "past" : "current");
-export const currentCycle = (ws: string) =>
+const currentCycle = (ws: string) =>
   db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND starts_at <= ? AND ends_at >= ?").get(ws, today(), today()) as Cycle | undefined;
 
 // A cycle with its state, progress, and scope change: tickets that entered it after it started.

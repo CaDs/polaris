@@ -3,10 +3,11 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { resolveIn } from "./agent/tools.ts";
+import { resolveIn, truncate } from "./agent/tools.ts";
 import { AgentError } from "./agent/types.ts";
 import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
+import { today } from "./tracker.ts";
 
 // M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per workspace at <dataDir>/wikis/<workspace_id>/,
 // owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the only writers are the wiki
@@ -16,14 +17,13 @@ import { dataDir } from "./sandbox.ts";
 const execFileP = promisify(execFile);
 export const WIKI_PROMPT = readFileSync(new URL("./agent/prompts/wiki.md", import.meta.url), "utf8");
 const SCHEMA = readFileSync(new URL("./agent/prompts/wiki-schema.md", import.meta.url), "utf8");
-export const INDEX_MAX = 6000; // chars
-export const PAGE_MAX = 3500;
+const INDEX_MAX = 6000; // chars
+const PAGE_MAX = 3500;
 const SPECIAL = ["SCHEMA.md", "index.md", "log.md"]; // every other .md is a content page
 const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+)\.md$/; // root .md files, modules/*.md, howto/*.md
 const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
 // edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host).
 export const WIKI_PROTECTED = ["code", "wiki/.git"];
-export const today = () => new Date().toISOString().slice(0, 10);
 
 export const wikiDir = (ws: string) => join(dataDir(), "wikis", ws);
 
@@ -64,7 +64,7 @@ export const headOf = (s: { repo_path: string; base_branch: string }) => git(s.r
 
 // --- pages ---
 
-export type Meta = { title: string; sources: string[]; verified: string; updated: string };
+type Meta = { title: string; sources: string[]; verified: string; updated: string };
 
 // Frontmatter of a content page, or why it is invalid. `sources: [a, b]` is a flow list; verified is a commit sha (hex), so
 // it can never be read as a git option.
@@ -133,7 +133,7 @@ const safe = (dir: string, path: string) => {
   return resolveIn(dir, path);
 };
 
-export type PageInfo = { path: string; title: string; summary: string; line: string; sources: string[]; verified: string; updated: string; stale: string | null };
+type PageInfo = { path: string; title: string; summary: string; line: string; sources: string[]; verified: string; updated: string; stale: string | null };
 
 // Why the page's `verified` or `sources` don't name what is in the project repo (a missing source never shows up in a diff),
 // or null.
@@ -301,8 +301,7 @@ export function editPage(ws: string, path: string, body: string, email: string, 
 
 // --- maintainer tasks (the first user message of a wiki run) ---
 
-export const MAX_DIFF = 15_000;
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n[… truncated at ${n} chars]` : s);
+const MAX_DIFF = 15_000;
 
 export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
   repo: string; sha: string; index: string;
@@ -322,8 +321,8 @@ export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
       `# Task: ingest an approved change\n\nThe change below was reviewed, merged (merge commit ${o.sha}) and is part of \`code/\`. Update the wiki for it.`,
       `# Ticket\n\n${t.key} ${t.title}${t.spec ? `\n\n${t.spec}` : ""}`,
       `# Files changed\n\n${o.files!.join("\n") || "(none)"}`,
-      `# Merged diff\n\n\`\`\`diff\n${clip(o.diff ?? "", MAX_DIFF)}\n\`\`\``,
-      `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? clip(o.reply.trim(), 4000) : "(none)"}`,
+      `# Merged diff\n\n\`\`\`diff\n${truncate(o.diff ?? "", MAX_DIFF, "head")}\n\`\`\``,
+      `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? truncate(o.reply.trim(), 4000, "head") : "(none)"}`,
     );
   } else if (op === "bootstrap")
     parts.push("# Task: build the wiki\n\nWrite `overview.md` (architecture map), a `modules/` page for each main part, `howto/` pages for common changes (from the README, AGENTS.md or CLAUDE.md if present, and from the code) and `gotchas.md`. Pages that already exist: improve them rather than duplicating.");

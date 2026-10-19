@@ -27,7 +27,7 @@ const str = (v: unknown, what: string, max = 5000) => {
 };
 
 // Fills `out`, which ends the reviewer's loop (runAgent's finished check).
-export function submitReview(out: { review?: Review }): Tool {
+function submitReview(out: { review?: Review }): Tool {
   return {
     def: {
       name: "submit_review",

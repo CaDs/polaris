@@ -54,7 +54,7 @@ export async function inspectRepo(repoPath: string, baseBranch: string): Promise
 
 // The agent's scratch dirs (spilled tool outputs, compaction history, the read-only wiki snapshot) are never part of a
 // change. .polaris/skills/ is not listed: skills are committed by humans.
-export const POLARIS_SCRATCH = [".polaris/outputs", ".polaris/history", ".polaris/wiki"];
+const POLARIS_SCRATCH = [".polaris/outputs", ".polaris/history", ".polaris/wiki"];
 export const scratchPathspec = POLARIS_SCRATCH.map((p) => `:(exclude)${p}`);
 
 // Adds them to the repo's shared info/exclude (read by every worktree), so status/add/ls-files skip them.

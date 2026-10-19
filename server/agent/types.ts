@@ -3,14 +3,16 @@
 export type TextBlock = { type: "text"; text: string };
 // invalid_input: the raw argument text when the provider sent JSON that did not parse (truncated); input is {} then.
 export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: Record<string, unknown>; invalid_input?: string };
-export type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 // Provider-owned data (e.g. Anthropic thinking blocks with signatures). Sent back to that provider verbatim.
-export type ReasoningBlock = { type: "reasoning"; provider: string; data: unknown };
+type ReasoningBlock = { type: "reasoning"; provider: string; data: unknown };
 export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
 
 export type Msg = { role: "user" | "assistant"; content: Block[] };
 export type ToolDef = { name: string; description: string; input_schema: Record<string, unknown> };
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number };
+export const noUsage = (): Usage => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+export const addUsage = (into: Usage, u: Usage) => (Object.keys(into) as (keyof Usage)[]).forEach((k) => (into[k] += u[k]));
 
 // Live deltas for transcripts. The final Msg is authoritative.
 export type StreamEvent =
