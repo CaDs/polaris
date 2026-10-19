@@ -9,9 +9,9 @@ import { providerRoutes } from "./providers.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake } from "./runs.ts";
 import { OWN_RUNS, withStates } from "./planner.ts";
-import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
+import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
-import { applyTracker, hydrate, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
+import { applyTracker, hydrate, KINDS, STATUSES, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 
 migrate();
@@ -48,8 +48,6 @@ app.use("/api/*", async (c, next) => {
 
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, views, members
-
-const STATUSES = ["todo", "running", "review", "done", "failed"];
 
 // Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
@@ -108,7 +106,7 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };
   if (b.kind !== undefined) {
-    if (partial || (b.kind !== "task" && b.kind !== "epic")) return { error: 'kind must be "task" or "epic" (set when the ticket is created)' };
+    if (partial || !KINDS.includes(b.kind)) return { error: 'kind must be "task" or "epic" (set when the ticket is created)' };
     v.kind = b.kind;
   }
   if (b.title !== undefined || !partial) {
@@ -277,7 +275,7 @@ app.put("/api/settings", async (c) => {
     } else if (typeof x !== "string" || x.length > 2000) return c.json({ error: `${k} must be a string of at most 2000 chars` }, 400);
     else v[k] = x.trim();
   }
-  if (!v.image) v.image = SANDBOX_IMAGE;
+  if (!v.image) v.image = SETTINGS_DEFAULTS.image;
   if (!IMAGE_REF.test(v.image)) return c.json({ error: "Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag" }, 400);
   if (v.protected_paths.split(",").some((p: string) => p.trim().startsWith("/") || p.split("/").includes("..")))
     return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);

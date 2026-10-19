@@ -15,7 +15,8 @@ export const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue
 export const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
 export const ESTIMATES = [1, 2, 3, 5, 8];
 export const SORTS = ["manual", "priority", "updated", "created", "due"];
-const STATUSES = ["todo", "running", "review", "done", "failed"];
+export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
+export const KINDS = ["task", "epic"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 // Query params a filter (and a saved view) may hold. group only matters to the list layout.
 const FILTER_KEYS = ["status", "label", "label_mode", "priority", "assignee", "project", "milestone", "cycle", "kind", "parent", "due_before", "due_after", "q", "group"];
@@ -195,7 +196,7 @@ function query(ws: string, userId: string, q: Record<string, string>) {
     if (ids.length) params.push(json(ids));
   };
   inList("t.status", oneOf("status", STATUSES));
-  inList("t.kind", oneOf("kind", ["task", "epic"]));
+  inList("t.kind", oneOf("kind", KINDS));
   inList("t.priority", oneOf("priority", ["0", "1", "2", "3", "4"]).map(Number));
   nullable("t.assignee_id", values(q.assignee).map((v) => (v === "me" ? userId : v)));
   nullable("t.project_id", values(q.project));

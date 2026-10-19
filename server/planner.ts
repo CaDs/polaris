@@ -4,7 +4,7 @@ import { db } from "./db.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
-import { applyTracker, ESTIMATES, Invalid, labelIds, trackerHeader } from "./tracker.ts";
+import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, trackerHeader } from "./tracker.ts";
 
 // M7 planner (see SPEC "Planner (M7)"). An epic's runs are planner rounds: each a fresh conversation with a read-only
 // checkout, the planner prompt file and the tools below. Children are ordinary tickets with parent_id = the epic; each
@@ -179,7 +179,7 @@ export function plannerTools(
           title: { type: "string", description: "Short imperative title" },
           spec: { type: "string", description: "Self-contained task: goal, files/areas, conventions, acceptance criteria in terms of what the test gate checks" },
           depends_on: { type: "array", items: { type: "string" }, description: "Keys of tickets in this epic that must be merged first" },
-          kind: { type: "string", enum: ["task", "epic"], description: "epic = a sub-planner owns this slice (default task)" },
+          kind: { type: "string", enum: KINDS, description: "epic = a sub-planner owns this slice (default task)" },
           test_command: { type: "string", description: "This ticket's own test gate (an epic: its epic gate) instead of the test gate in the first message (the default), e.g. one test file, a --test-name-pattern, or `npx tsc --noEmit`, when the full suite can't pass until later tickets land" },
           labels: { type: "array", items: { type: "string" }, description: "Label names (unknown ones are created)" },
           priority: { type: "integer", enum: [0, 1, 2, 3, 4], description: "0 none, 1 urgent, 2 high, 3 medium, 4 low (default: the epic's). Queued work starts by priority" },

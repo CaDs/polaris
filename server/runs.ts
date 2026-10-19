@@ -12,11 +12,11 @@ import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type U
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
-import { dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
-import { finishCopy, headOf, materialize, openCopy, pageList, today, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
-import { trackerHeader } from "./tracker.ts";
-import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
+import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { today, trackerHeader } from "./tracker.ts";
+import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
 // Anthropic prices are from the claude-api skill's model table (2026-10-06): opus-5-5 $4/$20, sonnet-5-5 $2/$10, cache reads $0.20.
@@ -32,10 +32,7 @@ export const controllers = new Map<string, AbortController>();
 
 const TICKET_STATUS: Record<RunStatus, string> = { passed: "review", failed: "failed", cancelled: "todo" };
 const MAX_ATTEMPTS = 3; // gate failures retry automatically, with the failure fed back, up to this attempt
-const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
-const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
-// Eval case runs use these frozen defaults (the migration's), not the workspace's: a score must not move when someone edits Settings.
-const EVAL_WORKER = { max_turns: 120, max_minutes: 60 };
+export const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki and CLI runs; workers use the workspace's max_turns / max_minutes
 // FIX_ROUNDS, one rule for both kinds: a fix round resumes the worker's own conversation within the attempt, at most
 // GATE_FIX_ROUNDS times after a failed gate (counted across the whole attempt) and MAX_REVIEW_ROUNDS - 1 times after
 // review findings. One that ends without finishing (budget, provider) fails the attempt as "<why>; the fix round ended:
@@ -56,6 +53,8 @@ export const SETTINGS_DEFAULTS = {
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
   compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
 };
+// Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
+const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
 export const settingsFor = (workspaceId: string) =>
   db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(workspaceId) as Settings | undefined;
 
@@ -1020,7 +1019,7 @@ const MANUAL = ["todo", "done", "failed"];
 export async function moveTicket(id: string, to: string) {
   const t = db.prepare("SELECT status, workspace_id, parent_id, depends_on FROM tickets WHERE id = ?").get(id) as { status: string; workspace_id: string; parent_id: string | null; depends_on: string };
   if (t.status === to) return;
-  const active = db.prepare("SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki'").get(id);
+  const active = db.prepare(`SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND ${OWN_RUNS}`).get(id);
   if (active || !MANUAL.includes(to) || !(MANUAL.includes(t.status) || (t.status === "review" && to === "todo"))) return { error: "invalid_transition", from: t.status, to };
   if (t.status === "review") await cleanupTicket(id, t.workspace_id);
   setTicket(id, to);
@@ -1075,9 +1074,9 @@ export function startRun(ticketId: string, opts: StartOptions) {
 // planner round fails its epic). Queued runs stay queued and start now. A task left "running" with no active run (the
 // process died between run_finished and the ticket's transition) gets its latest run's ticket status.
 export function recoverOrphans() {
-  const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND eval_run_id IS NULL AND role <> 'wiki' ORDER BY rowid DESC LIMIT 1) AS last
+  const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1) AS last
     FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
-    AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND eval_run_id IS NULL AND role <> 'wiki')`).all() as { id: string; last: RunStatus | null }[];
+    AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND ${OWN_RUNS})`).all() as { id: string; last: RunStatus | null }[];
   for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
   const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.workspace_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {

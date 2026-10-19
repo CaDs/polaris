@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import "../auth.ts"; // creates Better Auth tables (organization) that ours reference
 import { db, migrate } from "../db.ts";
 import { DEFAULT_MODEL } from "../agent/providers/anthropic.ts";
-import { cancelRun, startRun } from "../runs.ts";
+import { BUDGET, cancelRun, startRun } from "../runs.ts";
 import type { AgentEvent } from "../agent/types.ts";
 
 const { values: opt, positionals } = parseArgs({
@@ -17,8 +17,8 @@ const { values: opt, positionals } = parseArgs({
     model: { type: "string", default: DEFAULT_MODEL },
     "base-url": { type: "string", default: process.env.ANTHROPIC_BASE_URL },
     task: { type: "string" },
-    "max-turns": { type: "string", default: "50" },
-    "max-tokens": { type: "string", default: "2000000" },
+    "max-turns": { type: "string", default: String(BUDGET.maxTurns) },
+    "max-tokens": { type: "string", default: String(BUDGET.maxTokens) },
   },
 });
 

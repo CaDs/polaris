@@ -5,7 +5,7 @@ import { db } from "./db.ts";
 import { parseProtected } from "./agent/tools.ts";
 import type { EventPayloads, Provider } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
-import { dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
 
 // M6 self-improvement, three loops (see SPEC "Self-improvement (M6)"):
 // 1. reflection after a run series → a new lessons version (applies to the next run at once; easy to restore);
@@ -214,7 +214,7 @@ export async function validateCase(c: Omit<EvalCase, "id" | "workspace_id" | "ti
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     await addDetached(c.repo_path, c.base_sha, wt);
     sandbox = await openSandbox(id, wt, parseProtected(c.protected_paths), c.image);
-    const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: 10 * 60_000 });
+    const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: COMMAND_TIMEOUT });
     if (c.setup_command.trim()) {
       const s = await sh(c.setup_command);
       if (s.code !== 0) return `The setup command fails at ${c.base_sha.slice(0, 8)} (exit ${s.code}), so the case can't run.`;

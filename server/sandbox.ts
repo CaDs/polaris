@@ -12,6 +12,7 @@ import { git } from "./git.ts";
 // the host instead (unit tests only: no isolation at all).
 const execFileP = promisify(execFile);
 export const SANDBOX_IMAGE = "polaris-sandbox:1";
+export const COMMAND_TIMEOUT = 10 * 60_000; // setup and test commands
 // A docker image reference ([host[:port]/]path[:tag][@sha256:digest]), so a setting can't smuggle `docker run` flags.
 export const IMAGE_REF = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d+)?\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?$/;
 export const dataDir = () => resolve(process.env.POLARIS_DATA_DIR ?? "data");

@@ -7,6 +7,7 @@ import { resolveIn } from "./agent/tools.ts";
 import { AgentError } from "./agent/types.ts";
 import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
+import { today } from "./tracker.ts";
 
 // M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per workspace at <dataDir>/wikis/<workspace_id>/,
 // owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the only writers are the wiki
@@ -23,7 +24,6 @@ const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+)\.md$/; // root .md files, modu
 const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
 // edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host).
 export const WIKI_PROTECTED = ["code", "wiki/.git"];
-export const today = () => new Date().toISOString().slice(0, 10);
 
 export const wikiDir = (ws: string) => join(dataDir(), "wikis", ws);
 
