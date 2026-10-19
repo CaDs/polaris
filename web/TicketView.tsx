@@ -274,7 +274,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         const p = e.payload;
         if (e.type === "run_started") return <Prompt key={e.seq} text={p.task} />;
         if (e.type === "assistant_message")
-          return p.message.content.filter((b: any) => b.type === "text" && b.text).map((b: any, i: number) => <p key={`${e.seq}-${i}`} className="msg">{b.text}</p>);
+          return p.message.content.filter((b: any) => b.type === "text" && b.text).map((b: any, i: number) => <p key={`${e.seq}-${i}`} className="msg model">{b.text}</p>);
         if (e.type === "tool_call")
           return <div key={e.seq} className="call mono"><span className="name">{p.name}</span> {compact(p.input)}</div>;
         if (e.type === "tool_result")

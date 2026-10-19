@@ -35,7 +35,14 @@ function fields(e: FormEvent<HTMLFormElement>) {
 function Mark() {
   return (
     <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="8" fill="var(--accent)" />
+      <defs>
+        {/* ponytail: fixed id, only one Mark is ever on screen (landing or sidebar) */}
+        <linearGradient id="polaris-mark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#5b86ff" />
+          <stop offset="1" stopColor="#2f5bea" />
+        </linearGradient>
+      </defs>
+      <rect width="32" height="32" rx="8" fill="url(#polaris-mark)" />
       <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--star)" opacity=".55" transform="rotate(45 16 16)" />
       <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--star)" />
     </svg>
@@ -47,9 +54,12 @@ function Landing({ children }: { children: ReactNode }) {
   return (
     <div className="landing">
       <div className="brand">
+        <div className="aurora" aria-hidden="true" />
+        <div className="stars" aria-hidden="true" />
         <Mark />
         <div className="wordmark">Polaris</div>
         <p className="tagline">A fixed point while your agents work: tickets in, reviewed diffs out.</p>
+        <div className="brand-rule" aria-hidden="true" />
       </div>
       {children}
     </div>

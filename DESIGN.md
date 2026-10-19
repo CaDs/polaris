@@ -34,20 +34,27 @@ fixed); white on accent 4.76; tagline `#c9d3ea` on night 12.4. Accent vs dark bg
 
 ## Type and spacing
 
-- System UI stack (Inter if installed), 13px base, unchanged: dense tracker UI, no webfont download.
-- Wordmark 32px / 650 weight / -0.01em tracking; form titles 18px; tagline 15px.
-- Spacing stays on the existing 4px grid (4/8/12/16/24); auth card gap 14px, padding 28/24px, radius 12px.
+- System UI stack (Inter if installed), 13px base, unchanged; wordmark 34px / 650 / -0.015em; form titles 18px; tagline 15px.
+- 4px spacing grid (4/8/12/16/24); auth card gap 14px, padding 28/24px, radius 12px.
 
 ## Mark
 
-Inline SVG (`Mark` in web/App.tsx): an accent tile with a four-ray star (long cardinal rays,
-shorter faded diagonals, like a compass rose). Same shape as a data-URI favicon in web/index.html.
+Inline SVG (`Mark` in web/App.tsx): a four-ray star (long cardinal rays, faded diagonals, like a
+compass rose) on a `#5b86ff -> #2f5bea` tile. Landing, sidebar and the data-URI favicon.
+
+## Gradient rule
+
+The night sky is the brand; inside the app a gradient means "a model is working". Only here:
+landing brand panel (160deg `#0b1224 -> #0f1a3d -> #16245c`, aurora glow, stars, tagline rule),
+the mark tile, `.btn.primary` (`#4f7cff -> #3d68ee`), the 2px top hairline on a running board card,
+and the 2px left rule on the model's own transcript text (`--flow-a -> --flow-b`: `#3d68ee -> #8fb0ff`,
+dark `#5b86ff -> #9dbbff`). Never on page, card, table or sidebar backgrounds, or on text.
+Tool calls keep a flat grey rule.
 
 ## What changed
 
 - web/style.css: new tokens (plus --accent-hover, --on-accent, --night, --star); hardcoded `#fff`
   and `#6e79da` replaced by tokens; person avatars and diff hunk tint moved from indigo to blue.
-- Landing: sign in / create account / create workspace now sit beside a night-sky brand panel
-  (mark, "Polaris", tagline); stacks above the form under 720px. All labels, headings and button text unchanged.
+- Landing: auth forms beside a night-sky brand panel (mark, "Polaris", tagline); stacks under 720px. Text unchanged.
 - Sidebar header shows the mark instead of the workspace initial; the workspace name is unchanged.
 - e2e: the dark-theme body color in m2 and m11 specs updated to `rgb(10, 15, 29)`.
