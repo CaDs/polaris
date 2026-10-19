@@ -186,6 +186,7 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 | `POLARIS_MODEL` | Model of the fallback provider and the CLI (default `claude-sonnet-5-5`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI providers saved without one (default `https://api.openai.com`) |
 | `POLARIS_OAUTH_PORT` | Local callback port of the ChatGPT sign-in (default 1455) |
+| `POLARIS_SLACK_WEBHOOK` | Slack incoming webhook: "ready for review" and "failed" pings with a link to the ticket |
 | `POLARIS_PROVIDER=fake` | Scripted demo provider used by the tests |
 
 Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARIS_COMPACT_AT`, `POLARIS_RETRY_BASE_MS`,
@@ -222,6 +223,27 @@ E2E_PORT=3201 npm run e2e   # if port 3200 is taken
 Live acceptance has passed with `gpt-6.1-sol` through ChatGPT plan access and `qwen3.8:27b-mlx` through Ollama:
 separate disposable repositories, protected tests, model review, approval/merge, and reconciled execution/background
 token totals. ChatGPT model availability comes from the connected account's catalog.
+
+## From your chat: Claude Code and Slack
+
+You don't have to sit in the dashboard. Polaris is also an MCP server, so you can file, check, approve and reject
+tickets from the conversation where the work was discussed:
+
+```sh
+npm run token        # prints an API token (valid 365 days; --email to pick the account, --days to change it)
+claude mcp add polaris -s user -e POLARIS_TOKEN=<token> -- node "$PWD/server/mcp.ts"
+```
+
+Then ask Claude things like "file this as a Polaris ticket", "how is POL-12 doing?" (status, why it failed, review
+findings, and the diff when it waits for review), or "approve POL-12". Tools: `create_ticket` (starts an agent unless
+`run: false`), `list_tickets`, `ticket_status`, `run_ticket`, `approve_ticket`, `reject_ticket`. `POLARIS_URL`
+(default `http://127.0.0.1:3000`) and `POLARIS_WEB_URL` (dashboard links, default `http://localhost:5173`) point it at
+another instance. Any HTTP client can use the same token: `Authorization: Bearer <token>`. The token is a session:
+signing out everywhere revokes it.
+
+For Slack, create an [incoming webhook](https://api.slack.com/messaging/webhooks) and set `POLARIS_SLACK_WEBHOOK` in
+`.env`: Polaris posts each run that is ready for review or failed, linked to the ticket. Reviewing and approving
+from Slack itself is not built yet.
 
 ## Command line
 
