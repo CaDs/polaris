@@ -22,6 +22,13 @@ export type Run = {
   id: string; ticket_id: string; model: string; provider_id: string | null; auth_type: string | null; attempt: number; status: string;
   tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number; started_at: number | null; ended_at: number | null;
   prompt_version: number | null; eval_run_id: string | null; role: "worker" | "planner" | "wiki";
+  metrics?: RunMetrics | null; // once finished; the same object is the payload of its run_metrics event
+};
+// turns_pct / minutes_pct: share (0–100) of the attempt's turn and time budget; minutes_pct is null without a time limit.
+export type RunMetrics = {
+  turns: number; tool_calls: number; tool_errors: number; repeated_calls: number; repeated_reads: number; compactions: number;
+  first_edit_turn: number | null; files_changed: number | null; turns_pct: number; minutes_pct: number | null;
+  input: number; output: number; cache_read: number; stuck: null | { turn: number; signal: string; action: "nudge" | "stop" };
 };
 
 export type Provider = {
