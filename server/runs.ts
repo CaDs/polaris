@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
+import { capText, checkUsageCaps, metered, monthSpend, normalized, recordUsage, treeSpend, usageCaps, usagePurpose, withUsage } from "./usage.ts";
+export { monthSpend, treeSpend } from "./usage.ts";
 import { createRun, eventLog, touch } from "./agent/events.ts";
 import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
@@ -18,15 +20,6 @@ import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, review
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
-
-// USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
-// Anthropic prices are from the claude-api skill's model table (2026-10-06): opus-5-5 $4/$20, sonnet-5-5 $2/$10, cache reads $0.20.
-// Not listed on purpose: Haiku 5.5 (cache-read price and its >100K tier unverified) and every OpenAI model (not verified from openai.com).
-// ponytail: cache writes are billed at the input price here (really 1.25x); add a cache_write column when it matters.
-const PRICES: Record<string, { input: number; output: number; cache_read: number }> = {
-  "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2 },
-  "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2 },
-};
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
 const controllers = new Map<string, AbortController>();
@@ -86,80 +79,26 @@ function setTicket(id: string, status: string, quiet = false) {
 const background = (p: Promise<unknown>, what: string) => void p.catch((e) => console.error(what, e));
 
 // Provider from env. Throws a user-facing message when none is configured.
-function providerConfig(opts: { model?: string; baseUrl?: string }) {
+function providerConfig(opts: { model?: string; baseUrl?: string; workspaceId?: string }) {
   const fake = process.env.POLARIS_PROVIDER === "fake";
   const baseUrl = opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY ?? (baseUrl ? "ollama" : undefined);
   if (!fake && !apiKey) throw new Error("set ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL for Ollama), or POLARIS_PROVIDER=fake");
   const model = opts.model ?? process.env.POLARIS_MODEL ?? (fake ? "demo" : DEFAULT_MODEL);
-  return { model, provider: (task: string) => (fake ? demoProvider(task) : anthropic({ apiKey: apiKey!, baseUrl })) };
+  return { model, provider: (task: string) => metered(fake ? demoProvider(task) : anthropic({ apiKey: apiKey!, baseUrl }), { name: "Environment", kind: fake ? "fake" : baseUrl ? "ollama" : "anthropic", billing: !fake && baseUrl ? "local" : "api_key" }, opts.workspaceId) };
 }
 
-// USD for tokens as the runs row counts them (input incl. cache writes, output, cache reads); 0 without a price.
-const price = (model: string, input: number, output: number, cached: number) => {
-  const p = PRICES[model];
-  return p ? (input * p.input + output * p.output + cached * p.cache_read) / 1e6 : 0;
-};
-
-// `review`: the reviewer's share of `usage` when a workspace reviews with another model (priced at that model's rates).
-function recordCost(runId: string, model: string, usage: Usage, review?: { model: string; usage: Usage }) {
-  const of = (m: string, u: Usage) => price(m, u.input + u.cache_write, u.output, u.cache_read);
-  const worker = review ? (Object.fromEntries(Object.entries(usage).map(([k, v]) => [k, v - review.usage[k as keyof Usage]])) as Usage) : usage;
-  const usd = of(model, worker) + (review ? of(review.model, review.usage) : 0);
-  if (usd) db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(usd, runId);
-}
-
-// --- Spending caps (see SPEC "Spending caps") ---
-
-// What the runs matching `where` (over runs r JOIN tickets t) spent: tokens = in + out + cached (as /api/usage counts them),
-// USD priced from those tokens (= cost_usd once a run finished; a run in flight counts what it has used so far).
-function spend(where: string, ...params: (string | number)[]) {
-  const rows = db.prepare(`SELECT r.model, SUM(r.tokens_in) AS i, SUM(r.tokens_out) AS o, SUM(r.tokens_cached) AS c FROM runs r JOIN tickets t ON t.id = r.ticket_id
-    WHERE ${where} GROUP BY r.model`).all(...params) as { model: string; i: number; o: number; c: number }[];
-  return rows.reduce((a, r) => ({ usd: a.usd + price(r.model, r.i, r.o, r.c), tokens: a.tokens + r.i + r.o + r.c }), { usd: 0, tokens: 0 });
-}
-// The workspace's spend in the current UTC calendar month (by run start; every run, eval cases and wiki runs included).
-export function monthSpend(ws: string) {
-  const month = new Date().toISOString().slice(0, 7);
-  return { month, ...spend("t.workspace_id = ? AND r.started_at >= ?", ws, Date.parse(`${month}-01T00:00:00Z`)) };
-}
-// A ticket's own runs and every descendant's: an epic's planner rounds + its whole tree of children. Any month.
-export const treeSpend = (id: string) => spend(`t.id IN (${TREE} SELECT id FROM d) AND ${OWN_RUNS}`, id);
-
-const money = (n: number) => `$${Number(n.toFixed(4))}`;
-
-// The one cap check, before every model call of a pipeline run but those inside one agent call: at the run's start and at
-// each later boundary (fix round, reviewer, wiki fix round; a planner round is its own run). Caps: the workspace's monthly
-// USD and tokens, and the caps of the ticket and of each epic above it (ticketId: the run's own ticket; none for eval case
-// and wiki runs). Reached (used >= cap) → an error event SpendingCap with the numbers, then it throws: the run fails with
-// "SpendingCap: spending cap reached: <which> <used>/<cap>". At 80% → one SpendingCapWarning per run.
 function capCheck(ws: string, ticketId: string | undefined, runId: string, log: Ctx["log"]) {
-  const s = settingsFor(ws);
-  const caps: { which: string; used: number; cap: number; usd: boolean }[] = [];
-  if (s && (s.monthly_cap_usd !== null || s.monthly_cap_tokens !== null)) {
-    const m = monthSpend(ws);
-    if (s.monthly_cap_usd !== null) caps.push({ which: `workspace ${m.month} cost`, used: m.usd, cap: s.monthly_cap_usd, usd: true });
-    if (s.monthly_cap_tokens !== null) caps.push({ which: `workspace ${m.month} tokens`, used: m.tokens, cap: s.monthly_cap_tokens, usd: false });
-  }
-  const capped = !ticketId ? [] : db.prepare(`WITH RECURSIVE a(id) AS (SELECT ? UNION ALL SELECT t.parent_id FROM tickets t JOIN a ON t.id = a.id WHERE t.parent_id IS NOT NULL)
-    SELECT t.id, t.cap_usd, t.cap_tokens, ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id
-    WHERE t.id IN (SELECT id FROM a) AND (t.cap_usd IS NOT NULL OR t.cap_tokens IS NOT NULL)`).all(ticketId) as { id: string; cap_usd: number | null; cap_tokens: number | null; key: string }[];
-  for (const e of capped) {
-    const t = treeSpend(e.id);
-    if (e.cap_usd !== null) caps.push({ which: `${e.key} cost`, used: t.usd, cap: e.cap_usd, usd: true });
-    if (e.cap_tokens !== null) caps.push({ which: `${e.key} tokens`, used: t.tokens, cap: e.cap_tokens, usd: false });
-  }
-  const text = (c: (typeof caps)[number]) => `${c.which} ${c.usd ? `${money(c.used)}/${money(c.cap)}` : `${c.used}/${c.cap}`}`;
-  const numbers = ({ which, used, cap }: (typeof caps)[number]) => ({ which, used, cap });
+  const caps = usageCaps({ workspaceId: ws, ticketId, runId, purpose: "execution" });
   const over = caps.find((c) => c.used >= c.cap);
   if (over) {
-    const message = `spending cap reached: ${text(over)}`;
-    log({ type: "error", payload: { kind: "SpendingCap", message, cap: numbers(over) } });
+    const message = `spending cap reached: ${capText(over)}`;
+    log({ type: "error", payload: { kind: "SpendingCap", message, cap: { which: over.which, used: over.used, cap: over.cap } } });
     throw new AgentError("SpendingCap", message);
   }
   const near = caps.find((c) => c.used >= 0.8 * c.cap);
-  if (near && !db.prepare("SELECT 1 FROM events WHERE run_id = ? AND type = 'error' AND json_extract(payload, '$.kind') = 'SpendingCapWarning'").get(runId))
-    log({ type: "error", payload: { kind: "SpendingCapWarning", message: `80% of a spending cap used: ${text(near)}`, cap: numbers(near) } });
+  if (near && !db.prepare("SELECT 1 FROM events WHERE run_id=? AND type='error' AND json_extract(payload,'$.kind')='SpendingCapWarning'").get(runId))
+    log({ type: "error", payload: { kind: "SpendingCapWarning", message: `80% of a spending cap used: ${capText(near)}`, cap: { which: near.which, used: near.used, cap: near.cap } } });
 }
 
 const tail = (r: ExecResult, n = 4000) => truncate((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim(), n, "tail");
@@ -284,7 +223,7 @@ function choose(t: TicketRow, s: Settings, pick?: Choice): { provider_id: string
 export function metaProvider(ws: string) {
   const s = settingsFor(ws) ?? ({ default_provider_id: null, default_model: null } as Settings);
   const c = choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
-  return { model: c.model, provider: c.provider_id ? adapterFor(providerById(c.provider_id)!) : providerConfig({ model: c.model }).provider("") };
+  return { model: c.model, provider: c.provider_id ? adapterFor(providerById(c.provider_id)!) : providerConfig({ model: c.model, workspaceId: ws }).provider("") };
 }
 
 // Queues attempt 1 of a ticket (an epic: its next planner round) after checking the workspace's repo settings. Errors are user-facing.
@@ -332,19 +271,33 @@ const TRIAGE_QUESTIONS = {
 // throws: an error is part of the result, and the ticket then runs directly.
 async function triageTicket(t: TicketRow, s: Settings): Promise<EventPayloads["triage"]> {
   const model = s.triage_model.trim();
+  const context = { workspaceId: t.workspace_id, ticketId: t.id, purpose: "triage", background: true };
+  checkUsageCaps(context);
+  const id = randomUUID();
+  const started_at = Date.now();
+  const p = s.default_provider_id ? providerById(s.default_provider_id) : undefined;
+  let usage: Usage | undefined;
+  let completed = false;
+  let sent = false;
   try {
-    const p = s.default_provider_id ? providerById(s.default_provider_id) : undefined;
     if (p?.kind !== "ollama") throw new Error("the workspace's default provider is not an Ollama provider");
+    sent = true;
     const res = await fetch(`${(p.base_url || OLLAMA_URL).replace(/\/$/, "")}/v1/systemone`, {
       method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(10_000),
       body: JSON.stringify({ model, state: `${t.title}\n\n${t.spec}`, questions: TRIAGE_QUESTIONS }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const a = ((await res.json()) as any)?.answers?.size;
+    const body = await res.json() as any;
+    if (body.usage) usage = normalized({ input: body.usage.input_tokens, output: body.usage.output_tokens, cache_read: body.usage.cache_read_input_tokens, cache_write: body.usage.cache_creation_input_tokens });
+    const a = body?.answers?.size;
     if (typeof a?.score !== "number" || !Number.isFinite(a.score)) throw new Error("the answer has no size score");
+    completed = true;
     return { model, split: a.score >= SIZE_SPLIT, score: a.score, probabilities: a.probabilities, confidence: a.confidence };
   } catch (e) {
     return { model, split: false, error: (e as Error).message };
+  } finally {
+    if (sent) recordUsage(context, { id: p?.id, name: p?.name ?? "Triage", kind: p?.kind ?? "unknown", billing: p?.kind === "ollama" ? "local" : "unknown" }, model,
+      { id, started_at, usage: usage ?? noUsage(), status: usage ? "reported" : "unavailable", outcome: completed ? "completed" : "failed" });
   }
 }
 
@@ -483,13 +436,13 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
     const stored = run.provider_id ? providerById(run.provider_id) : undefined;
     if (run.provider_id && !stored) throw new Error("the run's provider was deleted");
     const provider = stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider("");
-    return await reflect({ workspaceId: ws, runId, digest: seriesDigest(runId, final, note), tools: toolsFor(stored?.kind).map((t) => t.def.name), provider, model: run.model, signal });
+    return await withUsage({ workspaceId: ws, runId, ticketId: (db.prepare("SELECT ticket_id FROM runs WHERE id=?").get(runId) as { ticket_id: string }).ticket_id, purpose: "reflection", background: true }, () => reflect({ workspaceId: ws, runId, digest: seriesDigest(runId, final, note), tools: toolsFor(stored?.kind).map((t) => t.def.name), provider, model: run.model, signal }));
   } catch (e) {
     return { error: `reflection failed: ${(e as Error).message}` };
   }
 }
 
-type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"]; review?: { model: string; usage: Usage } };
+type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"] };
 type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog>; cap: () => void }; // cap: capCheck for this run (throws)
 // An agent call's events, minus the ones the pipeline writes itself once for the whole run.
 const relay = (log: Ctx["log"]) => (e: AgentEvent) => void (e.type !== "run_finished" && e.type !== "run_metrics" && log(e));
@@ -499,9 +452,10 @@ const relay = (log: Ctx["log"]) => (e: AgentEvent) => void (e.type !== "run_fini
 // run_finished: reflection, handoff, round notes), run_finished with its cost, and `after` (cleanup, what happens next).
 // The spending caps are checked first: a run over one fails before its worktree, sandbox or first call.
 async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx) => Promise<void>, ending: (res: Result, c: Ctx) => Promise<void> | void, after: (res: Result) => Promise<void>) {
-  const r = db.prepare(`SELECT t.workspace_id, r.ticket_id, ${OWN_RUNS} AS own FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.id = ?`).get(runId) as { workspace_id: string; ticket_id: string; own: number };
+  const r = db.prepare(`SELECT t.workspace_id, r.ticket_id, ${OWN_RUNS} AS own, r.role FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.id = ?`).get(runId) as { workspace_id: string; ticket_id: string; own: number; role: string };
+  return withUsage({ workspaceId: r.workspace_id, ticketId: r.ticket_id, runId, purpose: r.role }, async () => {
   const log = eventLog(runId);
-  const c: Ctx = { signal: controllers.get(runId)!.signal, log, cap: () => capCheck(r.workspace_id, r.own ? r.ticket_id : undefined, runId, log) };
+  const c: Ctx = { signal: controllers.get(runId)!.signal, log, cap: () => capCheck(r.workspace_id, r.ticket_id, runId, log) };
   const res: Result = { status: "failed", turns: 0, usage: noUsage() };
   try {
     c.cap();
@@ -513,11 +467,13 @@ async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx
   } finally {
     if (c.signal.aborted) [res.status, res.reason] = ["cancelled", "cancelled"];
     await ending(res, c);
+    const measured = db.prepare("SELECT COALESCE(SUM(input),0) input,COALESCE(SUM(output),0) output,COALESCE(SUM(cache_read),0) cache_read,COALESCE(SUM(cache_write),0) cache_write FROM usage_ledger WHERE run_id=? AND background=0").get(runId) as Usage;
+    res.usage = measured;
     if (res.metrics) c.log({ type: "run_metrics", payload: { ...res.metrics, input: res.usage.input, output: res.usage.output, cache_read: res.usage.cache_read } });
     c.log({ type: "run_finished", payload: { status: res.status, reason: res.reason, turns: res.turns, usage: res.usage } });
-    recordCost(runId, model, res.usage, res.review);
     await after(res);
   }
+  });
 }
 
 // The run's stored provider (deleted: the run fails), its context window and compaction threshold (logged), and the
@@ -537,7 +493,10 @@ function reviewerFor(t: TicketRow, s: Settings, run: RunRow) {
   const own = { provider_id: run.provider_id, model: run.model };
   const c = s.review_provider_id || s.review_model ? choose(t, s, { provider_id: s.review_provider_id, model: s.review_model }) : own;
   const stored = c.provider_id ? providerById(c.provider_id) : undefined;
-  return { model: c.model, provider: (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: c.model }).provider(task)) };
+  return { model: c.model, provider: (task: string) => {
+    const p = stored ? adapterFor(stored) : providerConfig({ model: c.model }).provider(task);
+    return { stream: (req: Parameters<typeof p.stream>[0], on: Parameters<typeof p.stream>[1]) => usagePurpose("reviewer", () => p.stream(req, on)) };
+  } };
 }
 
 // queued → worktree + sandbox → setup command → agent loop → test gate + protected-path check → commit.
@@ -700,7 +659,6 @@ async function execute(runId: string) {
       // ponytail: the reviewer runs with the worker's compaction threshold; its budget (≤ 25 turns) never reaches it.
       const r = await runAgent({ ...common, model: reviewer.model, provider: reviewer.provider(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
       addUsage(res.usage, r.usage);
-      if (reviewer.model !== run.model) addUsage((res.review ??= { model: reviewer.model, usage: noUsage() }).usage, r.usage);
       abortCheck();
       if ((await snapshot(worktree)) !== before) {
         await restore(worktree, before);
@@ -1155,15 +1113,14 @@ export function startRun(ticketId: string, opts: StartOptions) {
   const skills = listSkills(root);
   const task = [skillsText(skills), ticket.spec ? `# ${ticket.title}\n\n${ticket.spec}` : ticket.title].filter(Boolean).join("\n\n");
   // Best effort: the root may not be a git repo.
-  const done = excludeScratch(root).catch(() => {}).then(() => runAgent({
+  const done = excludeScratch(root).catch(() => {}).then(() => withUsage({ workspaceId: ticket.workspace_id, ticketId, runId, purpose: "worker", uncapped: true }, () => runAgent({
     provider: provider(task), model, system: prompt.body, task, tools, root, budget: opts.budget ?? BUDGET, signal: ac.signal, cacheKey: ticketId, compactAt: compactThreshold(undefined, envWindow()),
     onEvent: (e) => {
       log(e);
       opts.onEvent?.(e);
     },
     onStream: opts.onStream,
-  })).then((r) => {
-    recordCost(runId, model, r.usage);
+  }))).then((r) => {
     setTicket(ticketId, TICKET_STATUS[r.status]);
     return r;
   }).finally(() => controllers.delete(runId));
@@ -1193,7 +1150,6 @@ export function recoverOrphans() {
     const r = db.prepare("SELECT tokens_in, tokens_out, tokens_cached FROM runs WHERE id = ?").get(o.id) as Record<string, number>;
     const usage = { input: r.tokens_in, output: r.tokens_out, cache_read: r.tokens_cached, cache_write: 0 };
     log({ type: "run_finished", payload: { status: "failed", reason: message, turns: 0, usage } });
-    recordCost(o.id, o.model, usage);
     if (o.eval_run_id) {
       recordEvalResult(o.id, false, 0);
       if (o.eval_repo) background(removeWorktree(o.eval_repo, o.worktree, null, dataDir()), "orphan cleanup failed");

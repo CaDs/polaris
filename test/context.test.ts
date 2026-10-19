@@ -356,7 +356,9 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
   // 5 turns of (100, 300) per message: 14 messages → 1400 uncached, 4200 cached.
   assert.deepEqual([run.tokens_in, run.tokens_out, run.tokens_cached], [1400, 100, 4200]);
   const u = (await call("GET", "/api/usage", cookie)).body;
-  assert.deepEqual([u.totals.runs, u.totals.tokens_in, u.totals.tokens_out, u.totals.tokens_cached, u.totals.cache_hit_rate], [1, 1400, 100, 4200, 0.75]);
+  assert.deepEqual([u.execution.runs, u.execution.tokens_in, u.execution.tokens_out, u.execution.tokens_cached, u.execution.cache_hit_rate], [1, 1400, 100, 4200, 0.75]);
+  assert.equal(u.background.tokens_total, 60);
+  assert.equal(u.totals.tokens_total, u.execution.tokens_total + 60);
   assert.equal(u.tickets[0].key, "FRA-1");
   assert.equal(u.models[0].model, "demo");
 });

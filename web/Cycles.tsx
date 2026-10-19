@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { Alert, Confirm, DateField, Loading, api, useApi, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, DateField, DateInput, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type Progress } from "./tracker.tsx";
 
 type Cycle = CycleRef & { progress: Progress; added_after_start: number };
@@ -58,8 +58,8 @@ export function Cycles({ go }: { go: (to: string) => void }) {
     <div className="page">
       <form className="row" onSubmit={create} key={start}>
         <input name="name" aria-label="Cycle name" placeholder="Name (optional)" maxLength={100} className="grow narrow" />
-        <input name="starts_at" type="date" aria-label="Starts" defaultValue={start} required className="narrow" />
-        <input name="ends_at" type="date" aria-label="Ends" defaultValue={addDays(start, 13)} required className="narrow" />
+        <DateInput name="starts_at" aria-label="Starts" defaultValue={start} required className="narrow" />
+        <DateInput name="ends_at" aria-label="Ends" defaultValue={addDays(start, 13)} required className="narrow" />
         <button className="btn primary">Create cycle</button>
       </form>
       <Alert error={error} />

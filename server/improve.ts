@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "./db.ts";
+import { metered, withUsage } from "./usage.ts";
 import { parseProtected, truncate } from "./agent/tools.ts";
 import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
@@ -160,7 +161,7 @@ export function capLessons(s: string) {
 // timeoutMs: a hung reflection must not hold its run's queue slot for long. tools are only declared, never run (failure
 // mining's submit tool): the caller reads the call from content.
 export async function ask(provider: Provider, model: string, system: string, text: string, maxTokens: number, timeoutMs: number, signal?: AbortSignal, tools: ToolDef[] = []) {
-  const res = await provider.stream(
+  const res = await metered(provider, { name: "Custom provider", kind: "unknown", billing: "unknown" }).stream(
     { system: [{ type: "text", text: system }], messages: [{ role: "user", content: [{ type: "text", text }] }], tools, model, maxTokens,
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) },
     () => {},
@@ -175,12 +176,12 @@ const chains = new Map<string, Promise<unknown>>();
 export function reflect(o: { workspaceId: string; runId: string; digest: string; tools?: string[]; provider: Provider; model: string; signal?: AbortSignal }): Promise<EventPayloads["reflection"]> {
   const job = (chains.get(o.workspaceId) ?? Promise.resolve()).then(async () => {
     const cur = currentLessons(o.workspaceId);
-    const r = await ask(o.provider, o.model, REFLECT_SYSTEM, `<lessons>\n${cur?.body || "(none yet)"}\n</lessons>\n\n<digest>\n${scrub(o.digest)}\n</digest>${o.tools ? `\n\n<tools>\n${o.tools.join(", ")}\n</tools>` : ""}`, 4096, 120_000, o.signal);
+    const r = await withUsage({ workspaceId: o.workspaceId, runId: o.runId, ticketId: (db.prepare("SELECT ticket_id FROM runs WHERE id=?").get(o.runId) as { ticket_id: string } | undefined)?.ticket_id, purpose: "reflection", background: true }, () => ask(o.provider, o.model, REFLECT_SYSTEM, `<lessons>\n${cur?.body || "(none yet)"}\n</lessons>\n\n<digest>\n${scrub(o.digest)}\n</digest>${o.tools ? `\n\n<tools>\n${o.tools.join(", ")}\n</tools>` : ""}`, 4096, 120_000, o.signal));
     const body = capLessons(scrub(r.text.replace(/^```\w*\n([\s\S]*?)\n```$/, "$1")));
     if (!body) throw new Error("the model returned no lessons");
-    if (cur?.body === body) return { lessons_id: cur.id, version: cur.version, chars: body.length, unchanged: true, usage: r.usage };
+    if (cur?.body === body) return { lessons_id: cur.id, version: cur.version, chars: body.length, unchanged: true, usage: r.usage, accounted: true };
     const v = saveLessons(o.workspaceId, body, { source: "reflection", run_id: o.runId });
-    return { lessons_id: v.id, version: v.version, chars: body.length, unchanged: false, usage: r.usage };
+    return { lessons_id: v.id, version: v.version, chars: body.length, unchanged: false, usage: r.usage, accounted: true };
   });
   chains.set(o.workspaceId, job.catch(() => {}));
   return job.catch((e) => ({ error: `reflection failed: ${(e as Error).message}` }));
@@ -195,11 +196,11 @@ export async function propose(o: { workspaceId: string; provider: Provider; mode
     const t = ticketOf(id);
     return `## ${t.key} ${t.title}\n${runDigest(id)}`;
   });
-  const r = await ask(o.provider, o.model, PROPOSE_SYSTEM, [
+  const r = await withUsage({ workspaceId: o.workspaceId, purpose: "proposal", background: true }, () => ask(o.provider, o.model, PROPOSE_SYSTEM, [
     `<current_prompt>\n${cur.body}\n</current_prompt>`,
     `<lessons>\n${currentLessons(o.workspaceId)?.body || "(none yet)"}\n</lessons>`,
     `<failures>\n${scrub(failures.join("\n\n")) || "(no failed runs yet)"}\n</failures>`,
-  ].join("\n\n"), 16_000, 600_000);
+  ].join("\n\n"), 16_000, 600_000));
   const body = /<prompt>([\s\S]*?)<\/prompt>/.exec(r.text)?.[1].trim();
   if (!body) throw new Error("the model did not answer with a <prompt>…</prompt> block");
   if (body.length > PROMPT_MAX) throw new Error(`the proposed prompt is longer than ${PROMPT_MAX} chars`);

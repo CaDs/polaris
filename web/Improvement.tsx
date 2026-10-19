@@ -24,6 +24,16 @@ type Data = {
   evals: { cases: EvalCase[]; runs: EvalRun[] };
 };
 
+// A section's intro: one line always visible, the mechanics folded away until asked for.
+function About({ summary, children }: { summary: string; children: React.ReactNode }) {
+  return (
+    <div className="about">
+      <p className="muted">{summary}</p>
+      <details><summary>How it works</summary><p className="muted">{children}</p></details>
+    </div>
+  );
+}
+
 const score = (e: EvalRun) => (e.status === "done" ? `${e.passed}/${e.total}` : `running, ${e.results?.filter((r) => r.case_passed !== null).length ?? 0}/${e.case_ids.length} done`);
 
 // M12 failure mining: GET /api/failures (classes of the last `days`, runs per day and class) and POST /api/failures/mine.
@@ -106,11 +116,11 @@ function FailureClasses({ open, changed }: { open: (n: number) => void; changed:
         <h2 className="grow">Failures</h2>
         <button className="btn" disabled={mining} onClick={mine}>{mining ? "Mining…" : "Mine failures"}</button>
       </div>
-      <p className="muted">
-        Why worker runs failed in the last {data.days} days, classified from their events (runs of tickets labelled mined are left out).
-        Mine failures asks the workspace's model, once per class with at least 2 runs and no open mined ticket, for a ticket that would stop
-        it (at most 5), or for a lesson when the cause is the harness. Mined tickets wait in todo until you read and run them.
-      </p>
+      <About summary={`Why worker runs failed in the last ${data.days} days, grouped by cause.`}>
+        Classified from the runs' events (runs of tickets labelled mined are left out). Mine failures asks the workspace's model, once per
+        class with at least 2 runs and no open mined ticket, for a ticket that would stop it (at most 5), or for a lesson when the cause is
+        the harness. Mined tickets wait in todo until you read and run them.
+      </About>
       <Alert error={error} />
       {result && (
         <ul className="checks" aria-label="Mining result">
@@ -165,10 +175,10 @@ function Lessons({ data, act }: { data: Data["lessons"]; act: Act }) {
   return (
     <section aria-label="Lessons">
       <h2>Lessons</h2>
-      <p className="muted">
-        Short notes about this repository and harness, written by a reflection after each finished ticket (or by you). The active (latest)
-        version goes into the first message of every new run, right away. Never into the system prompt.
-      </p>
+      <About summary="Notes about this repository that every new run starts with.">
+        Written by a reflection after each finished ticket, or by you. The active (latest) version goes into the first message of every
+        new run, right away. Never into the system prompt.
+      </About>
       <textarea aria-label="Lessons" className="mono" rows={8} value={draft} maxLength={data.max} onChange={(e) => setDraft(e.target.value)} placeholder="No lessons yet." />
       <div className="row">
         <button className="btn primary" disabled={draft.trim() === (current?.body ?? "")} onClick={() => act(() => api("/api/lessons", "PUT", { body: draft }))}>Save lessons</button>
@@ -220,11 +230,11 @@ function Prompts({ data, runs, act }: { data: Data["prompts"]; runs: EvalRun[]; 
           {proposing ? "Proposing…" : "Propose improvement"}
         </button>
       </div>
-      <p className="muted">
+      <About summary="The worker's system prompt. A new version applies only after it wins an eval and you promote it.">
         The active version is the system prompt of every new run (a running run keeps its own). New and proposed versions stay inactive
         until you promote them, which needs a finished eval on the current {data.case_count} case{data.case_count === 1 ? "" : "s"} that beats
         the active version's: more cases passed, or as many with at least 10% fewer mean tokens. Nothing is promoted automatically.
-      </p>
+      </About>
       {data.versions.map((p) => (
         <article key={p.id} className="pcard" aria-label={`Prompt v${p.version}`}>
           <div className="row">
@@ -288,10 +298,10 @@ function Evals({ data, act }: { data: Data["evals"]; act: Act }) {
   return (
     <section aria-label="Evals">
       <h2>Eval cases</h2>
-      <p className="muted">
-        Approved tickets, frozen: replayed from the commit their run started from, in a fresh worktree and sandbox, with the commands and
-        protected paths saved with the case. Add one with "Add to evals" on a done ticket; it must fail its test command at that commit.
-      </p>
+      <About summary={'Approved tickets, frozen, that score prompt versions. Add one with "Add to evals" on a done ticket.'}>
+        Replayed from the commit their run started from, in a fresh worktree and sandbox, with the commands and protected paths saved with
+        the case. A case must fail its test command at that commit.
+      </About>
       <div className="table-wrap">
         <table>
           <thead><tr><th>Ticket</th><th>Base</th><th>Test command</th><th></th></tr></thead>

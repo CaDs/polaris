@@ -3,11 +3,12 @@ import { Hono } from "hono";
 import { db } from "./db.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { openai } from "./agent/providers/openai.ts";
-import { chatgptBase, logins, refreshTokens, startLogin, type Tokens } from "./oauth.ts";
+import { cancelLogin, logins, OAuthError, openaiPlanBase, PLAN_SCOPE, refreshTokens, registration, revoke, startLogin, withoutTokens, type Tokens } from "./oauth.ts";
+import { metered } from "./usage.ts";
 import { decrypt, encrypt, SecretKeyError } from "./secrets.ts";
 import { AgentError, type Provider } from "./agent/types.ts";
 
-type ProviderRow = {
+export type ProviderRow = {
   id: string; workspace_id: string; name: string; kind: "anthropic" | "openai" | "ollama"; auth_type: "api_key" | "oauth" | "none";
   encrypted_secret: string | null; base_url: string | null; context_window: number; created_at: number;
 };
@@ -24,62 +25,101 @@ const openaiBase = (p: ProviderRow) => (p.base_url || process.env.OPENAI_BASE_UR
 export const providerById = (id: string) => db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as ProviderRow | undefined;
 
 // The secret is never returned: only whether one is stored and, for API keys, its last 4 chars.
+export function oauthRegistration(p: ProviderRow) {
+  try { return p.encrypted_secret ? registration(decrypt(p.encrypted_secret)) : undefined; } catch { return undefined; }
+}
 function view(p: ProviderRow) {
   let last4: string | null = null;
   if (p.encrypted_secret && p.auth_type === "api_key")
     try {
       last4 = decrypt(p.encrypted_secret).slice(-4);
     } catch {} // key rotated or missing: still has_secret, just unmasked
+  let account: { email?: string; label: string; status: string; welcomed: boolean } | undefined;
+  if (p.auth_type === "oauth") {
+    try {
+      const t = oauthRegistration(p);
+      account = { email: t?.email, label: t?.email ? `${p.name} · ${t.email}` : p.name,
+        status: !t ? (p.encrypted_secret ? "reconnect_required" : "signed_out") : !t.access ? "signed_out" : !t.scopes.includes(PLAN_SCOPE) ? "plan_disabled" : t.blocked_code ? "usage_limited" : "connected", welcomed: t?.welcomed ?? false };
+    } catch { account = { label: p.name, status: "reconnect_required", welcomed: false }; }
+  }
   const login = logins.get(p.id);
   return {
     id: p.id, name: p.name, kind: p.kind, auth_type: p.auth_type, base_url: p.base_url, context_window: p.context_window, created_at: p.created_at,
-    has_secret: !!p.encrypted_secret, secret_last4: last4, login: login?.status ?? null, login_error: login?.error ?? null,
+    account, has_secret: p.auth_type === "oauth" ? ["connected", "plan_disabled", "usage_limited"].includes(account?.status ?? "") : !!p.encrypted_secret, secret_last4: last4, login: login?.status ?? null, login_error: login?.error ?? null,
   };
 }
 
 // ChatGPT OAuth tokens live encrypted in the secret column; refreshed a minute before expiry. Concurrent runs share one refresh
 // (refresh tokens rotate, so two parallel refreshes would invalidate each other).
 const refreshing = new Map<string, Promise<Tokens>>();
-async function freshTokens(p: ProviderRow): Promise<Tokens> {
-  if (!p.encrypted_secret) throw new AgentError("ProviderError", `provider "${p.name}" is not signed in`);
-  const cur = JSON.parse(decrypt(p.encrypted_secret)) as Tokens;
-  if (cur.expires - Date.now() > 60_000) return cur;
+export async function freshTokens(p: ProviderRow): Promise<Tokens> {
+  const latest = providerById(p.id);
+  if (!latest || latest.auth_type !== "oauth") throw new AgentError("ProviderError", "ChatGPT provider was removed or changed");
+  const cur = oauthRegistration(latest);
+  if (!cur?.access || !cur.refresh) throw new AgentError("ProviderError", "Reconnect your ChatGPT account in Settings");
+  if (cur.blocked_code) {
+    const e = new AgentError("ProviderError", "ChatGPT plan usage is paused. Manage usage in ChatGPT settings, then use Test to explicitly check again, or choose Ollama.");
+    e.code = cur.blocked_code;
+    throw e;
+  }
+  if (!cur.scopes.includes(PLAN_SCOPE)) throw new AgentError("ProviderError", "Enable ChatGPT plan usage in Settings before running this provider");
+  if ((cur.expires ?? 0) - Date.now() > 60_000) return cur;
   let job = refreshing.get(p.id);
   if (!job) {
-    job = refreshTokens(cur.refresh).then((t) => {
-      db.prepare("UPDATE providers SET encrypted_secret = ? WHERE id = ?").run(encrypt(JSON.stringify(t)), p.id);
-      return t;
+    const saved = latest.encrypted_secret;
+    job = refreshTokens(cur).then(async (t) => {
+      const now = providerById(p.id);
+      const active = now?.auth_type === "oauth" ? oauthRegistration(now) : undefined;
+      const sameSession = active?.refresh === cur.refresh && active?.access === cur.access && active?.client_id === cur.client_id && active?.subject === cur.subject;
+      // Preserve UI acknowledgements or a concurrent quota pause, but never overwrite a changed login session.
+      const next = { ...t, welcomed: active?.welcomed, blocked_code: active?.blocked_code };
+      const r = sameSession ? db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify(next)), p.id, now!.encrypted_secret) : { changes: 0 };
+      if (!r.changes) {
+        await revoke(t).catch(() => {}); // discard and revoke a rotation that lost a race with logout/reconnection
+        throw new Error("ChatGPT connection changed while refreshing; retry with the current connection");
+      }
+      return next;
+    }).catch((e) => {
+      if (e instanceof OAuthError && /^(invalid_grant|invalid_refresh_token|token_expired|refresh_token_expired|refresh_token_invalidated|refresh_token_reused)$/.test(e.code))
+        db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify(withoutTokens(cur))), p.id, saved);
+      throw e;
     });
     refreshing.set(p.id, job);
     job.then(() => refreshing.delete(p.id), () => refreshing.delete(p.id));
   }
-  return job.catch((e) => {
-    throw new AgentError("ProviderError", `ChatGPT token refresh failed (sign in again in Settings): ${e.message}`);
-  });
+  const next = await job.catch(() => { throw new AgentError("ProviderError", "ChatGPT token refresh failed. Retry later, or reconnect in Settings if the session expired."); });
+  if (!next.scopes.includes(PLAN_SCOPE)) throw new AgentError("ProviderError", "Enable ChatGPT plan usage in Settings before running this provider");
+  if (next.blocked_code) throw new AgentError("ProviderError", "ChatGPT plan usage is paused. Manage usage in ChatGPT settings, then use Test to explicitly check again.");
+  return next;
 }
 
-// Adapter for a stored provider. Throws AgentError("ProviderError") when it is unusable (no secret, no key configured).
+// All callers share request accounting. Credentials stay on the server; tools run in the existing sandbox.
 export function adapterFor(p: ProviderRow): Provider {
   try {
     const secret = p.auth_type === "api_key" ? (p.encrypted_secret ? decrypt(p.encrypted_secret) : "") : "";
     if (p.auth_type === "api_key" && !secret) throw new Error(`provider "${p.name}" has no API key`);
-    if (p.kind === "ollama") return anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL });
-    if (p.kind === "anthropic") return anthropic({ apiKey: secret, baseUrl: p.base_url || undefined });
-    if (p.auth_type === "api_key") return openai({ url: `${openaiBase(p)}/v1/responses`, headers: async () => ({ authorization: `Bearer ${secret}` }) });
-    return openai({
-      url: `${p.base_url?.replace(/\/$/, "") || chatgptBase()}/codex/responses`,
-      codex: true,
-      headers: async () => {
-        const t = await freshTokens(p);
-        return {
-          authorization: `Bearer ${t.access}`, "chatgpt-account-id": t.account_id, "OpenAI-Beta": "responses=experimental",
-          originator: "codex_cli_rs", accept: "text/event-stream",
-        };
-      },
-    });
-  } catch (e) {
-    throw new AgentError("ProviderError", (e as Error).message);
-  }
+    let provider: Provider;
+    if (p.kind === "ollama") provider = anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL });
+    else if (p.kind === "anthropic") provider = anthropic({ apiKey: secret, baseUrl: p.base_url || undefined });
+    else if (p.auth_type === "api_key") provider = openai({ url: `${openaiBase(p)}/v1/responses`, headers: async () => ({ authorization: `Bearer ${secret}` }) });
+    else provider = openai({ url: `${openaiPlanBase()}/responses`, subscription: true,
+      headers: async () => ({ authorization: `Bearer ${(await freshTokens(p)).access}` }) });
+    if (p.auth_type === "oauth") {
+      const transport = provider;
+      provider = { async stream(req, on) {
+        try { return await transport.stream(req, on); }
+        catch (e) {
+          if (e instanceof AgentError && e.code === "subscription_sharing_usage_limit_exceeded") {
+            const latest = providerById(p.id);
+            const t = latest && oauthRegistration(latest);
+            if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify({ ...t, blocked_code: e.code })), p.id, latest!.encrypted_secret);
+          }
+          throw e;
+        }
+      } };
+    }
+    return metered(provider, { id: p.id, name: p.name, kind: p.kind, billing: p.kind === "ollama" ? "local" : p.auth_type === "oauth" ? "subscription" : "api_key" }, p.workspace_id);
+  } catch (e) { throw new AgentError("ProviderError", (e as Error).message); }
 }
 
 // The context the Ollama server actually serves (it is the server's num_ctx, not the model's maximum): the loaded
@@ -107,7 +147,8 @@ async function listModels(p: ProviderRow): Promise<string[]> {
     if (!res.ok) throw new Error(`Ollama answered HTTP ${res.status}`);
     return ((await res.json()) as { models: { name: string }[] }).models.map((m) => m.name);
   }
-  if (p.auth_type === "oauth" || !p.encrypted_secret) return OPENAI_MODELS;
+  if (p.auth_type === "oauth") return (await planModels(p)).map((m) => m.id);
+  if (!p.encrypted_secret) return OPENAI_MODELS;
   try {
     const res = await fetch(`${openaiBase(p)}/v1/models`, { headers: { authorization: `Bearer ${decrypt(p.encrypted_secret)}` }, signal: AbortSignal.timeout(10_000) });
     const ids = ((await res.json()) as { data: { id: string }[] }).data.map((m) => m.id);
@@ -116,6 +157,15 @@ async function listModels(p: ProviderRow): Promise<string[]> {
   } catch {
     return OPENAI_MODELS;
   }
+}
+
+async function planModels(p: ProviderRow) {
+  const t = await freshTokens(p);
+  const res = await fetch(`${openaiPlanBase()}/models`, { headers: { authorization: `Bearer ${t.access}` }, signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new AgentError("ProviderError", `ChatGPT model discovery failed (HTTP ${res.status}). Check your connection and plan permission.`);
+  const j = await res.json() as { models?: { slug: string; display_name: string; visibility: string }[] };
+  if (!Array.isArray(j.models)) throw new Error("ChatGPT returned no model catalog");
+  return j.models.filter((m) => m.visibility === "list" && typeof m.slug === "string").map((m) => ({ id: m.slug, name: m.display_name || m.slug }));
 }
 
 const echo = { name: "echo", description: "Echo a string back.", input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } };
@@ -141,6 +191,7 @@ async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow
   if (!(kind in AUTH)) return { error: "kind must be anthropic, openai or ollama" };
   if (cur && b.kind !== undefined && b.kind !== cur.kind) return { error: "kind cannot be changed" };
   if (!AUTH[kind as ProviderRow["kind"]].includes(auth_type)) return { error: `${kind} supports auth type ${AUTH[kind as ProviderRow["kind"]].join(" or ")}` };
+  if (kind === "openai" && auth_type === "oauth" && base_url) return { error: "ChatGPT plan connections use the official OpenAI endpoint; clear the base URL" };
   if (base_url) {
     try {
       if (typeof base_url !== "string" || !/^https?:$/.test(new URL(base_url).protocol)) throw 0;
@@ -181,6 +232,7 @@ providerRoutes.patch("/:id", async (c) => {
   const p = await parse(c, cur);
   if ("error" in p) return c.json(p, 400);
   const v = p.v;
+  if (v.auth_type !== cur.auth_type || v.base_url !== cur.base_url) cancelLogin(cur.id);
   db.prepare("UPDATE providers SET name = ?, auth_type = ?, base_url = ?, context_window = ?, encrypted_secret = ? WHERE id = ?").run(
     v.name, v.auth_type, v.base_url, v.context_window, v.secret === undefined ? cur.encrypted_secret : v.secret, cur.id,
   );
@@ -188,9 +240,11 @@ providerRoutes.patch("/:id", async (c) => {
 });
 
 // Tickets/runs/workspace defaults pointing at it fall back (ON DELETE SET NULL).
-providerRoutes.delete("/:id", (c) => {
+providerRoutes.delete("/:id", async (c) => {
   const p = own(c.get("workspaceId"), c.req.param("id"));
   if (!p) return c.json({ error: "not_found" }, 404);
+  cancelLogin(p.id);
+  if (p.auth_type === "oauth") { const t = oauthRegistration(p); if (t) await revoke(t).catch(() => {}); }
   db.prepare("DELETE FROM providers WHERE id = ?").run(p.id);
   return c.body(null, 204);
 });
@@ -199,6 +253,10 @@ providerRoutes.get("/:id/models", async (c) => {
   const p = own(c.get("workspaceId"), c.req.param("id"));
   if (!p) return c.json({ error: "not_found" }, 404);
   try {
+    if (p.auth_type === "oauth") {
+      const model_details = await planModels(p);
+      return c.json({ models: model_details.map((m) => m.id), model_details });
+    }
     return c.json({ models: await listModels(p) });
   } catch (e) {
     return c.json({ error: `could not list models: ${(e as Error).message}` }, 502);
@@ -210,6 +268,10 @@ providerRoutes.post("/:id/test", async (c) => {
   const p = own(c.get("workspaceId"), c.req.param("id"));
   if (!p) return c.json({ error: "not_found" }, 404);
   const b = await c.req.json().catch(() => null);
+  if (p.auth_type === "oauth") {
+    const t = oauthRegistration(p);
+    if (t?.blocked_code) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...t, blocked_code: undefined })), p.id);
+  }
   const model = typeof b?.model === "string" && b.model ? b.model : p.kind === "anthropic" ? DEFAULT_MODEL : (await listModels(p).catch(() => []))[0];
   if (!model) return c.json({ error: "choose a model to test" }, 400);
   const t0 = Date.now();
@@ -221,21 +283,56 @@ providerRoutes.post("/:id/test", async (c) => {
       },
       () => {},
     );
-    return c.json({ model, ok: true, tool_call: r.message.content.some((x) => x.type === "tool_use"), latency_ms: Date.now() - t0 });
+    const calls = r.message.content.filter((x) => x.type === "tool_use");
+    if (calls.some((x) => x.name !== "echo" || x.input.text !== "ping")) throw new Error("model returned an unexpected test tool call");
+    if (calls.length) await adapterFor(p).stream({ system: [{ type: "text", text: "You are a connection test." }], tools: [], model, maxTokens: 512, signal: AbortSignal.timeout(120_000),
+      messages: [{ role: "user", content: [{ type: "text", text: 'Call the echo tool with text "ping". Do not answer in prose.' }] }, r.message,
+        { role: "user", content: calls.map((x) => ({ type: "tool_result", tool_use_id: x.id, content: "ping", ...(x.namespace ? { namespace: x.namespace } : {}) })) }] }, () => {});
+    return c.json({ model, ok: true, tool_call: calls.length > 0, latency_ms: Date.now() - t0 });
   } catch (e) {
     return c.json({ model, ok: false, tool_call: false, latency_ms: Date.now() - t0, error: (e as Error).message });
   }
 });
 
-// ChatGPT OAuth: returns the authorize URL; the UI opens it in a new tab and polls GET / until has_secret.
+// New sign-in attempts never replace the active registration until identity validation completes.
 providerRoutes.post("/:id/oauth/start", async (c) => {
   const p = own(c.get("workspaceId"), c.req.param("id"));
   if (!p) return c.json({ error: "not_found" }, 404);
   if (p.kind !== "openai" || p.auth_type !== "oauth") return c.json({ error: "provider does not use ChatGPT sign-in" }, 400);
   try {
-    encrypt(""); // fail early when there is no secret key
-    return c.json({ url: await startLogin(p.id, (t) => db.prepare("UPDATE providers SET encrypted_secret = ? WHERE id = ?").run(encrypt(JSON.stringify(t)), p.id)) });
-  } catch (e) {
-    return c.json({ error: (e as Error).message }, e instanceof SecretKeyError ? 400 : 409);
-  }
+    encrypt("");
+    const current = oauthRegistration(p);
+    const b = await c.req.json().catch(() => ({}));
+    return c.json({ url: await startLogin(p.id, (t) => {
+      const latest = providerById(p.id);
+      if (!latest || latest.auth_type !== "oauth") throw new Error("provider was removed or changed");
+      db.prepare("UPDATE providers SET encrypted_secret=?,base_url=NULL WHERE id=?").run(encrypt(JSON.stringify(t)), p.id);
+    }, current, b?.consent === true) });
+  } catch (e) { return c.json({ error: (e as Error).message }, e instanceof SecretKeyError ? 400 : 409); }
+});
+providerRoutes.post("/:id/oauth/cancel", (c) => {
+  const p = own(c.get("workspaceId"), c.req.param("id"));
+  if (!p) return c.json({ error: "not_found" }, 404);
+  cancelLogin(p.id);
+  return c.json({ ok: true });
+});
+providerRoutes.post("/:id/oauth/logout", async (c) => {
+  const p = own(c.get("workspaceId"), c.req.param("id"));
+  if (!p) return c.json({ error: "not_found" }, 404);
+  if (p.auth_type !== "oauth") return c.json({ error: "provider does not use ChatGPT sign-in" }, 400);
+  cancelLogin(p.id);
+  const t = oauthRegistration(p);
+  let revoked = true;
+  // Clear locally before awaiting revocation so a concurrent refresh cannot resurrect the old session.
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(t ? encrypt(JSON.stringify(withoutTokens(t))) : null, p.id);
+  if (t) revoked = await revoke(t).catch(() => false);
+  return c.json({ ok: true, revoked, ...(revoked ? {} : { warning: "Signed out locally. Remote revocation was not confirmed; disconnect Polaris in ChatGPT settings." }) });
+});
+providerRoutes.post("/:id/oauth/acknowledge", (c) => {
+  const p = own(c.get("workspaceId"), c.req.param("id"));
+  if (!p) return c.json({ error: "not_found" }, 404);
+  if (p.auth_type !== "oauth") return c.json({ error: "provider does not use ChatGPT sign-in" }, 400);
+  const t = oauthRegistration(p);
+  if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...t, welcomed: true })), p.id);
+  return c.json({ ok: true });
 });

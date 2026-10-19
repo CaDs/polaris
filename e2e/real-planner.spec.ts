@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { addProvider, git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { addProvider, git, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 // Opt-in: REAL_MODEL=qwen3.8:27b-mlx npm run e2e:headed
 // A real model plans an epic into child tickets, workers implement them in the sandbox, auto-approve merges them.
@@ -25,13 +25,14 @@ test("real model: planner splits an epic, workers implement, auto-approve merges
 
   const model = process.env.REAL_MODEL!;
   await signUp(page, "Planner");
-  await saveSettings(page, repo, "npm test", () => page.getByLabel("Auto-approve child tickets").check());
+  await saveSettings(page, repo, "npm test");
+  await saveTab(page, "Automation", () => page.getByLabel("Auto-approve child tickets").check());
   await addProvider(page, { name: "Local Ollama", kind: "ollama", baseUrl: "http://localhost:11434" });
   const providers = page.getByRole("region", { name: "Providers" });
-  await providers.getByLabel("Default provider").selectOption({ label: "Local Ollama" });
-  await providers.getByLabel("Default model").selectOption(model);
-  await providers.getByRole("button", { name: "Save default" }).click();
-  await expect(providers.getByRole("status")).toHaveText("Default saved");
+  await page.getByLabel("Default provider").selectOption({ label: "Local Ollama" });
+  await page.getByLabel("Default model").selectOption(model);
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
 
   await page.getByRole("link", { name: "Board" }).click();
   const spec =

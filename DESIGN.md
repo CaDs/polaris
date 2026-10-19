@@ -37,6 +37,14 @@ fixed); white on accent 4.76; tagline `#c9d3ea` on night 12.4. Accent vs dark bg
 - System UI stack (Inter if installed), 13px base, unchanged; wordmark 34px / 650 / -0.015em; form titles 18px; tagline 15px.
 - 4px spacing grid (4/8/12/16/24); auth card gap 14px, padding 28/24px, radius 12px.
 
+## Icons
+
+Outline glyphs only: 1.5px stroke, `currentColor`, round caps, on a 24-unit grid (`Icon` in web/ui.tsx; status and
+priority glyphs in ui.tsx/tracker.tsx follow the same rule at 14px). No emoji and no typed symbols (⚠ ✓ ✗ ↑ ↓ +) as
+icons: they render as filled color pictures on some platforms. An icon-only control carries its own `aria-label`;
+counts sit beside a glyph, never over it. No looping motion anywhere: "running" is a static half-filled circle,
+and a running card's static gradient hairline says a model is working. Selects use the same outline chevron instead of the OS control.
+
 ## Mark
 
 Inline SVG (`Mark` in web/App.tsx): a four-ray star (long cardinal rays, faded diagonals, like a

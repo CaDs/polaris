@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Transcript } from "./TicketView.tsx";
-import { Alert, Loading, api, when, type Run } from "./ui.tsx";
+import { Alert, Icon, Loading, api, when, type Run } from "./ui.tsx";
 
 // M10: the project wiki. The index with stale flags, a page viewer/editor, the wiki repo's history, and the maintainer runs.
 type PageInfo = { path: string; title: string; summary: string; stale: string | null; verified: string; updated: string };
@@ -190,7 +190,7 @@ export function Wiki() {
               <li key={p.path}>
                 <button className="link" aria-current={p.path === path} onClick={() => setPath(p.path)}>{p.title}</button>
                 {p.summary && <span className="muted"> — {p.summary}</span>}
-                {p.stale && <span className="warn" title="Source files changed since the page was verified"> ⚠ may be stale: {p.stale}</span>}
+                {p.stale && <span className="warn" title="Source files changed since the page was verified"> <Icon name="alert" size={13} /> may be stale: {p.stale}</span>}
               </li>
             ))}
           </ul>

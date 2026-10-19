@@ -71,7 +71,7 @@ test("reflection: a separate no-tools conversation, capped, injected into the ne
   assert.ok(v1.body.startsWith("- MOCK-LESSON read tests/ first\n") && v1.body.endsWith("cap"));
   assert.deepEqual([v1.version, v1.source, v1.ticket_key, v1.run_attempt], [1, "reflection", "RIT-1", 1]);
   const ev = events(one.run.id);
-  assert.deepEqual(ev.find((e) => e.type === "reflection")!.p, { lessons_id: v1.id, version: 1, chars: v1.body.length, unchanged: false, usage: { input: 10, output: 5, cache_read: 0, cache_write: 0 } });
+  assert.deepEqual(ev.find((e) => e.type === "reflection")!.p, { lessons_id: v1.id, version: 1, chars: v1.body.length, unchanged: false, usage: { input: 10, output: 5, cache_read: 0, cache_write: 0 }, accounted: true });
   assert.deepEqual(ev.slice(-3).map((e) => e.type), ["reflection", "run_metrics", "run_finished"]); // before run_finished: live in the transcript
   assert.equal(runRow(one.run.id).tokens_out, 5); // the reflection is not booked on the run
 

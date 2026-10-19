@@ -1,3 +1,4 @@
+import { attributedUsage, backfillUsage, treeUsage, usageSummary } from "./usage.ts";
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -17,6 +18,7 @@ import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery
 import { AgentError } from "./agent/types.ts";
 
 migrate();
+backfillUsage();
 
 type Env = { Variables: { userId: string; workspaceId: string } };
 
@@ -70,6 +72,8 @@ const TICKETS = `
     (SELECT model FROM runs WHERE ${OWN} ORDER BY rowid DESC LIMIT 1) AS run_model,
     (SELECT p.auth_type FROM runs r JOIN providers p ON p.id = r.provider_id WHERE r.${OWN} ORDER BY r.rowid DESC LIMIT 1) AS run_auth,
     (SELECT COUNT(*) FROM runs WHERE ${OWN}) AS run_count,
+    (SELECT COALESCE(SUM(input+output+cache_read+cache_write),0) FROM usage_ledger WHERE ticket_id IN (WITH RECURSIVE u(id) AS (SELECT t.id UNION ALL SELECT c.id FROM tickets c JOIN u ON c.parent_id=u.id) SELECT id FROM u)) AS tokens_total,
+    (SELECT COALESCE(SUM(input+output+cache_read+cache_write),0) FROM usage_ledger WHERE background=1 AND ticket_id IN (WITH RECURSIVE u(id) AS (SELECT t.id UNION ALL SELECT c.id FROM tickets c JOIN u ON c.parent_id=u.id) SELECT id FROM u)) AS tokens_background,
     (SELECT COALESCE(SUM(tokens_in), 0) FROM runs WHERE ${OWN}) AS tokens_in,
     (SELECT COALESCE(SUM(tokens_out), 0) FROM runs WHERE ${OWN}) AS tokens_out,
     (SELECT COALESCE(SUM(tokens_cached), 0) FROM runs WHERE ${OWN}) AS tokens_cached,
@@ -183,10 +187,10 @@ app.get("/api/tickets/:id", (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
   const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
-    WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({ ...r, metrics: r.metrics && JSON.parse(r.metrics) }));
-  if (t.kind !== "epic") return c.json({ ...t, runs });
+    WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({ ...r, metrics: r.metrics && JSON.parse(r.metrics), usage: attributedUsage("run_id", r.id, false), background_usage: attributedUsage("run_id", r.id, true) }));
+  if (t.kind !== "epic") return c.json({ ...t, runs, usage: attributedUsage("ticket_id", t.id), background_usage: attributedUsage("ticket_id", t.id, true) });
   const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id).map((r) => hydrate(r)) as any[];
-  return c.json({ ...t, runs, children: withStates(tree), spent: treeSpend(t.id) }); // spent: what its caps measure
+  return c.json({ ...t, runs, usage: treeUsage(t.id), background_usage: treeUsage(t.id, true), children: withStates(tree), spent: treeSpend(t.id) }); // totals and caps include the whole epic tree
 });
 
 app.patch("/api/tickets/:id", async (c) => {
@@ -331,31 +335,12 @@ app.put("/api/settings", async (c) => {
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
 });
 
-// Token/cost usage of the workspace's runs. tokens_in counts uncached prompt tokens incl. cache writes, tokens_cached the cache
-// reads, so cache hit rate = cached / (in + cached). Days are UTC (run start), the last 14 including today, newest first.
-const SUMS = "COUNT(*) AS runs, COALESCE(SUM(r.tokens_in), 0) AS tokens_in, COALESCE(SUM(r.tokens_out), 0) AS tokens_out, COALESCE(SUM(r.tokens_cached), 0) AS tokens_cached, COALESCE(SUM(r.cost_usd), 0) AS cost_usd";
-const FROM_RUNS = "FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.workspace_id = ? AND r.started_at IS NOT NULL";
-const withRate = <T extends { tokens_in: number; tokens_cached: number }>(r: T) => ({ ...r, cache_hit_rate: r.tokens_in + r.tokens_cached ? r.tokens_cached / (r.tokens_in + r.tokens_cached) : null });
+// One accounting source for execution, background calls and caps.
 app.get("/api/usage", (c) => {
   const ws = c.get("workspaceId");
-  const rows = (sql: string) => db.prepare(sql).all(ws) as Record<string, any>[];
-  const byDay = new Map(rows(`SELECT strftime('%Y-%m-%d', r.started_at / 1000, 'unixepoch') AS day, ${SUMS} ${FROM_RUNS} GROUP BY day`).map((r) => [r.day, r]));
-  const days = Array.from({ length: 14 }, (_, i) => {
-    const day = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
-    return withRate((byDay.get(day) ?? { day, runs: 0, tokens_in: 0, tokens_out: 0, tokens_cached: 0, cost_usd: 0 }) as any);
-  });
   const s = settingsFor(ws);
   const m = monthSpend(ws);
-  return c.json({
-    cap: { usd: s?.monthly_cap_usd ?? null, tokens: s?.monthly_cap_tokens ?? null, used_usd: m.usd, used_tokens: m.tokens, month: m.month }, // what capCheck measures
-    totals: withRate(rows(`SELECT ${SUMS} ${FROM_RUNS}`)[0] as any),
-    days,
-    models: rows(`SELECT r.model, ${SUMS} ${FROM_RUNS} GROUP BY r.model ORDER BY SUM(r.tokens_in + r.tokens_out + r.tokens_cached) DESC, r.model`).map((r) => withRate(r as any)),
-    tickets: rows(
-      `SELECT t.id, ${ticketKey()} AS key, t.title, ${SUMS} FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
-       WHERE t.workspace_id = ? AND t.hidden = 0 AND r.started_at IS NOT NULL GROUP BY t.id ORDER BY SUM(r.tokens_in + r.tokens_out) DESC, t.number LIMIT 10`,
-    ).map((r) => withRate(r as any)),
-  });
+  return c.json({ ...usageSummary(ws), cap: { usd: s?.monthly_cap_usd ?? null, tokens: s?.monthly_cap_tokens ?? null, used_usd: m.usd, used_tokens: m.tokens, month: m.month } });
 });
 
 // M12 failure mining: per UTC day (run start, the last `days` incl. today, default 14, max 90) and model, newest first. Run

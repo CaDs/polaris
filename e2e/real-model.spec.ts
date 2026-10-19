@@ -28,10 +28,10 @@ test("slugify", () => {
   await addProvider(page, { name: "Local Ollama", kind: "ollama", baseUrl: "http://localhost:11434" });
   // Workspace default too: reflection uses the run's model, proposals use the default.
   const providers = page.getByRole("region", { name: "Providers" });
-  await providers.getByLabel("Default provider").selectOption({ label: "Local Ollama" });
-  await providers.getByLabel("Default model").selectOption(model);
-  await providers.getByRole("button", { name: "Save default" }).click();
-  await expect(providers.getByRole("status")).toHaveText("Default saved");
+  await page.getByLabel("Default provider").selectOption({ label: "Local Ollama" });
+  await page.getByLabel("Default model").selectOption(model);
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
 
   await page.getByRole("link", { name: "Board" }).click();
   await newTicket(page, "Implement slugify", "Create slugify.js exporting slugify(s) so that `npm test` passes. tests/ is read-only: read tests/slugify.test.js, do not edit it.");
@@ -56,7 +56,7 @@ test("slugify", () => {
   // (slugify.js is absent at its base commit, so `npm test` fails there); v1 is evaluated; the model proposes v2.
   await page.getByRole("button", { name: "Add to evals" }).click();
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 120_000 });
-  await page.getByRole("link", { name: "Improvement" }).click();
+  await page.getByRole("link", { name: "Learning" }).click();
   await expect(page.getByRole("textbox", { name: "Lessons" })).not.toHaveValue("");
   const v1 = page.getByRole("article", { name: "Prompt v1" });
   await v1.getByRole("button", { name: "Run eval" }).click();

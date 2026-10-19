@@ -1,3 +1,4 @@
+import { usagePurpose } from "../usage.ts";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { compactedTask, CONTINUE_REQUEST, historyMarkdown, readPaths, SUMMARY_REQUEST, workState } from "./context.ts";
@@ -109,14 +110,14 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   }
 
   // One model call: appends the reply to the current conversation and books its usage.
-  async function turn() {
-    const res = await o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream);
+  async function turn(summary = false) {
+    const res = await usagePurpose(summary ? "compaction" : "", () => o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream));
     turns++;
     messages.push(res.message);
     addUsage(usage, res.usage);
     contextTokens = res.usage.input + res.usage.cache_read + res.usage.cache_write;
     o.onEvent({ type: "assistant_message", payload: { message: res.message, stop_reason: res.stopReason } });
-    o.onEvent({ type: "usage", payload: res.usage });
+    o.onEvent({ type: "usage", payload: { ...res.usage, ...(res.metered ? { metered: true } : {}) } });
     return res;
   }
 
@@ -130,7 +131,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     writeScratch(o.root, path, historyMarkdown(messages, n));
     const before = contextTokens;
     messages.push(user(SUMMARY_REQUEST));
-    const res = await turn(); // tools stay in the request (changing them would bust the cache); any calls it makes are ignored
+    const res = await turn(true); // tools stay in the request (changing them would bust the cache); any calls it makes are ignored
     const summary = res.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trim() || "(the model wrote no summary)";
     writeScratch(o.root, path, `\n## Summary written at compaction\n\n${summary}\n`, true);
     histories.push(path);
@@ -196,7 +197,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
           ? { content: "UserAborted: run cancelled before this tool ran", is_error: true, kind: "UserAborted" as const }
           : await runTool(o.tools, call, { ...ctx, turn: turns, reads });
         o.onEvent({ type: "tool_result", payload: { tool_use_id: call.id, content: r.content, is_error: r.is_error, error_kind: r.kind } });
-        results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error });
+        results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error, ...(call.namespace ? { namespace: call.namespace } : {}) });
         const key = callKey(call);
         if (seen.has(key)) m.repeated_calls++;
         seen.add(key);

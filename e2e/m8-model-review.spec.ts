@@ -7,7 +7,8 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
   await signUp(page, "Review");
   const transcript = page.getByRole("region", { name: "Transcript" });
 
-  await saveSettings(page, repo, "test -f notes.txt", () => expect(page.getByLabel("Model review before human review")).toBeChecked());
+  await saveSettings(page, repo, "test -f notes.txt");
+  await page.getByRole("link", { name: "Models", exact: true }).click();
   await expect(page.getByLabel("Model review before human review")).toBeChecked();
   // M12: a separate reviewer model for the workspace (the picker needs a provider; the fake one here is set by model name).
   await expect(page.getByRole("heading", { name: "Reviewer model" })).toBeVisible();

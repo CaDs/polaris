@@ -1,5 +1,5 @@
 import { test, expect, type Route } from "@playwright/test";
-import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 test("M5: spilled output, compaction, skills, cache hit rate and the Usage page", async ({ page }) => {
   test.setTimeout(180_000);
@@ -8,12 +8,14 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await signUp(page, "Context");
 
   // Settings: repo, a gate that needs the demo agent's notes.txt, and a tiny compaction cap.
-  await saveSettings(page, repo, "test -f notes.txt", async () => {
+  await saveSettings(page, repo, "test -f notes.txt");
+  await saveTab(page, "Limits", async () => {
     await expect(page.getByLabel("Compact at (tokens)")).toHaveValue("150000");
     await page.getByLabel("Compact at (tokens)").fill("1000");
-    await page.getByLabel("Model review before human review").uncheck(); // this spec counts the worker's tokens
   });
   await expect(page.getByLabel("Compact at (tokens)")).toHaveValue("1000");
+  await saveTab(page, "Models", () => page.getByLabel("Model review before human review").uncheck()); // this spec counts the worker's tokens
+  await page.request.put("/api/settings", { data: { wiki: false } }); // wiki execution has separate browser coverage
 
   // Provider dialog: context window with a per-kind default.
   await page.getByRole("button", { name: "Add provider" }).click();
@@ -100,12 +102,15 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
   const totals = page.getByRole("region", { name: "Totals" });
   await expect(totals).toContainText("Cache hit rate");
-  await expect(totals).toContainText("75%");
-  await expect(totals).toContainText("Tokens in");
+  const usage = await (await page.request.get("/api/usage")).json();
+  const completeHitRate = `${Math.round(100 * usage.totals.tokens_cached / (usage.totals.tokens_in + usage.totals.tokens_cached))}%`;
+  expect(usage.totals.tokens_total).toBe(usage.execution.tokens_total + usage.background.tokens_total);
+  await expect(totals).toContainText(completeHitRate); // includes reflection; the execution-only rate above remains 75%
+  await expect(totals).toContainText("Input tokens");
   const days = page.getByRole("region", { name: "Per day" });
-  await expect(days.locator("tbody tr")).toHaveCount(14);
+  await expect(days.locator("tbody tr")).toHaveCount(1); // days without activity are left out
   await expect(days.locator("tbody tr").first()).toContainText(new Date().toISOString().slice(0, 10));
-  await expect(days.locator("tbody tr").first()).toContainText("75%");
+  await expect(days.locator("tbody tr").first()).toContainText(completeHitRate);
   await expect(page.getByRole("region", { name: "Per model" })).toContainText("demo");
   await expect(page.getByRole("region", { name: "Top tickets" })).toContainText("CON-1");
   await expect(page.getByRole("region", { name: "Top tickets" })).toContainText("Long session");
@@ -128,12 +133,13 @@ test("Spending caps: a monthly cap in Settings, its bar on the Usage page, a tic
   const repo = tempRepo();
   await signUp(page, "Capped");
   // The demo worker's first call uses 520 tokens and leaves the gate failing (no ok.txt): its fix round is over the cap.
-  await saveSettings(page, repo, "test -f ok.txt", async () => {
+  await saveSettings(page, repo, "test -f ok.txt");
+  await saveTab(page, "Limits", async () => {
     await expect(page.getByLabel("Monthly cap (tokens)")).toHaveValue("");
     await page.getByLabel("Monthly cap (tokens)").fill("500");
-    await page.getByLabel("Model review before human review").uncheck();
   });
   await expect(page.getByLabel("Monthly cap (tokens)")).toHaveValue("500");
+  await saveTab(page, "Models", () => page.getByLabel("Model review before human review").uncheck());
 
   await page.getByRole("link", { name: "Usage" }).click();
   const cap = page.getByRole("region", { name: "Spending cap" });

@@ -53,8 +53,8 @@ test("M4: providers, tool-calling test, masked keys, defaults, model picker and 
   // Ollama-kind provider pointing at the mock; Test checks tool calling per model.
   await addProvider(page, { name: "Mock Ollama", kind: "ollama", baseUrl: mockUrl });
   await row("Mock Ollama").getByRole("button", { name: "Test" }).click();
-  await expect(row("Mock Ollama").getByLabel("Test results for Mock Ollama")).toContainText("✓ mock-a");
-  await expect(row("Mock Ollama").getByLabel("Test results for Mock Ollama")).toContainText("✓ mock-b");
+  await expect(row("Mock Ollama").getByLabel("Test results for Mock Ollama").locator("li.ok", { hasText: "mock-a" })).toBeVisible();
+  await expect(row("Mock Ollama").getByLabel("Test results for Mock Ollama").locator("li.ok", { hasText: "mock-b" })).toBeVisible();
 
   // API key: write-only, masked to the last 4 characters even after a reload.
   await addProvider(page, { name: "Claude", kind: "anthropic", apiKey: "sk-ant-test-abcd" });
@@ -67,11 +67,11 @@ test("M4: providers, tool-calling test, masked keys, defaults, model picker and 
   await page.getByRole("button", { name: "Cancel" }).click();
 
   // Workspace default.
-  await providers.getByLabel("Default provider").selectOption({ label: "Claude" });
-  await expect(providers.getByLabel("Default model")).toHaveValue("claude-opus-5-5");
-  await providers.getByLabel("Default model").selectOption("claude-sonnet-5-5");
-  await providers.getByRole("button", { name: "Save default" }).click();
-  await expect(providers.getByRole("status")).toHaveText("Default saved");
+  await page.getByLabel("Default provider").selectOption({ label: "Claude" });
+  await expect(page.getByLabel("Default model")).toHaveValue("claude-opus-5-5");
+  await page.getByLabel("Default model").selectOption("claude-sonnet-5-5");
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
 
   // A ticket picks the mock provider and runs on it.
   await page.getByRole("link", { name: "Board" }).click();

@@ -1,14 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
-import { git, newTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 // The demo planner creates "Create a.txt" and "Create b.txt" (after a.txt); the demo worker creates the file its ticket
 // names and hands off. The gate passes once either file exists; children run in the real Docker sandbox.
 async function setup(page: Page, workspace: string, autoApprove: boolean) {
   const repo = tempRepo();
   await signUp(page, workspace);
-  await saveSettings(page, repo, "test -f a.txt || test -f b.txt", async () => {
-    if (autoApprove) await page.getByLabel("Auto-approve child tickets").check();
-  });
+  await saveSettings(page, repo, "test -f a.txt || test -f b.txt");
+  if (autoApprove) await saveTab(page, "Automation", () => page.getByLabel("Auto-approve child tickets").check());
   return repo;
 }
 

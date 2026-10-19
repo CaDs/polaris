@@ -27,7 +27,7 @@ export default defineConfig({
     screenshot: "on",
   },
   webServer: {
-    command: "npx vite build --logLevel warn && node server/index.ts",
+    command: `npx vite build --logLevel warn && node ${realModel ? "server/index.ts" : "e2e/server.ts"}`,
     url: `http://localhost:${port}`,
     reuseExistingServer: false,
     env: {

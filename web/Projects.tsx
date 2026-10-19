@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { Alert, Confirm, DateField, Loading, api, useApi, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, DateField, DateInput, Icon, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, useTracker, type Member, type Progress } from "./tracker.tsx";
 
 type Milestone = { id: string; name: string; target_date: string | null; position: number; progress: Progress };
@@ -29,7 +29,7 @@ export function Projects({ go }: { go: (to: string) => void }) {
     <div className="page">
       <form className="row" onSubmit={create}>
         <input name="name" aria-label="Project name" placeholder="New project" required maxLength={100} className="grow narrow" />
-        <input name="target_date" type="date" aria-label="Target date" className="narrow" />
+        <DateInput name="target_date" aria-label="Target date" placeholder="Target date" className="narrow" />
         <button className="btn primary">Create project</button>
       </form>
       <Alert error={error} />
@@ -123,15 +123,15 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
             <input aria-label={`Milestone ${m.name}`} defaultValue={m.name} className="grow narrow" maxLength={100} onBlur={(e) => e.target.value.trim() && e.target.value !== m.name && call(`/api/milestones/${m.id}`, "PATCH", { name: e.target.value })} />
             <DateField aria-label={`Target date of ${m.name}`} className="narrow" value={m.target_date} onSave={(target_date) => call(`/api/milestones/${m.id}`, "PATCH", { target_date })} />
             <Bar p={m.progress} />
-            <button className="btn" aria-label={`Move ${m.name} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
-            <button className="btn" aria-label={`Move ${m.name} down`} disabled={i === p.milestones.length - 1} onClick={() => move(i, 1)}>↓</button>
+            <button className="btn" aria-label={`Move ${m.name} up`} disabled={i === 0} onClick={() => move(i, -1)}><Icon name="up" size={14} /></button>
+            <button className="btn" aria-label={`Move ${m.name} down`} disabled={i === p.milestones.length - 1} onClick={() => move(i, 1)}><Icon name="down" size={14} /></button>
             <button className="btn danger" aria-label={`Delete milestone ${m.name}`} onClick={() => setDeleting(m)}>Delete</button>
           </li>
         ))}
       </ul>
       <form className="row" onSubmit={addMilestone}>
         <input name="name" aria-label="New milestone" placeholder="New milestone" required maxLength={100} className="grow narrow" />
-        <input name="target_date" type="date" aria-label="Milestone target date" className="narrow" />
+        <DateInput name="target_date" aria-label="Milestone target date" placeholder="Target date" className="narrow" />
         <button className="btn">Add milestone</button>
       </form>
 

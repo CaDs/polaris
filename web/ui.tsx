@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+
+export type TokenSummary = { tokens_total: number; tokens_in: number; input_uncached: number; tokens_out: number; tokens_cached: number; tokens_cache_write: number; partial: number; unavailable: number; cost_usd: number; unknown_price: number; subscription_calls: number; local_calls: number };
 
 export type Status = "todo" | "running" | "review" | "done" | "failed";
 export const COLUMNS: Status[] = ["todo", "running", "review", "done", "failed"];
@@ -6,6 +8,7 @@ export type Ticket = {
   id: string; number: number; key: string; title: string; spec: string; test_command: string | null; status: Status;
   provider_id: string | null; model: string | null; run_model: string | null; run_auth: string | null;
   run_status: string | null; run_count: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number;
+  tokens_total?: number; tokens_background?: number;
   eval_case_id: string | null;
   mined_class: string | null; // M12: drafted by failure mining from this failure class
   // M7: epic = planned by a planner; children have parent_id. handoff: a child's handoff, an epic's summary or failure reason.
@@ -23,6 +26,7 @@ export type Run = {
   id: string; ticket_id: string; model: string; provider_id: string | null; auth_type: string | null; attempt: number; status: string;
   tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number; started_at: number | null; ended_at: number | null;
   prompt_version: number | null; eval_run_id: string | null; role: "worker" | "planner" | "wiki";
+  usage?: TokenSummary; background_usage?: TokenSummary; tokens_cache_write?: number;
   metrics?: RunMetrics | null; // once finished; the same object is the payload of its run_metrics event
 };
 // turns_pct / minutes_pct: share (0–100) of the attempt's turn and time budget; minutes_pct is null without a time limit.
@@ -34,6 +38,7 @@ export type RunMetrics = {
 
 export type Provider = {
   id: string; name: string; kind: "anthropic" | "openai" | "ollama"; auth_type: "api_key" | "oauth" | "none"; base_url: string | null;
+  account?: { email?: string; label: string; status: string; welcomed: boolean };
   context_window: number; has_secret: boolean; secret_last4: string | null; login: "pending" | "error" | null; login_error: string | null;
 };
 
@@ -70,14 +75,33 @@ export function errorText(data: any, status = 0) {
 
 export const fmt = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(0)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 // ChatGPT-subscription runs have no per-token price.
-export const cost = (usd: number, auth?: string | null) => (auth === "oauth" ? "subscription" : usd > 0 ? `$${usd.toFixed(usd < 0.01 ? 4 : 2)}` : "—"); // 0 = price unknown
+export const cost = (usd: number, auth?: string | null) => (auth === "oauth" ? "ChatGPT plan" : usd > 0 ? `$${usd.toFixed(usd < 0.01 ? 4 : 2)}` : "—"); // 0 = price unknown
 // Share of prompt tokens served from the provider's cache: cached / (uncached in incl. cache writes + cached).
 export const hitRate = (tokens_in: number, tokens_cached: number) => (tokens_in + tokens_cached ? `${Math.round((100 * tokens_cached) / (tokens_in + tokens_cached))}%` : "—");
 // An epic between planner rounds: its last round finished and it waits for children to settle.
 export const waiting = (t: Ticket) => t.kind === "epic" && t.status === "running" && t.run_status !== "queued" && t.run_status !== "running";
 export const duration = (r: Run) => (r.started_at ? `${(((r.ended_at ?? Date.now()) - r.started_at) / 1000).toFixed(1)}s` : "—");
 
-// Small status glyphs: circle = todo, spinning arc = running, ring with dot = review, check = done, x = failed.
+// UI glyphs: outline only (1.5px stroke, currentColor, 24-unit grid), never emoji or filled shapes. Decorative: the
+// control around one carries the accessible name.
+const GLYPHS = {
+  bell: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0",
+  plus: "M12 5v14M5 12h14",
+  check: "M20 6 9 17l-5-5",
+  x: "M18 6 6 18M6 6l12 12",
+  alert: "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4M12 17h.01",
+  up: "M12 19V5M5 12l7-7 7 7",
+  down: "M12 5v14M19 12l-7 7-7-7",
+  more: "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+  calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+};
+export const Icon = ({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: number }) => (
+  <svg className="glyph" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={GLYPHS[name]} />
+  </svg>
+);
+
+// Small status glyphs, all static: circle = todo, half-filled circle = running, ring with dot = review, check = done, x = failed.
 // label: the glyph is the only place the status shows (list rows, palette), so screen readers get it as an image.
 export function StatusIcon({ status, label = false }: { status: string; label?: boolean }) {
   const c = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
@@ -85,8 +109,8 @@ export function StatusIcon({ status, label = false }: { status: string; label?: 
     <svg className={`icon s-${status}`} width="14" height="14" viewBox="0 0 14 14" {...(label ? { role: "img", "aria-label": status } : { "aria-hidden": true })}>
       {status === "running" ? (
         <>
-          <circle cx="7" cy="7" r="5.5" {...c} opacity=".3" />
-          <path className="spin" d="M7 1.5a5.5 5.5 0 0 1 5.5 5.5" {...c} strokeLinecap="round" />
+          <circle cx="7" cy="7" r="5.5" {...c} />
+          <path d="M7 3.5a3.5 3.5 0 0 1 0 7Z" fill="currentColor" />
         </>
       ) : (
         <circle cx="7" cy="7" r="5.5" {...c} fill={status === "done" ? "currentColor" : "none"} />
@@ -175,7 +199,28 @@ export function DateField({ value, onSave, required, ...rest }: { value: string 
     if (!el.value && required) el.value = value ?? ""; // a required date can't be cleared
     else onSave(el.value || null);
   };
-  return <input key={value ?? ""} type="date" {...rest} defaultValue={value ?? ""} onBlur={(e) => save(e.target)} onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()} />;
+  return <DateInput key={value ?? ""} {...rest} defaultValue={value ?? ""} onBlur={(e) => save(e.target)} onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()} />;
+}
+
+// The native date input, dressed like the other controls: an empty one reads "Set date" instead of the browser's
+// "yyyy/mm/dd", and the outline calendar glyph stands in for the OS picker icon (a click anywhere opens the picker).
+export function DateInput({ placeholder = "Set date", ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [typed, setTyped] = useState(!!props.defaultValue);
+  useEffect(() => {
+    const form = ref.current?.form;
+    const reset = () => setTyped(false);
+    form?.addEventListener("reset", reset);
+    return () => form?.removeEventListener("reset", reset);
+  }, []);
+  const empty = props.value !== undefined ? !props.value : !typed;
+  return (
+    <span className={`date${empty ? " empty" : ""}`}>
+      <input ref={ref} type="date" {...props} onInput={(e) => (setTyped(!!e.currentTarget.value), props.onInput?.(e))} />
+      <span className="date-ph" aria-hidden="true">{placeholder}</span>
+      <Icon name="calendar" size={14} />
+    </span>
+  );
 }
 
 export const when = (t: string | number) => new Date(t).toLocaleString();
@@ -194,22 +239,25 @@ export function ModelPicker({ providers, provider_id, model, onChange, prefix = 
   onChange: (v: { provider_id: string | null; model: string | null }) => void;
 }) {
   const [models, setModels] = useState<string[]>([]);
+  const [names, setNames] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   useEffect(() => {
     setModels([]);
+    setNames({});
     setError("");
     if (!provider_id) return;
     let live = true;
-    api<{ models: string[] }>(`/api/providers/${provider_id}/models`).then(
+    api<{ models: string[]; model_details?: { id: string; name: string }[] }>(`/api/providers/${provider_id}/models`).then(
       (r) => {
         if (!live) return;
         setModels(r.models);
+        setNames(Object.fromEntries((r.model_details ?? []).map((m) => [m.id, m.name])));
         if (!model && r.models[0]) onChange({ provider_id, model: r.models[0] });
       },
       (e) => live && setError(e.message),
     );
     return () => void (live = false);
-  }, [provider_id]);
+  }, [provider_id, providers.find((p) => p.id === provider_id)?.account?.status]);
   const options = model && !models.includes(model) ? [model, ...models] : models;
   return (
     <>
@@ -220,9 +268,10 @@ export function ModelPicker({ providers, provider_id, model, onChange, prefix = 
       {provider_id && (
         <select aria-label={`${prefix}Model`} value={model ?? ""} onChange={(e) => onChange({ provider_id, model: e.target.value || null })}>
           {!model && <option value="">Model…</option>}
-          {options.map((m) => <option key={m}>{m}</option>)}
+          {options.map((m) => <option key={m} value={m}>{names[m] ?? m}</option>)}
         </select>
       )}
+      {providers.find((p) => p.id === provider_id)?.auth_type === "oauth" && <span className="hint">Using ChatGPT plan · <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a></span>}
       {error && <span className="error">{error}</span>}
     </>
   );
@@ -230,7 +279,7 @@ export function ModelPicker({ providers, provider_id, model, onChange, prefix = 
 
 // The workspace change stream (GET /api/events): one EventSource shared by every subscriber on the page; each ping says
 // which ticket or notification changed and the subscriber refetches. Reconnects are the browser's; a fetch on mount covers the gap.
-type Change = { type: "ticket" | "notification"; id: string };
+type Change = { type: "ticket" | "notification" | "usage"; id: string };
 const changeListeners = new Set<(c: Change) => void>();
 let changes: EventSource | null = null;
 export function useWorkspaceEvents(type: Change["type"], fn: (c: Change) => void) {
@@ -239,7 +288,7 @@ export function useWorkspaceEvents(type: Change["type"], fn: (c: Change) => void
     changeListeners.add(on);
     if (!changes) {
       changes = new EventSource("/api/events");
-      for (const t of ["ticket", "notification"]) changes.addEventListener(t, (m) => changeListeners.forEach((l) => l(JSON.parse((m as MessageEvent).data))));
+      for (const t of ["ticket", "notification", "usage"]) changes.addEventListener(t, (m) => changeListeners.forEach((l) => l(JSON.parse((m as MessageEvent).data))));
     }
     return () => {
       changeListeners.delete(on);

@@ -1,21 +1,19 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Alert, Confirm, Dialog, ModelPicker, api, useProviders, type Provider } from "./ui.tsx";
+import { Alert, Confirm, Dialog, Icon, api, type Provider } from "./ui.tsx";
 
 type Check = { model: string; ok: boolean; tool_call: boolean; latency_ms: number; error?: string };
 const KINDS = { anthropic: ["api_key"], openai: ["api_key", "oauth"], ollama: ["none"] } as const;
 const CONTEXT_WINDOW = { anthropic: 1_000_000, openai: 400_000, ollama: 32_768 };
 const AUTH_LABEL = { api_key: "API key", oauth: "ChatGPT sign-in", none: "No auth" };
 
-type Defaults = { default_provider_id: string | null; default_model: string | null; review_provider_id: string | null; review_model: string | null; configured: boolean };
-export function Providers({ defaults }: { defaults: Defaults }) {
-  const [providers, reload] = useProviders();
+// The list is the Models tab's (Settings), which shares it with its model pickers so a new provider shows there at once.
+export function Providers({ providers, reload }: { providers: Provider[] | null; reload: () => void }) {
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
   const [deleting, setDeleting] = useState<Provider | null>(null);
   const [checks, setChecks] = useState<Record<string, Check[] | string>>({}); // by provider id; string = error or "Testing…"
-  const [pick, setPick] = useState({ provider_id: defaults.default_provider_id, model: defaults.default_model });
-  const [reviewer, setReviewer] = useState({ provider_id: defaults.review_provider_id, model: defaults.review_model });
-  const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [welcomeClosed, setWelcomeClosed] = useState(false);
+  const welcome = providers?.find((p) => p.account?.status === "connected" && !p.account.welcomed);
 
   // Sign-in happens in another tab: poll until the provider has tokens (or the login failed).
   const waiting = providers?.some((p) => p.login === "pending");
@@ -38,30 +36,19 @@ export function Providers({ defaults }: { defaults: Defaults }) {
       }
     } catch (e) {
       setChecks((c) => ({ ...c, [p.id]: (e as Error).message }));
-    }
+    } finally { reload(); }
   }
 
-  async function signIn(p: Provider) {
+  async function signIn(p: Provider, consent = false) {
     setError("");
     const w = window.open("about:blank", "_blank"); // opened synchronously so the popup blocker allows it
     try {
-      const { url } = await api<{ url: string }>(`/api/providers/${p.id}/oauth/start`, "POST");
+      const { url } = await api<{ url: string }>(`/api/providers/${p.id}/oauth/start`, "POST", { consent });
       if (w) w.location.href = url;
-      else setError(`Popup blocked. Open this link: ${url}`);
+      else setError("Popup blocked. Allow popups for Polaris and try Continue with ChatGPT again.");
       reload();
     } catch (e) {
       w?.close();
-      setError((e as Error).message);
-    }
-  }
-
-  async function saveDefault(which: "default" | "review" = "default") {
-    setMsg("");
-    setError("");
-    try {
-      await api(`/api/settings/${which}-provider`, "PUT", which === "review" ? reviewer : pick);
-      setMsg(which === "review" ? "Reviewer saved" : "Default saved");
-    } catch (e) {
       setError((e as Error).message);
     }
   }
@@ -77,6 +64,11 @@ export function Providers({ defaults }: { defaults: Defaults }) {
       <h2>Providers</h2>
       <p className="muted">Models the agents can run on. Keys and tokens are encrypted at rest and never shown again.</p>
       <Alert error={error} />
+      {welcome && !welcomeClosed && <Dialog title="You're using your ChatGPT plan" onClose={() => void api(`/api/providers/${welcome.id}/oauth/acknowledge`, "POST").then(() => (setWelcomeClosed(true), reload()))}>
+        <p>Eligible AI requests from this provider use your ChatGPT plan. You can manage Polaris access and usage in ChatGPT settings.</p>
+        <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
+        <button className="btn primary" onClick={() => void api(`/api/providers/${welcome.id}/oauth/acknowledge`, "POST").then(() => (setWelcomeClosed(true), reload()))}>Got it</button>
+      </Dialog>}
       <ul className="plist">
         {providers?.map((p) => {
           const c = checks[p.id];
@@ -88,8 +80,10 @@ export function Providers({ defaults }: { defaults: Defaults }) {
                 {p.auth_type === "api_key" && <span className="mono muted">{p.has_secret ? `••••${p.secret_last4 ?? ""}` : "no key"}</span>}
                 {p.auth_type === "oauth" && (
                   <>
-                    <span className="muted" role="status">{p.login === "pending" ? "Waiting for sign-in…" : p.has_secret ? "Signed in" : "Not signed in"}</span>
-                    <button className="btn" onClick={() => signIn(p)}>Sign in with ChatGPT</button>
+                    <span className="muted" role="status">{p.login === "pending" ? "Waiting for sign-in…" : p.account?.status === "connected" ? `Connected · ${p.account.label}` : p.account?.status === "usage_limited" ? "Plan usage paused · Manage usage, then Test to retry" : p.account?.status === "plan_disabled" ? "Plan usage not enabled" : p.account?.status === "reconnect_required" ? "Reconnect required" : "Not signed in"}</span>
+                    <button className="btn" onClick={() => signIn(p, p.account?.status === "plan_disabled")}>Continue with ChatGPT</button>
+                    {p.login === "pending" && <button className="btn" onClick={() => void api(`/api/providers/${p.id}/oauth/cancel`, "POST").then(reload)}>Cancel sign-in</button>}
+                    {p.has_secret && <button className="btn" onClick={() => void api<{ warning?: string }>(`/api/providers/${p.id}/oauth/logout`, "POST").then((r) => (setError(r.warning ?? ""), reload()))}>Disconnect ChatGPT</button>}
                   </>
                 )}
                 <button className="btn" onClick={() => test(p)}>Test</button>
@@ -97,13 +91,13 @@ export function Providers({ defaults }: { defaults: Defaults }) {
                 <button className="btn danger" onClick={() => setDeleting(p)}>Delete</button>
               </div>
               {p.login === "error" && <p className="error">Sign-in failed: {p.login_error}</p>}
-              {p.auth_type === "oauth" && <span className="hint">Experimental and unofficial: uses your ChatGPT subscription through the Codex login. Personal use only; it may break at any time.</span>}
+              {p.auth_type === "oauth" && <span className="hint">Eligible requests use your ChatGPT plan. Token usage is tracked like local and API-key models.</span>}
               {typeof c === "string" && <p className="muted">{c}</p>}
               {Array.isArray(c) && (
                 <ul className="checks mono" aria-label={`Test results for ${p.name}`}>
                   {c.map((r) => (
                     <li key={r.model} className={r.ok && r.tool_call ? "ok" : "err"}>
-                      {r.ok && r.tool_call ? "✓" : "✗"} {r.model} <span className="muted">{r.ok ? (r.tool_call ? `tool calling works · ${r.latency_ms} ms` : "answered without calling the tool") : r.error}</span>
+                      <Icon name={r.ok && r.tool_call ? "check" : "x"} size={13} /> {r.model} <span className="muted">{r.ok ? (r.tool_call ? `tool calling works · ${r.latency_ms} ms` : "answered without calling the tool") : r.error}</span>
                     </li>
                   ))}
                 </ul>
@@ -114,21 +108,6 @@ export function Providers({ defaults }: { defaults: Defaults }) {
         {providers?.length === 0 && <li className="muted">No providers yet.</li>}
       </ul>
       <button className="btn" onClick={() => setEditing("new")}>Add provider</button>
-
-      <h2>Default model</h2>
-      <p className="muted">Used by tickets that don't pick their own. Without one, the server falls back to its environment (ANTHROPIC_API_KEY …).</p>
-      <div className="row">
-        {providers && <ModelPicker providers={providers} prefix="Default " {...pick} onChange={setPick} />}
-        <button className="btn" onClick={() => saveDefault()}>Save default</button>
-        {msg && <span className="muted" role="status">{msg}</span>}
-      </div>
-
-      <h2>Reviewer model</h2>
-      <p className="muted">Reviews each run's change before the human review (with Model review on). "Default" here means the model the run itself used; a stronger or cheaper model is the usual pick.</p>
-      <div className="row">
-        {providers && <ModelPicker providers={providers} prefix="Reviewer " {...reviewer} onChange={setReviewer} />}
-        <button className="btn" onClick={() => saveDefault("review")}>Save reviewer</button>
-      </div>
 
       {editing && <ProviderDialog p={editing === "new" ? null : editing} close={() => setEditing(null)} saved={() => (setEditing(null), reload())} />}
       {deleting && (
@@ -178,17 +157,17 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
           <select value={auth} onChange={(e) => setAuth(e.target.value as Provider["auth_type"])}>
             {KINDS[kind].map((a) => <option key={a} value={a}>{AUTH_LABEL[a]}</option>)}
           </select>
-          {auth === "oauth" && <span className="hint">Experimental, unofficial: sign in with your ChatGPT subscription from the provider's row after saving.</span>}
+          {auth === "oauth" && <span className="hint">Connect your ChatGPT account from the provider row after saving. No API key is needed.</span>}
         </label>
-        <label>
+        {auth !== "oauth" && <label>
           Base URL
           <input name="base_url" className="mono" defaultValue={p?.base_url ?? ""} spellCheck={false}
             placeholder={kind === "ollama" ? "http://localhost:11434" : kind === "openai" ? "https://api.openai.com" : "https://api.anthropic.com"} />
-        </label>
+        </label>}
         <label>
           Context window (tokens)
           <input name="context_window" type="number" min={1000} step={1} value={window} onChange={(e) => setWindow(e.target.value)} required={kind !== "ollama"} placeholder={kind === "ollama" ? "auto" : undefined} />
-          <span className="hint">Runs compact their conversation at 70% of this (and never above the workspace cap in Settings).{kind === "ollama" && " Leave empty (or 32768) to detect what Ollama serves."}</span>
+          <span className="hint">Runs compact their conversation at 70% of this (and never above the cap in Settings → Limits).{kind === "ollama" && " Leave empty (or 32768) to detect what Ollama serves."}</span>
         </label>
         {auth === "api_key" && (
           <label>

@@ -40,15 +40,22 @@ export async function putSettings(page: Page, data: Record<string, unknown>) {
   expect((await page.request.put("/api/settings", { data })).ok()).toBe(true);
 }
 
-// Settings through the Settings page: repository, no setup command, this test command; `more` sets other fields first.
-export async function saveSettings(page: Page, repo: string, testCommand: string, more?: () => Promise<void>) {
+// Settings through the Settings page (General tab): repository, no setup command, this test command.
+export async function saveSettings(page: Page, repo: string, testCommand: string) {
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByLabel("Repository path").fill(repo);
   await page.getByLabel("Setup command").fill("");
   await page.getByLabel("Test command").fill(testCommand);
-  await more?.();
   await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
+}
+
+// Another Settings tab (General must be saved first): open it, `fill` its fields, save.
+export async function saveTab(page: Page, tab: string, fill: () => Promise<unknown>) {
+  await page.getByRole("link", { name: tab, exact: true }).click();
+  await fill();
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
 }
 
 // Creates a ticket through the New ticket dialog; `more` fills other fields of the dialog.
@@ -67,8 +74,9 @@ export async function openTicket(page: Page, title: string) {
   await page.getByRole("button", { name: new RegExp(title) }).click();
 }
 
-// Adds a provider in the Providers section of the Settings page.
+// Adds a provider on the Models tab of the Settings page (from anywhere in Settings).
 export async function addProvider(page: Page, f: { name: string; kind: string; baseUrl?: string; apiKey?: string }) {
+  await page.getByRole("link", { name: "Models", exact: true }).click();
   await page.getByRole("button", { name: "Add provider" }).click();
   const d = page.getByRole("dialog");
   await d.getByLabel("Name").fill(f.name);

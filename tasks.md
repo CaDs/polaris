@@ -110,6 +110,16 @@
 - [x] Evals compared on the same model only; settings PUT merges; agent tool edge cases; indexes (015); shared constants, `truncate`, `ticketKey`, `pipeline`, JSON errors, test helpers
 - [x] Worker prompt matches the tools (every line numbered, git read-only); test command, git and budget in the environment block; a changed built-in prompt reaches workspaces on the unmodified one
 
+## GPT / Ollama interoperability and accounting
+- [x] Public Sign in with ChatGPT dynamic registration, validated identity, isolated encrypted registrations, rotating refresh, cancellation and logout
+- [x] Account-visible GPT catalog, namespaced Responses tool round trips, safe account status, first-use confirmation and Manage usage
+- [x] Append-only request-attempt usage ledger, historical backfill and explicit incomplete coverage
+- [x] Execution/background attribution, mixed-provider reviews, cached/reasoning normalization, retry/partial/missing usage
+- [x] Workspace and ticket-tree caps cover associated local, subscription, API-key and background usage
+- [x] Shared token categories/totals and live usage refresh in transcripts, run/ticket views and Usage
+- [x] Mock OAuth/provider, accounting and browser acceptance; live Ollama protected-test/review/approval smoke test
+- [x] Live ChatGPT (`gpt-6.1-sol`) and Ollama (`qwen3.8:27b-mlx`) protected-test/review/approval smoke tests in separate disposable repositories, with reconciled execution/background usage
+
 ## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
 - [x] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
 - [x] One turn budget per attempt: fix rounds get what is left (at least 10 turns)

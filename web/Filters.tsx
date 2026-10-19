@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Board } from "./Board.tsx";
 import { GROUPS, List, type Group } from "./List.tsx";
-import { Alert, COLUMNS, Dialog, api, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, DateInput, Dialog, Icon, api, type Ticket } from "./ui.tsx";
 import { cycleName, PRIORITIES, useTracker, type Tracker } from "./tracker.tsx";
 import type { View } from "./Views.tsx";
 
@@ -132,7 +132,7 @@ function FilterBar({ params, set, all, open, error }: {
         </span>
       ))}
       <span className="menu-anchor">
-        <button className="btn" aria-expanded={!!menu} onClick={() => setMenu(menu ? null : "fields")}>+ Filter</button>
+        <button className="btn" aria-expanded={!!menu} onClick={() => setMenu(menu ? null : "fields")}><Icon name="plus" size={14} /> Filter</button>
         {menu && tracker && (
           <Popover key={menu} close={() => setMenu(null)}>
             {menu === "fields" ? (
@@ -176,7 +176,7 @@ function FieldMenu({ field, options, values, toggle, date, setDate, back }: {
     <div role="group" aria-label={`${field.name} filter`}>
       <button className="item muted" onClick={back}>‹ {field.name}</button>
       {field.date ? (
-        <input type="date" aria-label={field.name} value={date} onChange={(e) => setDate(e.target.value)} />
+        <DateInput aria-label={field.name} value={date} onChange={(e) => setDate(e.target.value)} />
       ) : options.length ? (
         options.map(([v, n]) => (
           <label key={v} className="check item">

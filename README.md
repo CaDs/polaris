@@ -38,7 +38,7 @@ that does real, reviewable work on a real codebase, and gets better at it over t
   designed around their limits: small context windows, small steps, imperfect tool calls.
 - **Complex work gets split.** A ticket that is too big for one agent becomes an epic: a planner breaks it into tickets the
   agents can finish, with their own acceptance checks.
-- **It learns.** Each project keeps a wiki and lessons written from the agents' own approved work, and prompt changes are
+- **It learns.** Each project keeps a wiki from approved work and lessons from execution feedback, and prompt changes are
   promoted only when they beat the current prompt on an eval set built from past tickets.
 - **Measured, not assumed.** Changes to the harness are validated on a complexity ladder of real tickets on its own
   codebase (see [What we learned](#what-we-learned)).
@@ -69,9 +69,9 @@ cost per run, and replay any transcript.
 
 | Area | What you get |
 |---|---|
-| **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page. |
+| **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
 | **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace (one repository each). The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
-| **Providers** | Anthropic API, OpenAI API (and experimental ChatGPT sign-in), local Ollama. Keys encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
+| **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
 | **Agent loop** | Tools `read_file`, `edit_file` (or `apply_patch` for OpenAI models), `search`, `shell`. Append-only conversations (prompt caching friendly), provider retries, long output spilled to files. The first message states the environment: test command, read-only paths, budget, git read-only. |
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
 | **Test gate** | Your test command must pass. A failure is re-run once (flaky tests don't fail good work), then fed back into the same conversation for a fix, then retried fresh (up to 3 attempts). |
@@ -126,14 +126,45 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 ### First ticket
 
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
-2. **Settings → Repository**: the absolute path of a git repository with at least one commit, the base branch, a setup
+2. **Settings → General**: the absolute path of a git repository with at least one commit, the base branch, a setup
    command (e.g. `npm ci`) and a test command (e.g. `npm test`). Protected paths default to `tests/,evals/`.
-3. **Settings → Providers**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
+3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
 4. **New ticket**, describe the change, **Run agent**. Watch the transcript, then **Approve** to merge into your base
    branch or **Reject** with a note for the next attempt.
 
 For bigger work, choose **Epic** when creating the ticket and click **Run planner**.
+
+## Ollama and your ChatGPT plan
+
+Keep an Ollama provider as the workspace default (for example `qwen3.8:27b-mlx`, with context window left on auto).
+Add another provider in **Settings → Models**: kind **openai**, auth **ChatGPT sign-in**. Save it and click
+**Continue with ChatGPT**. Complete the browser authorization on this Mac and enable plan usage. Polaris registers
+itself with OpenAI; no API key or Codex installation is needed. Existing experimental Codex-login credentials show
+**Reconnect required** and must be connected again.
+
+Pick that provider and an account-available GPT model on a ticket or in **Retry with…**. The workspace default stays
+Ollama. You can also choose it as the reviewer for local workers. Each account registration is a separate provider;
+reconnecting verifies the same identity. **Disconnect ChatGPT** clears tokens and attempts remote revocation while
+retaining the registration for later sign-in. OAuth uses a temporary `127.0.0.1` callback, normally port 1455, with an
+available-port fallback. Keep the `openai-host-id` file in your data directory across restarts.
+
+All providers report input, output, cache-read/write and total processed tokens through the same accounting path.
+**Input** is uncached input; the API’s legacy `tokens_in` includes cache writes. Total = input + output + cache reads +
+cache writes. Reasoning tokens already included in output are not counted twice. Retries are separate requests.
+Interrupted/missing usage is shown as partial/unavailable, not measured zero. Usage includes workers, reviews,
+compaction, wiki/evals, reflections, prompt proposals, failure mining, triage and connection tests. Background usage
+is separate from execution and does not change worker turn counts or eval scores. Ticket-associated background work
+counts toward its ticket/epic token caps; all calls count toward workspace caps. Caps still allow a session already
+in flight to finish. Local runs have no provider inference bill, subscription runs say **ChatGPT plan**, and API-key
+costs are estimates where a verified price is available. Token totals do not imply remaining subscription allowance.
+
+Use **Manage usage** to open [ChatGPT usage settings](https://chatgpt.com/settings/usage). A subscription-limit error
+pauses further plan requests; explicitly use **Test** to recheck after managing usage, or select Ollama. Polaris never
+automatically switches to paid API billing. The ledger preserves reconstructable historical run and reflection usage;
+older unrecorded background calls cannot be recovered and are marked as incomplete coverage.
+
+Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source).
 
 ## Configuration
 
@@ -158,14 +189,16 @@ For bigger work, choose **Epic** when creating the ticket and click **Run planne
 | `POLARIS_PROVIDER=fake` | Scripted demo provider used by the tests |
 
 Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARIS_COMPACT_AT`, `POLARIS_RETRY_BASE_MS`,
-`POLARIS_OPENAI_AUTH_URL`, `POLARIS_CHATGPT_BASE_URL`; for `npm run e2e`: `E2E_PORT`, `HEADED`, `REAL_MODEL`.
+`POLARIS_OPENAI_AUTH_URL`, `POLARIS_OPENAI_PLAN_URL`; for `npm run e2e`: `E2E_PORT`, `HEADED`, `REAL_MODEL`.
 
 ### Workspace settings (Settings page)
 
-Repository and commands, protected paths, sandbox image, compaction cap, model review (on), automatic splitting (on),
-child size hint for the planner, triage model (off), auto-approve child tickets (off), project wiki (on),
-max turns and max minutes per attempt, labels. Saving merges: a field left out keeps its value, `null`
-resets it to the default.
+One tab per concern, each with its own Save: **General** (repository, base branch, setup and test commands; protected
+paths and sandbox image under Advanced), **Models** (providers, default model, model review (on) and its reviewer model),
+**Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
+Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
+minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
+the default. Theme and sign-out are in the account menu at the foot of the sidebar.
 
 ### In your repository
 
@@ -182,8 +215,13 @@ npx playwright install chromium   # once
 npm run e2e                 # end-to-end tests in a headless browser, real Docker sandbox, scripted model
 npm run e2e:headed          # the same, in a visible browser
 REAL_MODEL=qwen3.8:27b-mlx npm run e2e   # against your local Ollama model instead
+REAL_MODEL=qwen3.8:27b-mlx npm run e2e -- e2e/real-provider-usage.spec.ts # small protected-test/review/approval + usage smoke test
 E2E_PORT=3201 npm run e2e   # if port 3200 is taken
 ```
+
+Live acceptance has passed with `gpt-6.1-sol` through ChatGPT plan access and `qwen3.8:27b-mlx` through Ollama:
+separate disposable repositories, protected tests, model review, approval/merge, and reconciled execution/background
+token totals. ChatGPT model availability comes from the connected account's catalog.
 
 ## Command line
 
@@ -241,7 +279,7 @@ an Apple M4 Max:
   - spending caps are checked between agent sessions, so a session in flight can overshoot a cap;
   - a reviewer that errors is skipped (fail-open) and the change still goes to human review;
   - the CLI (`npm run agent`) runs on the host with no sandbox, test gate or spending cap;
-  - the Anthropic and OpenAI APIs and the ChatGPT sign-in are tested only against mocks, not with real keys.
+  - automated provider and subscription tests use local mocks; live subscription acceptance requires signing in with your own eligible account.
 - **Not in scope yet:** multi-user deployment, hosting, backups.
 
 ## Project layout

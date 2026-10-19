@@ -6,7 +6,9 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   const repo = tempRepo();
   await signUp(page, "Wikis");
 
-  await saveSettings(page, repo, "test -f notes.txt", () => expect(page.getByLabel("Keep a project wiki")).toBeChecked());
+  await saveSettings(page, repo, "test -f notes.txt");
+  await page.getByRole("link", { name: "Automation" }).click();
+  await expect(page.getByLabel("Keep a project wiki")).toBeChecked();
 
   // Creates the ticket from the board and runs it to review.
   const runTicket = async (title: string, spec: string) => {
