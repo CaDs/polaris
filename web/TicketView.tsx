@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket } from "./ui.tsx";
 
 type Detail = Ticket & { runs: Run[]; children?: Child[] };
 type Ev = { seq: number; type: string; payload: any };
@@ -132,7 +132,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <div className="table-wrap">
           <table className="runs">
             <thead>
-              <tr><th>{epic ? "Round" : "Attempt"}</th><th>Model</th><th>Status</th><th>In</th><th>Out</th><th>Cached</th><th>Cache hit</th><th>Cost</th><th>Time</th><th></th></tr>
+              <tr><th>{epic ? "Round" : "Attempt"}</th><th>Model</th><th>Status</th><th>In</th><th>Out</th><th>Cached</th><th>Cache hit</th><th>Cost</th><th>Time</th><th>Metrics</th><th></th></tr>
             </thead>
             <tbody>
               {runs.map((r) => (
@@ -142,6 +142,10 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
                   <td><StatusIcon status={r.status === "passed" ? "review" : r.status === "cancelled" ? "todo" : r.status} /> {r.status}</td>
                   <td>{fmt(r.tokens_in)}</td><td>{fmt(r.tokens_out)}</td><td>{fmt(r.tokens_cached)}</td><td>{hitRate(r.tokens_in, r.tokens_cached)}</td>
                   <td>{cost(r.cost_usd, r.auth_type)}</td><td>{duration(r)}</td>
+                  {/* ponytail: the full line is the hover title, so the table stays narrow at phone width */}
+                  <td title={r.metrics ? metricsLine(r.metrics, r) : undefined}>
+                    {r.metrics ? <>{plural(r.metrics.turns, "turn")} · {r.metrics.tool_errors} err{r.metrics.stuck && <span className="warn-text"> · stuck</span>}</> : "—"}
+                  </td>
                   <td>{!epic && r.role !== "wiki" && r.status !== "queued" && r.status !== "running" && <button className="link" disabled={running} onClick={() => setRetrying(r)}>Retry with…</button>}</td>
                 </tr>
               ))}
@@ -185,6 +189,23 @@ function RetryDialog({ run, providers, close, go }: {
 // Mirrors gateFailure in server/improve.ts.
 const gateFailure = (p: any) =>
   p.protected.length ? `modified protected path ${p.protected.join(", ")}` : `\`${p.command}\` ${p.timed_out ? "timed out" : `exited with code ${p.code}`}`;
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const pct = (n: number | null) => (n === null ? "" : ` (${Math.round(n)}%)`);
+// "34 turns (28%) · 41 tool calls · 2 errors · 3 repeated · first edit at turn 6 · 5 files · 12 min (20%)"; minutes from the run row.
+function metricsLine(m: RunMetrics, r: Run) {
+  const min = r.started_at ? ((r.ended_at ?? Date.now()) - r.started_at) / 60_000 : null;
+  return [
+    plural(m.turns, "turn") + pct(m.turns_pct),
+    plural(m.tool_calls, "tool call"),
+    plural(m.tool_errors, "error"),
+    `${m.repeated_calls} repeated`,
+    m.first_edit_turn === null ? "no edits" : `first edit at turn ${m.first_edit_turn}`,
+    m.files_changed !== null && plural(m.files_changed, "file"),
+    min !== null && `${min < 1 ? "<1" : Math.round(min)} min${pct(m.minutes_pct)}`,
+    m.stuck && `stuck at turn ${m.stuck.turn}: ${m.stuck.signal}, ${m.stuck.action === "stop" ? "stopped" : "nudged"}`,
+  ].filter(Boolean).join(" · ");
+}
 
 const compact = (input: Record<string, unknown>) => {
   const s = Object.entries(input).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
@@ -350,6 +371,14 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
             </details>
           ) : <div key={e.seq} className="note ok"><strong>Wiki {p.op}</strong> · {p.commit ? <>committed <span className="mono">{p.commit.slice(0, 8)}</span></> : "nothing to change"}</div>;
         if (e.type === "error") return <p key={e.seq} className={p.retrying ? "warn" : "error"}>{p.kind}: {p.message}</p>;
+        if (e.type === "stuck")
+          return (
+            <div key={e.seq} className={`note ${p.action === "stop" ? "err" : "warn"}`} role="note" aria-label="Stuck">
+              <strong>Stuck at turn {p.turn}, {p.action === "stop" ? "stopped" : "nudged"}</strong> · <span className="mono">{p.signal}</span>
+              <p className="msg">{p.detail}</p>
+            </div>
+          );
+        if (e.type === "run_metrics") return <p key={e.seq} className="muted" aria-label="Run metrics">{metricsLine(p, run)}</p>;
         if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns.</p>;
         return null;
       })}
