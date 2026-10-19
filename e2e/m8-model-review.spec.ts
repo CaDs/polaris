@@ -9,12 +9,17 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
 
   await saveSettings(page, repo, "test -f notes.txt", () => expect(page.getByLabel("Model review before human review")).toBeChecked());
   await expect(page.getByLabel("Model review before human review")).toBeChecked();
+  // M12: a separate reviewer model for the workspace (the picker needs a provider; the fake one here is set by model name).
+  await expect(page.getByRole("heading", { name: "Reviewer model" })).toBeVisible();
+  await expect(page.getByLabel("Reviewer Provider")).toHaveValue("");
+  expect((await page.request.put("/api/settings/review-provider", { data: { model: "demo-reviewer" } })).ok()).toBe(true);
 
   await page.getByRole("link", { name: "Board" }).click();
   await newTicket(page, "Reviewed change", "REVIEW-ONCE: write the notes");
   await openTicket(page, "Reviewed change");
   await page.getByRole("button", { name: "Run agent" }).click();
 
+  await expect(transcript.getByRole("separator").filter({ hasText: "Model review round 1 by demo-reviewer" })).toBeVisible({ timeout: 60_000 });
   await expect(transcript).toContainText("Model review requested changes", { timeout: 60_000 });
   await expect(transcript).toContainText("notes.txt:1 — The demo reviewer wants a fixed.txt. → Create fixed.txt.");
   await expect(transcript).toContainText("Approved by model review", { timeout: 60_000 });

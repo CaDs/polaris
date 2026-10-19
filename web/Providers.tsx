@@ -6,12 +6,14 @@ const KINDS = { anthropic: ["api_key"], openai: ["api_key", "oauth"], ollama: ["
 const CONTEXT_WINDOW = { anthropic: 1_000_000, openai: 400_000, ollama: 32_768 };
 const AUTH_LABEL = { api_key: "API key", oauth: "ChatGPT sign-in", none: "No auth" };
 
-export function Providers({ defaults }: { defaults: { default_provider_id: string | null; default_model: string | null; configured: boolean } }) {
+type Defaults = { default_provider_id: string | null; default_model: string | null; review_provider_id: string | null; review_model: string | null; configured: boolean };
+export function Providers({ defaults }: { defaults: Defaults }) {
   const [providers, reload] = useProviders();
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
   const [deleting, setDeleting] = useState<Provider | null>(null);
   const [checks, setChecks] = useState<Record<string, Check[] | string>>({}); // by provider id; string = error or "Testing…"
   const [pick, setPick] = useState({ provider_id: defaults.default_provider_id, model: defaults.default_model });
+  const [reviewer, setReviewer] = useState({ provider_id: defaults.review_provider_id, model: defaults.review_model });
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
@@ -53,12 +55,12 @@ export function Providers({ defaults }: { defaults: { default_provider_id: strin
     }
   }
 
-  async function saveDefault() {
+  async function saveDefault(which: "default" | "review" = "default") {
     setMsg("");
     setError("");
     try {
-      await api("/api/settings/default-provider", "PUT", pick);
-      setMsg("Default saved");
+      await api(`/api/settings/${which}-provider`, "PUT", which === "review" ? reviewer : pick);
+      setMsg(which === "review" ? "Reviewer saved" : "Default saved");
     } catch (e) {
       setError((e as Error).message);
     }
@@ -117,8 +119,15 @@ export function Providers({ defaults }: { defaults: { default_provider_id: strin
       <p className="muted">Used by tickets that don't pick their own. Without one, the server falls back to its environment (ANTHROPIC_API_KEY …).</p>
       <div className="row">
         {providers && <ModelPicker providers={providers} prefix="Default " {...pick} onChange={setPick} />}
-        <button className="btn" onClick={saveDefault}>Save default</button>
+        <button className="btn" onClick={() => saveDefault()}>Save default</button>
         {msg && <span className="muted" role="status">{msg}</span>}
+      </div>
+
+      <h2>Reviewer model</h2>
+      <p className="muted">Reviews each run's change before the human review (with Model review on). "Default" here means the model the run itself used; a stronger or cheaper model is the usual pick.</p>
+      <div className="row">
+        {providers && <ModelPicker providers={providers} prefix="Reviewer " {...reviewer} onChange={setReviewer} />}
+        <button className="btn" onClick={() => saveDefault("review")}>Save reviewer</button>
       </div>
 
       {editing && <ProviderDialog p={editing === "new" ? null : editing} close={() => setEditing(null)} saved={() => (setEditing(null), reload())} />}

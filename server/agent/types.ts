@@ -105,7 +105,7 @@ export type EventPayloads = {
   // M7: a planner round ended: finish_round notes, or the complete_epic summary (completed).
   round_finished: { round: number; notes: string; completed: boolean };
   // M8: the same model reviewed the change before a human sees it (server/review.ts). error: the reviewer failed; the run went on (fail-open).
-  model_review_started: { round: number; budget: number; lines: number }; // budget: the reviewer's turns, from the changed lines
+  model_review_started: { round: number; budget: number; lines: number; model: string }; // budget: the reviewer's turns, from the changed lines; model: the reviewer's
   model_review: { round: number; verdict: "approve" | "request_changes" | "error"; findings: Finding[]; message?: string };
   // M9: complete_epic first ran this command on the base branch's head (sha); failed → complete_epic was refused.
   epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };

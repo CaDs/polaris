@@ -121,9 +121,9 @@
 - [x] Failure mining: failure classes, draft improvement tickets
 - [x] Stuck monitor: repeated call/error and no-progress heuristics; nudge, then end the attempt (retried fresh)
 - [ ] Stuck monitor: a decision model checks every few turns whether the agent is stuck
-- [ ] Separate reviewer model per workspace
+- [x] Separate reviewer model per workspace (`review_provider_id`/`review_model`, Settings → Reviewer model; priced at its own rates)
 - [x] Spending caps per epic and per workspace
 - [x] Sandbox containers run as a non-root user
 - [x] A planner round that crashes is restarted (once, by a fresh round; a second failure in a row fails the epic)
-- [ ] Ticket comments and notifications
+- [x] Ticket comments and notifications (bell; review/failed/comment) and the workspace event stream (`GET /api/events`) that replaced the board polling
 - [ ] Candidate-harness pipeline: benchmark a proposed harness change against the stable one; human promotion with rollback

@@ -26,6 +26,7 @@ export function createRun(r: {
     id, r.ticketId, r.model, r.worktree ?? null, r.role ?? "worker", r.attempt ?? 1, r.providerId ?? null,
     r.promptVersion ?? null, r.lessonsVersion ?? null, r.evalRunId ?? null, r.evalCaseId ?? null, r.wikiOp ?? null, r.baseSha ?? null,
   );
+  touchRun(id);
   return id;
 }
 
@@ -44,6 +45,7 @@ export function eventLog(runId: string) {
         e.payload.input + e.payload.cache_write, e.payload.output, e.payload.cache_read, runId,
       );
     if (e.type === "run_finished") db.prepare("UPDATE runs SET status = ?, ended_at = ? WHERE id = ?").run(e.payload.status, now, runId);
+    if (e.type === "run_started" || e.type === "run_finished") touchRun(runId);
     for (const fn of listeners.get(runId) ?? []) {
       try {
         fn({ ...e, run_id: runId, seq, created_at: now } as StoredEvent);
@@ -52,4 +54,31 @@ export function eventLog(runId: string) {
       }
     }
   };
+}
+
+// Workspace channel for the live board and the notification bell: "something about this ticket changed, refetch".
+// Not persisted (a reconnecting client refetches anyway); the run log above stays the only source of truth.
+export type Change = { type: "ticket" | "notification"; id: string };
+const wsListeners = new Map<string, Set<(c: Change) => void>>();
+export function subscribeWorkspace(ws: string, fn: (c: Change) => void) {
+  const set = wsListeners.get(ws) ?? new Set();
+  wsListeners.set(ws, set.add(fn));
+  return () => {
+    set.delete(fn);
+    if (!set.size) wsListeners.delete(ws);
+  };
+}
+// A run's status is part of its ticket's board card and its ticket page.
+export function touchRun(runId: string) {
+  const t = db.prepare("SELECT id, workspace_id FROM tickets WHERE id = (SELECT ticket_id FROM runs WHERE id = ?)").get(runId) as { id: string; workspace_id: string } | undefined;
+  if (t) touch(t.workspace_id, { type: "ticket", id: t.id });
+}
+export function touch(ws: string, c: Change) {
+  for (const fn of wsListeners.get(ws) ?? []) {
+    try {
+      fn(c);
+    } catch (err) {
+      console.error("workspace listener failed", err);
+    }
+  }
 }

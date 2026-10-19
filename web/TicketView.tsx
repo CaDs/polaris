@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket } from "./ui.tsx";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, useWorkspaceEvents, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket } from "./ui.tsx";
 
 // spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
 type Detail = Ticket & { runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
@@ -27,13 +27,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   }, [ticket.id]);
   useEffect(() => void api<{ test_command: string }>("/api/settings").then((s) => setWorkspaceTest(s.test_command), () => {}), []);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
-  // Poll what changes while the ticket itself does not: an epic's children, a wiki run after approval.
-  const busy = (ticket.kind === "epic" && ticket.status !== "done") || !!detail?.runs.some((r) => r.status === "queued" || r.status === "running");
-  useEffect(() => {
-    if (!busy) return;
-    const id = setInterval(load, 2000);
-    return () => clearInterval(id);
-  }, [ticket.id, busy]);
+  // What changes while the ticket itself does not (an epic's children, a wiki run after approval) pings the workspace stream.
+  useWorkspaceEvents("ticket", useCallback(() => void load(), [ticket.id]));
 
   async function patch(body: object) {
     setError("");
@@ -125,6 +120,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
       </div>
       {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
+      <Comments ticketId={ticket.id} />
       {epic && detail?.children && <Epic ticket={ticket} detail={detail} items={detail.children} open={open} patch={(b) => patch(b).then(load)} />}
 
       <h3>{epic ? "Planner rounds" : "Runs"}</h3>
@@ -351,7 +347,13 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
               <p className="msg">{p.notes}</p>
             </div>
           );
-        if (e.type === "model_review_started") return <div key={e.seq} className="divider" role="separator">Model review round {p.round} {p.budget && <span className="muted">(budget {p.budget} turns for {p.lines} changed lines)</span>}</div>;
+        if (e.type === "model_review_started")
+          return (
+            <div key={e.seq} className="divider" role="separator">
+              Model review round {p.round} {p.model && p.model !== run.model && <>by <span className="mono">{p.model}</span> </>}
+              {p.budget && <span className="muted">(budget {p.budget} turns for {p.lines} changed lines)</span>}
+            </div>
+          );
         if (e.type === "model_review")
           return (
             <div key={e.seq} className="note">
@@ -393,6 +395,42 @@ type DiffInfo = { branch: string; base_branch: string; diff: string };
 
 // Review queue: diff of the latest passed run; approve merges it into the base branch, reject sends the ticket back to todo
 // (a child of an epic: counts as failed for its planner). An epic has no diff: its children were merged one by one.
+// Notes between people on a ticket (the agent does not read them; a reject note is how to steer it). Others' comments
+// notify the bell; the list follows the workspace stream.
+type Comment = { id: string; body: string; created_at: number; author: string };
+function Comments({ ticketId }: { ticketId: string }) {
+  const [list, setList] = useState<Comment[] | null>(null);
+  const [body, setBody] = useState("");
+  const [error, setError] = useState("");
+  const load = useCallback(() => api<Comment[]>(`/api/tickets/${ticketId}/comments`).then(setList, (e) => setError(e.message)), [ticketId]);
+  useEffect(() => void load(), [load]);
+  useWorkspaceEvents("ticket", useCallback((c: { id: string }) => void (c.id === ticketId && load()), [ticketId, load]));
+  async function post() {
+    setError("");
+    try {
+      await api(`/api/tickets/${ticketId}/comments`, "POST", { body });
+      setBody("");
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <section className="comments" aria-label="Comments">
+      <h3>Comments {list && list.length > 0 && <span className="muted">({list.length})</span>}</h3>
+      {list?.map((c) => (
+        <div key={c.id} className="comment">
+          <div className="muted"><span title={c.author}>{c.author.split("@")[0]}</span> · {new Date(c.created_at).toLocaleString()}</div>
+          <p>{c.body}</p>
+        </div>
+      ))}
+      <Alert error={error} />
+      <textarea aria-label="New comment" rows={2} placeholder="Leave a comment…" value={body} onChange={(e) => setBody(e.target.value)} />
+      <div className="row end"><button className="btn" onClick={post} disabled={!body.trim()}>Comment</button></div>
+    </section>
+  );
+}
+
 function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
   const [d, setD] = useState<DiffInfo | null>(null);
   const [rejecting, setRejecting] = useState(false);

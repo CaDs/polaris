@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
-import { createRun, eventLog } from "./agent/events.ts";
+import { createRun, eventLog, touch } from "./agent/events.ts";
 import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
@@ -16,7 +16,7 @@ import { classifyRun } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
-import { ticketKey, today, trackerHeader } from "./tracker.ts";
+import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
 
 // USD per million tokens, keyed by model. Unknown price → cost_usd stays 0 (UI shows "—"). Ollama = free.
@@ -49,7 +49,7 @@ type Settings = {
   workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
-  monthly_cap_usd: number | null; monthly_cap_tokens: number | null;
+  monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 };
 // The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
 export const SETTINGS_DEFAULTS = {
@@ -76,6 +76,8 @@ function setTicket(id: string, status: string, quiet = false) {
   const now = Date.now();
   const end = status === "done" || status === "failed";
   db.prepare("UPDATE tickets SET status = ?, updated_at = ?, settled_at = ? WHERE id = ?").run(status, now, end ? now : null, id);
+  const ws = db.prepare("SELECT workspace_id FROM tickets WHERE id = ?").get(id) as { workspace_id: string } | undefined;
+  if (ws) touch(ws.workspace_id, { type: "ticket", id });
   if (end && !quiet) background(settled(id), "settling failed");
 }
 
@@ -99,8 +101,12 @@ const price = (model: string, input: number, output: number, cached: number) => 
   return p ? (input * p.input + output * p.output + cached * p.cache_read) / 1e6 : 0;
 };
 
-function recordCost(runId: string, model: string, usage: Usage) {
-  if (PRICES[model]) db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(price(model, usage.input + usage.cache_write, usage.output, usage.cache_read), runId);
+// `review`: the reviewer's share of `usage` when a workspace reviews with another model (priced at that model's rates).
+function recordCost(runId: string, model: string, usage: Usage, review?: { model: string; usage: Usage }) {
+  const of = (m: string, u: Usage) => price(m, u.input + u.cache_write, u.output, u.cache_read);
+  const worker = review ? (Object.fromEntries(Object.entries(usage).map(([k, v]) => [k, v - review.usage[k as keyof Usage]])) as Usage) : usage;
+  const usd = of(model, worker) + (review ? of(review.model, review.usage) : 0);
+  if (usd) db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(usd, runId);
 }
 
 // --- Spending caps (see SPEC "Spending caps") ---
@@ -361,6 +367,7 @@ async function split(t: TicketRow, context: string, triaged?: EventPayloads["tri
     id, `Split: ${t.title}`, `${t.spec}\n\n${context}`.trim(), t.id,
   );
   db.prepare("INSERT INTO ticket_labels (ticket_id, label_id) SELECT ?, label_id FROM ticket_labels WHERE ticket_id = ?").run(id, t.id);
+  touch(t.workspace_id, { type: "ticket", id });
   if (t.parent_id)
     for (const k of childrenOf(t.parent_id)) {
       const deps = JSON.parse(k.depends_on) as string[];
@@ -482,7 +489,7 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
   }
 }
 
-type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"] };
+type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"]; review?: { model: string; usage: Usage } };
 type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog>; cap: () => void }; // cap: capCheck for this run (throws)
 // An agent call's events, minus the ones the pipeline writes itself once for the whole run.
 const relay = (log: Ctx["log"]) => (e: AgentEvent) => void (e.type !== "run_finished" && e.type !== "run_metrics" && log(e));
@@ -508,7 +515,7 @@ async function pipeline(runId: string, model: string, work: (res: Result, c: Ctx
     await ending(res, c);
     if (res.metrics) c.log({ type: "run_metrics", payload: { ...res.metrics, input: res.usage.input, output: res.usage.output, cache_read: res.usage.cache_read } });
     c.log({ type: "run_finished", payload: { status: res.status, reason: res.reason, turns: res.turns, usage: res.usage } });
-    recordCost(runId, model, res.usage);
+    recordCost(runId, model, res.usage, res.review);
     await after(res);
   }
 }
@@ -522,6 +529,15 @@ async function modelFor(run: RunRow, capTokens: number | undefined, log: Ctx["lo
   const compactAt = compactThreshold(capTokens, w.window);
   log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
   return { stored, compactAt, providerFor: (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task)) };
+}
+
+// The reviewer's model: the workspace's review_provider_id/review_model when set (resolved like a run's choice), else the
+// run's own. A deleted review provider (FK → null) with a model left falls back to the environment for that model.
+function reviewerFor(t: TicketRow, s: Settings, run: RunRow) {
+  const own = { provider_id: run.provider_id, model: run.model };
+  const c = s.review_provider_id || s.review_model ? choose(t, s, { provider_id: s.review_provider_id, model: s.review_model }) : own;
+  const stored = c.provider_id ? providerById(c.provider_id) : undefined;
+  return { model: c.model, provider: (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: c.model }).provider(task)) };
 }
 
 // queued → worktree + sandbox → setup command → agent loop → test gate + protected-path check → commit.
@@ -671,16 +687,20 @@ async function execute(runId: string) {
 
     // M8 model review: the same model reviews the uncommitted change; findings go back to the worker in its own conversation.
     // A reviewer that errors or never submits is logged and skipped (fail-open): the human still reviews.
-    for (let round = 1; !ev && s!.model_review; round++) {
+    // The workspace can review with another model (review_provider_id/review_model); the default is the run's own.
+    const reviewer = !ev && s!.model_review ? reviewerFor(t, s!, run) : undefined;
+    for (let round = 1; reviewer; round++) {
       cap();
       const out: { review?: Review } = {};
       const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
       const lines = await changedLines(worktree, base_sha);
       const budget = reviewBudget(lines);
-      log({ type: "model_review_started", payload: { round, budget: budget.maxTurns, lines } });
+      log({ type: "model_review_started", payload: { round, budget: budget.maxTurns, lines, model: reviewer.model } });
       const before = await snapshot(worktree);
-      const r = await runAgent({ ...common, provider: providerFor(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
+      // ponytail: the reviewer runs with the worker's compaction threshold; its budget (≤ 25 turns) never reaches it.
+      const r = await runAgent({ ...common, model: reviewer.model, provider: reviewer.provider(rtask), system: REVIEWER_PROMPT, task: rtask, tools: reviewerTools(out), budget, finished: () => !!out.review, finishHint: "Call submit_review now with your verdict on what you have seen." });
       addUsage(res.usage, r.usage);
+      if (reviewer.model !== run.model) addUsage((res.review ??= { model: reviewer.model, usage: noUsage() }).usage, r.usage);
       abortCheck();
       if ((await snapshot(worktree)) !== before) {
         await restore(worktree, before);
@@ -728,6 +748,8 @@ async function execute(runId: string) {
     else {
       setTicket(t.id, TICKET_STATUS[status]);
       if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
+      else if (status === "passed") notify(t.workspace_id, t.id, "review", `${t.key} is ready for review`);
+      else if (status === "failed") notify(t.workspace_id, t.id, "failed", `${t.key} failed: ${reason ?? "unknown reason"}`);
     }
   });
 }

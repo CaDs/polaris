@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { authClient } from "./auth-client.ts";
 import { CyclePage, Cycles } from "./Cycles.tsx";
-import { Issues } from "./Filters.tsx";
+import { Issues, Popover } from "./Filters.tsx";
 import { Improvement } from "./Improvement.tsx";
 import { Palette } from "./Palette.tsx";
 import { ProjectPage, Projects } from "./Projects.tsx";
@@ -11,7 +11,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Alert, Dialog, Loading, api, errorText, useTheme, type Ticket, type Theme } from "./ui.tsx";
+import { Alert, Dialog, Loading, api, errorText, useTheme, useWorkspaceEvents, type Ticket, type Theme } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -124,18 +124,43 @@ function useTickets() {
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
   const reload = useCallback(() => api<Ticket[]>("/api/tickets").then(setTickets, () => {}), []);
   useEffect(() => void reload(), [reload]);
-  // Changes made elsewhere (another tab, the CLI) show up when the window is back in front.
+  // Every ticket change in the workspace (a run starting or ending, a planner's new child, the CLI, another tab) pings the
+  // stream; a focus reload covers a stream that was down meanwhile.
+  useWorkspaceEvents("ticket", reload);
   useEffect(() => {
     addEventListener("focus", reload);
     return () => removeEventListener("focus", reload);
   }, [reload]);
-  const anyRunning = tickets?.some((t) => t.status === "running");
-  useEffect(() => {
-    if (!anyRunning) return;
-    const id = setInterval(reload, 2000);
-    return () => clearInterval(id);
-  }, [anyRunning, reload]);
   return [tickets, reload] as const;
+}
+
+// Unread notifications (runs that need review or failed, others' comments); a click opens the ticket and reads that one.
+type Notification = { id: string; kind: "review" | "failed" | "comment"; text: string; created_at: number; number: number; key: string };
+function Bell({ open }: { open: (n: number) => void }) {
+  const [list, setList] = useState<Notification[]>([]);
+  const [shown, setShown] = useState(false);
+  const reload = useCallback(() => api<Notification[]>("/api/notifications").then(setList, () => {}), []);
+  useEffect(() => void reload(), [reload]);
+  useWorkspaceEvents("notification", reload);
+  const read = (ids?: string[]) => api("/api/notifications/read", "POST", ids ? { ids } : {}).then(reload, () => {});
+  return (
+    <span className="menu-anchor">
+      <button className="btn bell" aria-label={`Notifications${list.length ? ` (${list.length} unread)` : ""}`} aria-expanded={shown} onClick={() => setShown((s) => !s)}>
+        🔔{list.length > 0 && <span className="badge count">{list.length}</span>}
+      </button>
+      {shown && (
+        <Popover close={() => setShown(false)}>
+          {list.length === 0 && <p className="muted item">Nothing new.</p>}
+          {list.map((n) => (
+            <button key={n.id} className={`item notif ${n.kind}`} onClick={() => (setShown(false), read([n.id]), open(n.number))}>
+              <span className={`dot ${n.kind}`} aria-hidden="true" /> <span>{n.text}</span>
+            </button>
+          ))}
+          {list.length > 0 && <button className="item muted" onClick={() => (setShown(false), read())}>Mark all read</button>}
+        </Popover>
+      )}
+    </span>
+  );
 }
 
 const PAGES: [string, string][] = [["", "Board"], ["projects", "Projects"], ["cycles", "Cycles"], ["views", "Views"], ["usage", "Usage"], ["wiki", "Wiki"], ["improvement", "Improvement"], ["settings", "Settings"]];
@@ -212,6 +237,8 @@ function Dashboard({ email }: { email: string }) {
       <div className="main">
         <div className="topbar">
           <h1>{number ? (ticket?.key ?? "Ticket") : sub && section === "projects" ? "Project" : sub && section === "cycles" ? (sub === "current" ? "Current cycle" : "Cycle") : (page ?? "Board")}</h1>
+          <span className="grow" />
+          <Bell open={open} />
           <button className="btn primary" onClick={() => setCreating(true)}>New ticket</button>
         </div>
         <main>

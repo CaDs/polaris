@@ -110,3 +110,28 @@ test("the reviewer sees the worker's new file as untracked", async () => {
   const results = (db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'tool_result' AND seq > (SELECT seq FROM events WHERE run_id = ? AND type = 'model_review_started')").all(id, id) as { payload: string }[]).map((e) => JSON.parse(e.payload).content);
   assert.match(results.join("\n"), /\?\? notes\.txt/);
 });
+
+test("a workspace reviewer model: the review runs on it, the transcript names it, its tokens are priced at its own rates", async () => {
+  await call("PUT", "/api/settings", me, { ...settings, model_review: true });
+  assert.equal((await call("PUT", "/api/settings/review-provider", me, { provider_id: "nope" })).status, 400);
+  const saved = await call("PUT", "/api/settings/review-provider", me, { model: "claude-sonnet-5-5" }); // env provider (the demo here) with that model
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.review_model, "claude-sonnet-5-5");
+  assert.equal((await call("GET", "/api/settings", me)).body.review_model, "claude-sonnet-5-5");
+
+  const t = await ticketRun("reviewed elsewhere");
+  assert.equal(t.status, "review");
+  const run = t.runs[0];
+  assert.equal(run.model, "demo"); // the worker's
+  const started = JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'model_review_started'").get(run.id) as { payload: string }).payload);
+  assert.equal(started.model, "claude-sonnet-5-5");
+  // Only the reviewer's two turns cost anything (the demo worker has no price): 2 × 60 input tokens at $2/M.
+  const reviewerIn = (db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'usage' AND seq > (SELECT seq FROM events WHERE run_id = ? AND type = 'model_review_started')").all(run.id, run.id) as { payload: string }[])
+    .map((e) => JSON.parse(e.payload)).reduce((a, u) => a + u.input + u.cache_write + u.output * 5 + u.cache_read / 10, 0);
+  assert.ok(reviewerIn > 0);
+  assert.ok(Math.abs(run.cost_usd - (reviewerIn * 2) / 1e6) < 1e-9, `${run.cost_usd} vs ${(reviewerIn * 2) / 1e6}`);
+
+  await call("PUT", "/api/settings/review-provider", me, { provider_id: null, model: null }); // back to the run's own
+  const t2 = await ticketRun("reviewed by itself");
+  assert.equal(JSON.parse((db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'model_review_started'").get(t2.runs[0].id) as { payload: string }).payload).model, "demo");
+});

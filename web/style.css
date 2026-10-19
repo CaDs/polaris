@@ -379,3 +379,20 @@ nav a.sub.active { color: var(--text); }
   nav { display: flex; flex-wrap: wrap; }
   nav a.sub { padding-left: 8px; }
 }
+
+/* notifications (M12) */
+.bell { position: relative; padding: 4px 8px; }
+.badge.count { position: absolute; top: -6px; right: -6px; background: var(--accent); color: #fff; border-color: var(--accent); }
+.topbar .popover { left: auto; right: 0; min-width: 300px; }
+.notif { align-items: flex-start; }
+.notif span:last-child { white-space: normal; }
+.dot { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.dot.review { background: var(--accent); }
+.dot.failed { background: var(--error); }
+.dot.comment { background: var(--ok); }
+
+/* comments (M12) */
+.comments { margin: 12px 0; }
+.comment { padding: 6px 0; border-top: 1px solid var(--border); }
+.comment p { margin: 2px 0 0; white-space: pre-wrap; }
+.comments textarea { margin-top: 6px; }

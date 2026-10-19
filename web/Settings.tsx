@@ -7,7 +7,7 @@ type WorkspaceSettings = {
   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
   auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
-  monthly_cap_usd: number | null; monthly_cap_tokens: number | null;
+  monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 };
 
 export function Settings() {

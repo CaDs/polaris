@@ -4,7 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
-import { subscribe, type StoredEvent } from "./agent/events.ts";
+import { subscribe, subscribeWorkspace, touch, type Change, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
@@ -174,6 +174,7 @@ app.post("/api/tickets", async (c) => {
     id, c.get("workspaceId"), p.v.kind ?? "task", p.v.title!, p.v.spec ?? "", p.v.provider_id ?? null, p.v.model ?? null, p.v.test_command ?? null, p.v.cap_usd ?? null, p.v.cap_tokens ?? null,
   );
   applyTracker(id, p.v.tracker);
+  touch(c.get("workspaceId"), { type: "ticket", id });
   return c.json(ticketIn(c, id), 201);
 });
 
@@ -202,6 +203,7 @@ app.patch("/api/tickets/:id", async (c) => {
   );
   applyTracker(t.id, v.tracker);
   if (v.tracker.parent_id) await startReady(v.tracker.parent_id); // moved into a running epic: queued like a planner's ticket
+  touch(c.get("workspaceId"), { type: "ticket", id: t.id });
   return c.json(ticketIn(c));
 });
 
@@ -216,6 +218,7 @@ app.delete("/api/tickets/:id", async (c) => {
     return c.json({ error: `${ids.length > 1 ? "This epic or one of its children" : "This ticket"} is an eval case. Remove it from the evals (Improvement page) first.` }, 409);
   for (const id of ids) await cleanupTicket(id, c.get("workspaceId"));
   db.prepare("DELETE FROM tickets WHERE id = ?").run(t.id);
+  touch(c.get("workspaceId"), { type: "ticket", id: t.id });
   if (t.parent_id) wake(t.parent_id, true); // its planner replans (its dependents are blocked now) or completes
   return c.body(null, 204);
 });
@@ -268,16 +271,18 @@ const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1
 
 app.get("/api/settings", (c) => {
   const s = settingsFor(c.get("workspaceId"));
-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, ...s, configured: !!s });
+  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, review_provider_id: null, review_model: null, ...s, configured: !!s });
 });
 
-// Workspace default provider/model (null = env fallback). Lives on the settings row, so the repository must be saved first.
-app.put("/api/settings/default-provider", async (c) => {
+// Workspace default provider/model (null = env fallback) and the reviewer's (null = the run's own). Both live on the
+// settings row, so the repository must be saved first.
+app.on("PUT", ["/api/settings/default-provider", "/api/settings/review-provider"], async (c) => {
   const b = await c.req.json().catch(() => null);
   const m = b && typeof b === "object" ? pick(c, b) : { error: "body must be a JSON object" };
   if ("error" in m) return c.json(m, 400);
   if (!settingsFor(c.get("workspaceId"))) return c.json({ error: "Save the repository settings first." }, 400);
-  db.prepare("UPDATE workspace_settings SET default_provider_id = ?, default_model = ?, updated_at = ? WHERE workspace_id = ?").run(
+  const col = c.req.path.endsWith("/review-provider") ? "review" : "default";
+  db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
     m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
   );
   return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
@@ -587,6 +592,31 @@ app.post("/api/runs/:id/cancel", (c) => {
   if (!r) return c.json({ error: "not_found" }, 404);
   return cancelRun(r.id) ? c.json({ ok: true }) : c.json({ error: "run is not queued or running" }, 409);
 });
+
+// Live board and notification bell: a change ping per ticket/notification in the workspace (the client refetches). Nothing is
+// replayed: the client fetches on (re)connect. A 25 s comment keeps proxies from closing the idle stream.
+app.get("/api/events", (c) =>
+  streamSSE(c, async (stream) => {
+    let wake = () => {};
+    let closed = false;
+    const queue: Change[] = [];
+    const unsubscribe = subscribeWorkspace(c.get("workspaceId"), (e) => (queue.push(e), wake()));
+    stream.onAbort(() => ((closed = true), wake()));
+    try {
+      while (!closed) {
+        const e = queue.shift();
+        if (e) await stream.writeSSE({ event: e.type, data: JSON.stringify(e) });
+        else {
+          const timer = setTimeout(() => wake(), 25_000);
+          await new Promise<void>((resolve) => (wake = resolve));
+          clearTimeout(timer);
+          if (!queue.length && !closed) await stream.write(": keepalive\n\n");
+        }
+      }
+    } finally {
+      unsubscribe();
+    }
+  }));
 
 // Replay stored events, then live ones; closes after run_finished once the stored events are drained (a reflection after a
 // reject lands after run_finished). Subscribing first and de-duping by seq loses nothing in between.

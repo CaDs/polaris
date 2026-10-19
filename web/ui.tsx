@@ -227,3 +227,23 @@ export function ModelPicker({ providers, provider_id, model, onChange, prefix = 
     </>
   );
 }
+
+// The workspace change stream (GET /api/events): one EventSource shared by every subscriber on the page; each ping says
+// which ticket or notification changed and the subscriber refetches. Reconnects are the browser's; a fetch on mount covers the gap.
+type Change = { type: "ticket" | "notification"; id: string };
+const changeListeners = new Set<(c: Change) => void>();
+let changes: EventSource | null = null;
+export function useWorkspaceEvents(type: Change["type"], fn: (c: Change) => void) {
+  useEffect(() => {
+    const on = (c: Change) => c.type === type && fn(c);
+    changeListeners.add(on);
+    if (!changes) {
+      changes = new EventSource("/api/events");
+      for (const t of ["ticket", "notification"]) changes.addEventListener(t, (m) => changeListeners.forEach((l) => l(JSON.parse((m as MessageEvent).data))));
+    }
+    return () => {
+      changeListeners.delete(on);
+      if (!changeListeners.size) (changes?.close(), (changes = null));
+    };
+  }, [type, fn]);
+}

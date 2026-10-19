@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import type { SQLInputValue } from "node:sqlite";
 import { db } from "./db.ts";
+import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 
 // M11 tracker (see SPEC "Tracker (M11)"): labels, priority, assignee, estimate, due date, projects + milestones, cycles,
@@ -494,4 +495,52 @@ trackerRoutes.delete("/views/:id", (c) => {
   if (cur.user_id !== c.get("userId")) return c.json({ error: "only the owner can delete this view" }, 403);
   db.prepare("DELETE FROM views WHERE id = ?").run(cur.id);
   return c.body(null, 204);
+});
+
+// --- Comments and notifications (M12) ---
+
+// A workspace-wide notification about a ticket: a run that needs review or failed, a comment. actor_id: the member who
+// caused it (their own bell skips it). Wakes the live board/bell stream.
+export function notify(ws: string, ticketId: string, kind: "review" | "failed" | "comment", text: string, actorId: string | null = null) {
+  const id = randomUUID();
+  db.prepare("INSERT INTO notifications (id, workspace_id, ticket_id, kind, text, actor_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, ws, ticketId, kind, text.slice(0, 300), actorId);
+  touch(ws, { type: "notification", id });
+}
+
+const ticketOf = (c: Context<Env>) =>
+  db.prepare(`SELECT t.id, ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ? AND t.workspace_id = ?`).get(c.req.param("id") as string, c.get("workspaceId")) as { id: string; key: string } | undefined;
+
+const COMMENTS = "SELECT c.id, c.body, c.created_at, c.author_id, u.email AS author FROM comments c JOIN user u ON u.id = c.author_id";
+trackerRoutes.get("/tickets/:id/comments", (c) => {
+  const t = ticketOf(c);
+  if (!t) return c.json({ error: "not_found" }, 404);
+  return c.json(db.prepare(`${COMMENTS} WHERE c.ticket_id = ? ORDER BY c.created_at`).all(t.id));
+});
+
+trackerRoutes.post("/tickets/:id/comments", async (c) => {
+  const t = ticketOf(c);
+  if (!t) return c.json({ error: "not_found" }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  const body = text(b?.body, "body", 5000);
+  const id = randomUUID();
+  db.prepare("INSERT INTO comments (id, ticket_id, author_id, body) VALUES (?, ?, ?, ?)").run(id, t.id, c.get("userId"), body);
+  const author = (db.prepare("SELECT email FROM user WHERE id = ?").get(c.get("userId")) as { email: string }).email;
+  notify(c.get("workspaceId"), t.id, "comment", `${author} on ${t.key}: ${body.split("\n")[0]}`, c.get("userId"));
+  touch(c.get("workspaceId"), { type: "ticket", id: t.id });
+  return c.json(db.prepare(`${COMMENTS} WHERE c.id = ?`).get(id), 201);
+});
+
+// The caller's unread notifications, newest first (their own actions excluded), with the ticket's key and number to open it.
+trackerRoutes.get("/notifications", (c) =>
+  c.json(db.prepare(`SELECT n.id, n.kind, n.text, n.created_at, n.ticket_id, t.number, ${ticketKey()} AS key FROM notifications n JOIN tickets t ON t.id = n.ticket_id JOIN organization o ON o.id = t.workspace_id
+    WHERE n.workspace_id = ? AND n.read_at IS NULL AND (n.actor_id IS NULL OR n.actor_id <> ?) ORDER BY n.created_at DESC LIMIT 50`).all(c.get("workspaceId"), c.get("userId"))));
+
+// Marks every unread notification read (ids: only those).
+trackerRoutes.post("/notifications/read", async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  const ids = Array.isArray(b?.ids) ? b.ids.filter((x: unknown) => typeof x === "string") : null;
+  if (ids) db.prepare("UPDATE notifications SET read_at = ? WHERE workspace_id = ? AND read_at IS NULL AND id IN (SELECT value FROM json_each(?))").run(Date.now(), c.get("workspaceId"), JSON.stringify(ids));
+  else db.prepare("UPDATE notifications SET read_at = ? WHERE workspace_id = ? AND read_at IS NULL").run(Date.now(), c.get("workspaceId"));
+  touch(c.get("workspaceId"), { type: "notification", id: "read" });
+  return c.json({ ok: true });
 });

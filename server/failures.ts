@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db.ts";
+import { touch } from "./agent/events.ts";
 import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
 import { ask, capLessons, currentLessons, LESSONS_MAX, runDigest, saveLessons, scrub } from "./improve.ts";
 import { applyTracker, labelIds, ticketKey } from "./tracker.ts";
@@ -199,6 +200,7 @@ export async function mine(o: { workspaceId: string; provider: Provider; model: 
           const spec = `${v.spec}\n\n## Mined from failures\n\nClass \`${c.class}\` (${c.description}): ${c.runs} runs on ${c.tickets} tickets in the last ${days} days. Model confidence ${v.confidence.toFixed(2)}. Examples:\n${evidence}`;
           db.prepare("INSERT INTO tickets (id, workspace_id, title, spec, mined_class) VALUES (?, ?, ?, ?, ?)").run(id, ws, v.title, spec, c.class);
           applyTracker(id, { label_ids: labelIds(ws, [MINED_LABEL]) });
+          touch(ws, { type: "ticket", id });
           const t = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
           out.created.push({ class: c.class, ticket_id: id, key: t.key, title: v.title, confidence: v.confidence });
         }

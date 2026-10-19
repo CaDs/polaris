@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { db } from "./db.ts";
+import { touch } from "./agent/events.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
@@ -227,6 +228,7 @@ export function plannerTools(
         id, epic.workspace_id, epic.id, kind, title, spec, JSON.stringify(on.map((k) => k.id)), epic.provider_id, epic.model, (test as string | null) || null, Date.now(), epic.id, // children inherit the epic's model choice and test command
       );
       applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
+      touch(epic.workspace_id, { type: "ticket", id });
       const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;

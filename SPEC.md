@@ -341,7 +341,11 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
 ## Model review (M8)
 
 Workspace setting `model_review` (migration 009, default on). After a worker run passes the test gate, the run's own
-provider and model review the change before a human sees it (not for eval case runs or planner rounds).
+provider and model review the change before a human sees it (not for eval case runs or planner rounds), unless the
+workspace names a reviewer: `review_provider_id` / `review_model` (migration 019, `PUT /api/settings/review-provider
+{provider_id, model}`, both null = the run's own; Settings → Reviewer model). The reviewer's choice resolves like a
+run's (a deleted provider leaves the model on the environment provider). `model_review_started.model` names it; its
+tokens count in the run's totals and caps, priced at the reviewer model's rates (`recordCost` splits the usage).
 
 - **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
@@ -361,7 +365,7 @@ provider and model review the change before a human sees it (not for eval case r
   retried like a gate failure; a provider or environment error there is not split either.
 - **Fail-open.** A reviewer that errors, or ends without `submit_review` (budget, provider error), is logged as a
   `model_review` event with verdict `error` and the change goes to human review anyway.
-- **Events and cost.** `model_review_started {round, budget, lines}` before each reviewer, `model_review {round, verdict: approve |
+- **Events and cost.** `model_review_started {round, budget, lines, model}` before each reviewer, `model_review {round, verdict: approve |
   request_changes | error, findings, message?}` after; reviewer tool calls and usage go to the same run's log, so the run's
   tokens and cost include review. The transcript shows both.
 
@@ -479,6 +483,28 @@ bootstrap (existing pages stay readable in the UI).
 - **Not built, on purpose:** embeddings or search over the wiki (the index plus `read_file`/`rg` is enough at this size); the
   worker writing the wiki directly (only approved, linted, serialized changes land); LLM lint on a schedule (a button);
   multi-file human edits (a new page has to be linked from the index in the same commit, so humans edit existing pages).
+
+## Comments, notifications and the live board (M12)
+
+Migration 019: `comments(id, ticket_id, author_id, body, created_at)` and `notifications(id, workspace_id, ticket_id,
+kind, text, actor_id, created_at, read_at)`, both cascading with the ticket.
+
+- **Comments** are notes between people; the agent does not read them (a reject note is how to steer it).
+  `GET/POST /api/tickets/:id/comments` (body 1–5000 chars, 400 otherwise; 404 outside the workspace), listed oldest
+  first with the author's email. The ticket page shows them under the spec.
+- **Notifications** are workspace-wide rows with `kind` `review` (a worker run passed: "KEY is ready for review"),
+  `failed` ("KEY failed: <reason>"; auto-approved children and tickets that got split do not notify) or `comment`
+  ("<author> on KEY: <first line>"). `actor_id` is the member who caused it; `GET /api/notifications` returns the caller's
+  unread ones (newest first, max 50, their own actions excluded) with the ticket's key and number;
+  `POST /api/notifications/read {ids?}` marks those (or all) read. The bell in the top bar shows the count; a click opens
+  the ticket and reads that one.
+- **Workspace event stream.** `GET /api/events` (SSE, same session auth) sends `event: ticket {id}` whenever a ticket
+  in the workspace changes (created, patched, deleted, status set, a run queued/started/finished, a planner's or
+  split's or mining's new ticket) and `event: notification {id}` when one is added or read. Nothing is replayed: the
+  client fetches on (re)connect, a `: keepalive` comment every 25 s keeps idle streams open. In-process fan-out
+  (`subscribeWorkspace`/`touch` in `agent/events.ts`), not persisted. The SPA shares one `EventSource`
+  (`useWorkspaceEvents`) between the board, the ticket page, the comments and the bell, so the 2 s polling is gone; a
+  focus reload stays as the fallback.
 
 ## Tracker (M11)
 
