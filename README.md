@@ -1,5 +1,26 @@
 # Polaris
 
+```text
+      *                     .                  .
+               .            :                       *
+                            |
+                .           |           .
+  .                .        |        .
+                      .     |     .
+                         \  |  /
+   .  - -- --- ----=====<{  *  }>=====---- --- -- -  .
+                         /  |  \
+                      .     |     .               .
+                   .        |        .
+                .           |           .
+     *                      |
+                            :
+                            .               *
+
+                P   O   L   A   R   I   S
+           tickets in  ·  reviewed commits out
+```
+
 Polaris is a self-hosted coding-agent harness with a web dashboard. You file tickets; AI agents work them in isolated
 sandboxes; tests and a model reviewer check every change before you see it; you approve and it merges. It runs on
 hosted models (Anthropic, OpenAI) or entirely on your own machine with local models through Ollama.
