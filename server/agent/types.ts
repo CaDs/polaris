@@ -2,8 +2,8 @@
 
 export type TextBlock = { type: "text"; text: string };
 // invalid_input: the raw argument text when the provider sent JSON that did not parse (truncated); input is {} then.
-export type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: Record<string, unknown>; invalid_input?: string };
-type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+export type ToolUseBlock = { type: "tool_use"; id: string; name: string; namespace?: string; input: Record<string, unknown>; invalid_input?: string };
+type ToolResultBlock = { type: "tool_result"; tool_use_id: string; namespace?: string; content: string; is_error?: boolean };
 // Provider-owned data (e.g. Anthropic thinking blocks with signatures). Sent back to that provider verbatim.
 type ReasoningBlock = { type: "reasoning"; provider: string; data: unknown };
 export type Block = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
@@ -12,6 +12,9 @@ export type Msg = { role: "user" | "assistant"; content: Block[] };
 export type ToolDef = { name: string; description: string; input_schema: Record<string, unknown> };
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number };
 export const noUsage = (): Usage => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+export type UsageStatus = "reported" | "partial" | "unavailable";
+export type RequestUsage = { id: string; usage: Usage; status: UsageStatus; outcome: "completed" | "failed" | "cancelled"; started_at: number };
+export const totalTokens = (u: Usage) => u.input + u.output + u.cache_read + u.cache_write;
 // Same value, object keys sorted (canonical JSON once stringified).
 export const stable = (v: unknown): unknown =>
   Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, stable(x)])) : v;
@@ -22,6 +25,7 @@ export type StreamEvent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "tool_use"; id: string; name: string }
+  | { type: "request_usage"; request: RequestUsage }
   | { type: "retry"; attempt: number; max: number; message: string; delay_ms: number }; // the adapter is retrying before any output
 
 export type ProviderRequest = {
@@ -30,10 +34,11 @@ export type ProviderRequest = {
   tools: ToolDef[];
   model: string;
   maxTokens?: number;
+  metering?: boolean; // transport-attempt telemetry, consumed by the accounting decorator
   cacheKey?: string; // routes requests of one ticket to the same provider-side cache (OpenAI prompt_cache_key)
   signal?: AbortSignal;
 };
-export type ProviderResponse = { message: Msg; usage: Usage; stopReason: string };
+export type ProviderResponse = { message: Msg; usage: Usage; stopReason: string; usageStatus?: UsageStatus; metered?: boolean };
 
 export interface Provider {
   stream(req: ProviderRequest, onEvent: (e: StreamEvent) => void): Promise<ProviderResponse>;
@@ -48,6 +53,11 @@ export class AgentError extends Error {
   // Provider adapters only: worth retrying if nothing was streamed yet (429/5xx/overloaded/network); retry-after in ms.
   retryable = false;
   retryAfterMs?: number;
+  usage?: Usage;
+  usageStatus?: UsageStatus;
+  requestSent?: boolean;
+  code?: string;
+  requestId?: string;
   badInput = false; // InvalidArguments about the shape of the tool's input (missing or mistyped field): runTool adds the expected input
   constructor(kind: ErrorKind, message: string) {
     super(message);
@@ -81,7 +91,7 @@ export type EventPayloads = {
   assistant_message: { message: Msg; stop_reason: string };
   tool_call: { id: string; name: string; input: Record<string, unknown> };
   tool_result: { tool_use_id: string; content: string; is_error: boolean; error_kind?: ErrorKind };
-  usage: Usage;
+  usage: Usage & { metered?: boolean };
   // retrying: a provider call failed and is being retried. cap: a SpendingCap(Warning)'s numbers (usd or tokens).
   error: { kind: ErrorKind; message: string; retrying?: boolean; cap?: { which: string; used: number; cap: number } };
   // Conversation n was summarized and replaced by a fresh one (see loop.ts).
@@ -99,7 +109,7 @@ export type EventPayloads = {
   commit: { sha: string; branch: string };
   review: { decision: "approved" | "rejected"; note?: string; merge_sha?: string };
   // M6: the series this run ended was reflected on (server/improve.ts). unchanged: the model returned the same lessons.
-  reflection: { lessons_id: string; version: number; chars: number; unchanged: boolean; usage: Usage } | { error: string };
+  reflection: { lessons_id: string; version: number; chars: number; unchanged: boolean; usage: Usage; accounted?: boolean } | { error: string };
   // M7: a child ticket's run series ended; text is what its planner reads (server/planner.ts).
   handoff: { text: string };
   // M7: a planner round ended: finish_round notes, or the complete_epic summary (completed).

@@ -54,7 +54,7 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
 
   await page.getByRole("link", { name: "Board" }).click();
   await expect(column("review").getByRole("button", { name: /First ticket edited/ })).toBeVisible();
-  await expect(column("review")).toContainText("480 tok");
+  await expect(column("review")).toContainText("580 tok"); // 480 input/output + 40 cache reads + 60 background reflection
 
   // A slow run can be cancelled; the ticket goes back to todo.
   await column("todo").getByRole("button", { name: /Slow ticket/ }).click();
@@ -74,17 +74,20 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await column("failed").getByRole("button", { name: /Slow ticket/ }).click();
 
   // Theme: persisted across reload.
-  await page.getByLabel("Theme").selectOption("Dark");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("button", { name: "Dark", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
-  await page.getByLabel("Theme").selectOption("Light");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("button", { name: "Light", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(255, 255, 255)");
 
   // Delete through the in-app confirm.
+  await page.getByRole("button", { name: "More actions" }).click();
   await page.getByRole("button", { name: "Delete ticket" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
   await expect(page.getByRole("dialog")).toBeHidden();

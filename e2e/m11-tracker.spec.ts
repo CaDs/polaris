@@ -14,7 +14,7 @@ const newTicket = (page: Page, title: string, o: { priority?: string; labels?: s
   });
 
 async function addFilter(page: Page, field: string, option: string) {
-  await page.getByRole("button", { name: "+ Filter" }).click();
+  await page.getByRole("button", { name: "Filter", exact: true }).click();
   await page.locator(".popover").getByRole("button", { name: field, exact: true }).click();
   await page.locator(".popover").getByRole("checkbox", { name: option }).check();
   await page.keyboard.press("Escape");
@@ -32,6 +32,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
 
   // Labels (Settings).
   await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Labels" }).click();
   const labels = page.getByRole("region", { name: "Labels" });
   for (const [name, color] of [["bug", "red"], ["frontend", "blue"]]) {
     await labels.getByLabel("New label", { exact: true }).fill(name);
@@ -240,6 +241,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
 
   // A label renamed in Settings shows on the cards without a reload.
   await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("link", { name: "Labels" }).click();
   await labels.getByLabel("Rename frontend").fill("ui");
   await labels.getByLabel("Rename frontend").blur();
   await expect(labels.locator(".chip", { hasText: /^ui$/ })).toBeVisible();
@@ -248,12 +250,14 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
 
   // Both themes render the board (screenshots in the report).
   for (const [theme, bg] of [["Dark", "rgb(10, 15, 29)"], ["Light", "rgb(255, 255, 255)"]]) {
-    await page.getByLabel("Theme").selectOption(theme);
+    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("button", { name: theme, exact: true }).click();
     await expect(page.locator("body")).toHaveCSS("background-color", bg);
     await shot(`board-${theme.toLowerCase()}`);
   }
   await page.getByRole("button", { name: "List", exact: true }).click();
-  await page.getByLabel("Theme").selectOption("Dark");
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("button", { name: "Dark", exact: true }).click();
   await shot("list-dark");
   await page.setViewportSize({ width: 390, height: 844 }); // phone width: nothing scrolls sideways
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);

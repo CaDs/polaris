@@ -9,6 +9,7 @@ test("M0: sign up, create workspace, see board, sign out, sign back in", async (
     await expect(page.getByRole("heading", { name: new RegExp(`^${col}`) })).toBeVisible();
   }
 
+  await page.getByRole("button", { name: "Account" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 

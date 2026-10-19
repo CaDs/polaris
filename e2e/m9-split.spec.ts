@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 // SPLIT-ME: the demo worker also writes tests/broken.txt, so every attempt fails the gate and the harness splits the ticket.
 // The "Split:" epic's demo planner creates part1.txt and part2.txt, each with its own test command; the workspace test
@@ -11,7 +11,8 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
   const status = page.getByLabel("Status");
   const transcript = page.getByRole("region", { name: "Transcript" });
 
-  await saveSettings(page, repo, "test -f part1.txt && test -f part2.txt", async () => {
+  await saveSettings(page, repo, "test -f part1.txt && test -f part2.txt");
+  await saveTab(page, "Automation", async () => {
     await page.getByLabel("Auto-approve child tickets").check();
     await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
     await expect(page.getByLabel("Child size hint")).toHaveValue("at most 3 files and about 60 changed lines, finishable in 20 agent turns");

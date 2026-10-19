@@ -11,7 +11,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Alert, Dialog, Loading, api, errorText, useTheme, useWorkspaceEvents, type Ticket, type Theme } from "./ui.tsx";
+import { Alert, DateInput, Dialog, Icon, Loading, api, errorText, useApi, useTheme, useWorkspaceEvents, type Ticket } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -184,8 +184,8 @@ function Bell({ open }: { open: (n: number) => void }) {
   const read = (ids?: string[]) => api("/api/notifications/read", "POST", ids ? { ids } : {}).then(reload, () => {});
   return (
     <span className="menu-anchor">
-      <button className="btn bell" aria-label={`Notifications${list.length ? ` (${list.length} unread)` : ""}`} aria-expanded={shown} onClick={() => setShown((s) => !s)}>
-        🔔{list.length > 0 && <span className="badge count">{list.length}</span>}
+      <button className="btn icon-btn" aria-label={`Notifications${list.length ? ` (${list.length} unread)` : ""}`} aria-expanded={shown} onClick={() => setShown((s) => !s)}>
+        <Icon name="bell" />{list.length > 0 && <span className="count">{list.length > 9 ? "9+" : list.length}</span>}
       </button>
       {shown && (
         <Popover close={() => setShown(false)}>
@@ -202,12 +202,56 @@ function Bell({ open }: { open: (n: number) => void }) {
   );
 }
 
-const PAGES: [string, string][] = [["", "Board"], ["projects", "Projects"], ["cycles", "Cycles"], ["views", "Views"], ["usage", "Usage"], ["wiki", "Wiki"], ["improvement", "Improvement"], ["settings", "Settings"]];
+// Personal preferences and sign-out: one menu at the foot of the sidebar instead of always-on controls.
+function Account({ email }: { email: string }) {
+  const [theme, setTheme] = useTheme();
+  const [shown, setShown] = useState(false);
+  return (
+    <span className="menu-anchor account">
+      <button className="btn account-btn" aria-label="Account" aria-expanded={shown} onClick={() => setShown((s) => !s)}>
+        <span className="avatar" aria-hidden="true">{email[0]?.toUpperCase()}</span>
+        <span className="email">{email}</span>
+      </button>
+      {shown && (
+        <Popover close={() => setShown(false)}>
+          <p className="item muted email" title={email}>{email}</p>
+          <div className="item">
+            Theme <span className="grow" />
+            <span className="seg" role="group" aria-label="Theme">
+              {(["system", "light", "dark"] as const).map((t) => (
+                <button key={t} aria-pressed={theme === t} onClick={() => (setTheme(t), setShown(false))}>{t[0].toUpperCase() + t.slice(1)}</button>
+              ))}
+            </span>
+          </div>
+          <button className="item" onClick={() => authClient.signOut()}>Sign out</button>
+        </Popover>
+      )}
+    </span>
+  );
+}
+
+// Until the repository is saved no agent can run: say so on the board, with the way there.
+function SetupBanner({ go }: { go: (to: string) => void }) {
+  const { data } = useApi<{ configured: boolean }>("/api/settings");
+  if (!data || data.configured) return null;
+  const link = (to: string, label: string) => <a href={to} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>;
+  return (
+    <p className="setup-banner">
+      <strong>Finish setup</strong> to let agents run: 1. {link("/settings/general", "Repository and test command")} 2. {link("/settings/models", "Model")}
+    </p>
+  );
+}
+
+// Daily work first, then what the agents do; Settings sits apart at the bottom. The route stays /improvement.
+const NAV: { label?: string; pages: [string, string][] }[] = [
+  { pages: [["", "Board"], ["projects", "Projects"], ["cycles", "Cycles"], ["views", "Views"], ["wiki", "Wiki"]] },
+  { label: "Agents", pages: [["usage", "Usage"], ["improvement", "Learning"]] },
+];
+const PAGES = [...NAV.flatMap((g) => g.pages), ["settings", "Settings"]];
 
 function Dashboard({ email }: { email: string }) {
   const { data: workspace } = authClient.useActiveOrganization();
   const { tracker, reload: reloadTracker } = useTracker();
-  const [theme, setTheme] = useTheme();
   const [loc, go] = usePath();
   const [tickets, reload] = useTickets();
   const [creating, setCreating] = useState(false);
@@ -251,26 +295,19 @@ function Dashboard({ email }: { email: string }) {
           <Mark />
           <strong>{name}</strong>
         </header>
+        <button className="btn palette-btn" onClick={() => setPalette(true)}>Search or jump… <kbd>⌘K</kbd></button>
         <nav aria-label="Main">
-          {PAGES.map(([p, label]) => [
-            link(`/${p}`, label, section === p && !(p === "cycles" && sub === "current")),
-            p === "cycles" && current && link("/cycles/current", "Current cycle", section === "cycles" && sub === "current", "sub"),
+          {NAV.map((g, i) => [
+            g.label && <div key={`g${i}`} className="nav-group">{g.label}</div>,
+            g.pages.map(([p, label]) => [
+              link(`/${p}`, label, section === p && !(p === "cycles" && sub === "current")),
+              p === "cycles" && current && link("/cycles/current", "Current cycle", section === "cycles" && sub === "current", "sub"),
+            ]),
           ])}
         </nav>
         <div className="side-bottom">
-          <button className="btn palette-btn" onClick={() => setPalette(true)}>Search or jump… <kbd>⌘K</kbd></button>
-          <label className="inline">
-            Theme
-            <select value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-          <div className="user">
-            <span className="muted" title={email}>{email}</span>
-            <button className="link" onClick={() => authClient.signOut()}>Sign out</button>
-          </div>
+          <nav aria-label="Workspace">{link("/settings", "Settings", section === "settings")}</nav>
+          <Account email={email} />
         </div>
       </aside>
       <div className="main">
@@ -282,7 +319,7 @@ function Dashboard({ email }: { email: string }) {
         </div>
         <main>
           {section === "settings" ? (
-            <Settings />
+            <Settings tab={sub} go={go} />
           ) : section === "usage" ? (
             <UsagePage />
           ) : section === "improvement" ? (
@@ -303,7 +340,10 @@ function Dashboard({ email }: { email: string }) {
               </div>
             ) : tickets ? <p className="muted pad">Ticket not found.</p> : <Loading />
           ) : (
-            <Issues search={search} go={go} all={tickets} open={open} />
+            <>
+              <SetupBanner go={go} />
+              <Issues search={search} go={go} all={tickets} open={open} />
+            </>
           )}
         </main>
       </div>
@@ -378,7 +418,7 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
             <option value="">No estimate</option>
             {ESTIMATES.map((n) => <option key={n} value={n}>{n} {n === 1 ? "point" : "points"}</option>)}
           </select>
-          <input type="date" name="due_date" aria-label="Due date" title="Due date" />
+          <DateInput name="due_date" aria-label="Due date" title="Due date" placeholder="Due date" />
           <select name="parent_id" aria-label="Parent epic" defaultValue="">
             <option value="">No parent epic</option>
             {tickets.filter((x) => x.kind === "epic" && (x.status === "todo" || x.status === "running")).map((x) => <option key={x.id} value={x.id}>{x.key} {x.title}</option>)}

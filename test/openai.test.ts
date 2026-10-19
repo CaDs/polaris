@@ -105,6 +105,26 @@ test("HTTP errors and failed/error events become ProviderError", async () => {
   await assert.rejects(openai({ url: "http://127.0.0.1:1/x", headers: async () => ({}) }).stream(req, () => {}), (e) => (e as AgentError).kind === "ProviderError");
 });
 
+test("subscription streams preserve tool calls and reasoning when the completed envelope has empty output", async () => {
+  const namespaced = { ...call, namespace: "polaris" };
+  const s = await server([{ body: sse([
+    { type: "response.output_item.done", output_index: 0, item: reasoning },
+    { type: "response.output_item.done", output_index: 1, item: namespaced },
+    { type: "response.completed", response: { output: [], usage: { input_tokens: 10, output_tokens: 3 } } },
+  ]) }, { body: turn2 }]);
+  try {
+    const p = openai({ url: s.url, subscription: true, headers: async () => ({}) });
+    const messages: Msg[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
+    const r = await p.stream({ system, messages, tools, model: "gpt-x" }, () => {});
+    assert.equal(r.stopReason, "tool_use");
+    assert.deepEqual(r.message.content, [{ type: "reasoning", provider: "openai", data: reasoning },
+      { type: "tool_use", namespace: "polaris", id: "call_1", name: "read_file", input: { path: "a.txt" } }]);
+    messages.push(r.message, { role: "user", content: [{ type: "tool_result", namespace: "polaris", tool_use_id: "call_1", content: "hello" }] });
+    await p.stream({ system, messages, tools, model: "gpt-x" }, () => {});
+    assert.ok(s.requests[1].body.input.some((i: any) => i.type === "function_call_output" && i.namespace === "polaris" && i.call_id === "call_1"));
+  } finally { s.close(); }
+});
+
 test("retries 429/503 before any output, honoring retry-after; truncated arguments are flagged", async () => {
   const cut = sse([
     { type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "c1", name: "shell", arguments: '{"command": "ec' } },

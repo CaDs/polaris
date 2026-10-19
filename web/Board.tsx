@@ -30,7 +30,7 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
                 {t.kind === "epic" && t.child_count > 0 && <span className="meta muted">{t.child_done}/{t.child_count} done</span>}
                 {t.run_status && (
                   <span className="meta muted">
-                    {waiting(t) ? "waiting for children" : t.run_status} · {t.run_model && <span className="mono">{t.run_model} · </span>}{fmt(t.tokens_in + t.tokens_out)} tok{(t.cost_usd > 0 || t.run_auth === "oauth") && ` · ${cost(t.cost_usd, t.run_auth)}`}
+                    {waiting(t) ? "waiting for children" : t.run_status} · {t.run_model && <span className="mono">{t.run_model} · </span>}{fmt(t.tokens_total ?? t.tokens_in + t.tokens_out + t.tokens_cached)} tok{(t.cost_usd > 0 || t.run_auth === "oauth") && ` · ${cost(t.cost_usd, t.run_auth)}`}
                   </span>
                 )}
               </button>

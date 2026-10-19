@@ -26,7 +26,7 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 60_000 });
 
   // Lessons written by the reflection, with history.
-  await page.getByRole("link", { name: "Improvement" }).click();
+  await page.getByRole("link", { name: "Learning" }).click();
   const lessons = page.getByRole("textbox", { name: "Lessons" });
   await expect(lessons).toHaveValue("- IMP-1 Make ok file: passed");
   const history = page.getByRole("list", { name: "Lessons history" });
@@ -93,7 +93,7 @@ test("M12: failure classes on the Improvement page; Mine failures drafts a ticke
     await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 90_000 });
   }
 
-  await page.getByRole("link", { name: "Improvement" }).click();
+  await page.getByRole("link", { name: "Learning" }).click();
   const stuck = page.getByRole("table", { name: "Failure classes" }).getByRole("row", { name: "stuck", exact: true });
   await expect(stuck).toContainText("the stuck monitor stopped the attempt");
   await expect(stuck.getByRole("cell").nth(1)).toHaveText("2");

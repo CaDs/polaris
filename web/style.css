@@ -52,7 +52,15 @@ input, textarea, select {
   border-radius: 6px;
   background: var(--bg);
 }
-select { width: auto; margin: 0; padding: 3px 6px; }
+/* One select look in both themes: no OS chrome, an outline chevron like the other glyphs. */
+select {
+  width: auto; margin: 0; padding: 4px 26px 4px 8px; appearance: none; cursor: pointer;
+  background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a849a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 8px center / 12px;
+}
+select:disabled { opacity: 0.5; cursor: default; }
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.glyph { flex: none; vertical-align: -0.2em; }
 textarea { resize: vertical; display: block; }
 label { display: block; margin-bottom: 10px; color: var(--muted); }
 label.inline { display: flex; align-items: center; gap: 6px; margin: 0; }
@@ -140,14 +148,17 @@ aside {
 .ws strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .avatar { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; flex: none; }
 nav a { display: block; padding: 4px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
-nav a:hover { background: var(--hover); }
+nav a:hover { background: var(--hover); text-decoration: none; }
 nav a.active { background: var(--hover); font-weight: 500; }
-.side-bottom { margin-top: auto; display: grid; gap: 8px; padding: 0 8px; }
-.user { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 0; }
-.user span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user button { white-space: nowrap; }
+.nav-group { padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.side-bottom { margin-top: auto; display: grid; gap: 4px; }
+.account { display: flex; min-width: 0; }
+.account-btn { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; border-color: transparent; background: none; text-align: left; }
+.account-btn:hover { background: var(--hover); }
+.email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.account .popover { top: auto; bottom: calc(100% + 4px); }
 .main { min-width: 0; }
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid var(--border); min-height: 41px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--border); min-height: 41px; }
 
 /* board */
 .board { display: flex; gap: 12px; padding: 12px 16px; overflow-x: auto; align-items: flex-start; }
@@ -176,9 +187,6 @@ nav a.active { background: var(--hover); font-weight: 500; }
 .s-review { color: var(--accent-text); }
 .s-done { color: var(--ok); }
 .s-failed { color: var(--error); }
-.spin { transform-origin: 7px 7px; animation: spin 0.9s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 
 /* ticket view */
 .ticket-view { max-width: 860px; padding: 12px 16px 48px; }
@@ -213,9 +221,12 @@ td .icon { vertical-align: -2px; }
 
 /* phone: sidebar stacks on top */
 @media (max-width: 720px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   aside { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
   .side-bottom { margin: 0 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; }
+  .nav-group { display: none; }
+  .account-btn .email { display: none; }
+  .account .popover { top: calc(100% + 4px); bottom: auto; left: auto; right: 0; } /* sidebar is a top bar here: open downward */
 }
 
 /* M3: settings, run gate, review diff */
@@ -246,12 +257,11 @@ td .icon { vertical-align: -2px; }
 .checks .ok { color: var(--ok); }
 .checks .err { color: var(--error); }
 .settings { max-width: 720px; }
-.providers h2:first-child { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
 
 /* M5: usage page, compaction divider */
-.usage { max-width: 860px; padding: 12px 16px 48px; }
-.stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-.stats div { display: grid; min-width: 110px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.usage { max-width: 1080px; padding: 12px 16px 48px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.stats div { display: grid; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .stats strong { font-size: 18px; font-weight: 600; }
 .bar { display: inline-block; width: 48px; height: 6px; margin-right: 4px; vertical-align: 1px; border-radius: 3px; background: var(--hover); overflow: hidden; }
 .bar span { display: block; height: 100%; background: var(--accent); }
@@ -391,7 +401,16 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font:
 .badge.ps-canceled, .badge.cs-past { color: var(--muted); }
 .warn-text { color: var(--warn); }
 h2.cycle-title { font-size: 16px; margin: 0; text-transform: none; }
-.label-settings h2 { font-size: 13px; margin: 24px 0 4px; padding-top: 16px; border-top: 1px solid var(--border); }
+.label-settings h2 { font-size: 13px; margin: 8px 0 4px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.tabs a { padding: 6px 10px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--muted); text-decoration: none; }
+.tabs a:hover { color: var(--text); background: none; }
+.tabs a.active { color: var(--text); font-weight: 500; border-bottom-color: var(--accent); background: none; border-radius: 0; }
+.providers + form { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+.advanced { margin: 16px 0; }
+.advanced summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
+.setup-banner { margin: 12px 16px 0; padding: 8px 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--surface); }
+.setup-banner a { margin: 0 4px; }
 .label-settings .plist li { margin: 0; }
 nav a.sub { padding-left: 20px; font-size: 12px; color: var(--muted); }
 nav a.sub.active { color: var(--text); }
@@ -399,7 +418,7 @@ nav a.sub.active { color: var(--text); }
 
 /* new ticket dialog */
 .fields { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.fields input[type="date"] { width: auto; margin: 0; padding: 3px 6px; }
+.fields input[type="date"] { width: auto; margin: 0; padding: 4px 28px 4px 8px; }
 .label-pick { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
 .label-pick legend { padding: 0 4px; font-size: 12px; }
 
@@ -424,8 +443,11 @@ nav a.sub.active { color: var(--text); }
 }
 
 /* notifications (M12) */
-.bell { position: relative; padding: 4px 8px; }
-.badge.count { position: absolute; top: -6px; right: -6px; background: var(--accent); color: #fff; border-color: var(--accent); }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 30px; height: 30px; padding: 0 7px; border-color: transparent; background: none; color: var(--muted); }
+.icon-btn:hover:not(:disabled), .icon-btn[aria-expanded="true"] { color: var(--text); background: var(--hover); }
+/* Unread count sits beside the glyph, never over it or a neighbouring control. */
+.icon-btn .count { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; font-weight: 600; line-height: 16px; text-align: center; background: var(--accent); color: var(--on-accent); }
+.icon-btn:has(.count) { color: var(--text); }
 .topbar .popover { left: auto; right: 0; min-width: 300px; }
 .notif { align-items: flex-start; }
 .notif span:last-child { white-space: normal; }
@@ -439,3 +461,25 @@ nav a.sub.active { color: var(--text); }
 .comment { padding: 6px 0; border-top: 1px solid var(--border); }
 .comment p { margin: 2px 0 0; white-space: pre-wrap; }
 .comments textarea { margin-top: 6px; }
+
+/* Date inputs (DateInput): "Set date" when empty, the outline calendar glyph instead of the OS picker icon. */
+.date { position: relative; display: flex; align-items: center; width: 100%; }
+.date:has(.narrow), .fields .date { display: inline-flex; width: auto; }
+.date input { margin: 0; padding: 4px 28px 4px 8px; }
+.date input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: auto; height: auto; opacity: 0; cursor: pointer; }
+.date > .glyph { position: absolute; right: 9px; color: var(--muted); pointer-events: none; }
+.date-ph { display: none; position: absolute; left: 9px; color: var(--muted); pointer-events: none; white-space: nowrap; }
+.date.empty:not(:focus-within) .date-ph { display: block; }
+.date.empty:not(:focus-within) input { color: transparent; }
+.date.empty:not(:focus-within) input::-webkit-datetime-edit { color: transparent; }
+
+/* Overflow menus that open from a right-aligned trigger. */
+.menu-anchor.end .popover { left: auto; right: 0; min-width: 180px; }
+.popover .item.danger { color: var(--error); }
+.nowrap { white-space: nowrap; }
+
+/* Section intros: a one-line summary, the mechanics behind "How it works". */
+.about { margin-bottom: 12px; }
+.about p { margin-bottom: 4px; }
+.about summary { cursor: pointer; font-size: 12px; color: var(--accent-text); width: max-content; }
+.about details p { margin: 4px 0 0; max-width: 72ch; }

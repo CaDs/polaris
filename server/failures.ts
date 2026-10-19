@@ -1,3 +1,4 @@
+import { withUsage } from "./usage.ts";
 import { randomUUID } from "node:crypto";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
@@ -148,8 +149,8 @@ const text = (v: unknown, what: string, max: number) => {
 };
 
 // One structured call: the dossier in, submit_mined_ticket's input out (validated).
-async function verdict(o: { provider: Provider; model: string }, prompt: string) {
-  const r = await ask(o.provider, o.model, MINE_SYSTEM, scrub(prompt), 4096, 120_000, undefined, [SUBMIT]);
+async function verdict(o: { workspaceId: string; provider: Provider; model: string }, prompt: string) {
+  const r = await withUsage({ workspaceId: o.workspaceId, purpose: "mining", background: true }, () => ask(o.provider, o.model, MINE_SYSTEM, scrub(prompt), 4096, 120_000, undefined, [SUBMIT]));
   const call = r.content.find((b) => b.type === "tool_use" && b.name === SUBMIT.name);
   if (call?.type !== "tool_use") throw new Error(`it did not call ${SUBMIT.name}`);
   const i = call.input;

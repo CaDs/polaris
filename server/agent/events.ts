@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { recordUsage } from "../usage.ts";
 import { db } from "../db.ts";
 import type { AgentEvent } from "./types.ts";
 
@@ -39,11 +40,13 @@ export function eventLog(runId: string) {
     const now = Date.now();
     insert.run(runId, ++seq, e.type, JSON.stringify(e.payload), now);
     if (e.type === "run_started") db.prepare("UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ?").run(now, runId);
-    // tokens_in counts all uncached prompt tokens (incl. cache writes); tokens_cached counts cache reads.
-    if (e.type === "usage")
-      db.prepare("UPDATE runs SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, tokens_cached = tokens_cached + ? WHERE id = ?").run(
-        e.payload.input + e.payload.cache_write, e.payload.output, e.payload.cache_read, runId,
-      );
+    // Metered transport attempts have already updated projections atomically with their ledger entry.
+    if (e.type === "usage" && !e.payload.metered) {
+      const r = db.prepare(`SELECT r.*,t.workspace_id,p.name,p.kind,p.auth_type FROM runs r JOIN tickets t ON t.id=r.ticket_id LEFT JOIN providers p ON p.id=r.provider_id WHERE r.id=?`).get(runId) as Record<string, any>;
+      recordUsage({ workspaceId: r.workspace_id, ticketId: r.ticket_id, runId, purpose: r.role },
+        { id: r.provider_id, name: r.name ?? "Environment", kind: r.kind ?? "unknown", billing: r.kind === "ollama" ? "local" : r.auth_type === "oauth" ? "subscription" : "api_key" },
+        r.model, { id: `event:${runId}:${seq}`, started_at: now, usage: e.payload, status: "reported", outcome: "completed" });
+    }
     if (e.type === "run_finished") db.prepare("UPDATE runs SET status = ?, ended_at = ? WHERE id = ?").run(e.payload.status, now, runId);
     if (e.type === "run_started" || e.type === "run_finished") touchRun(runId);
     for (const fn of listeners.get(runId) ?? []) {
@@ -58,7 +61,7 @@ export function eventLog(runId: string) {
 
 // Workspace channel for the live board and the notification bell: "something about this ticket changed, refetch".
 // Not persisted (a reconnecting client refetches anyway); the run log above stays the only source of truth.
-export type Change = { type: "ticket" | "notification"; id: string };
+export type Change = { type: "ticket" | "notification" | "usage"; id: string };
 const wsListeners = new Map<string, Set<(c: Change) => void>>();
 export function subscribeWorkspace(ws: string, fn: (c: Change) => void) {
   const set = wsListeners.get(ws) ?? new Set();

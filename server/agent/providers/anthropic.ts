@@ -11,6 +11,7 @@ function toApi(b: Block): ApiBlock | undefined {
   // Reasoning from another provider means nothing here; drop it.
   if (b.type === "reasoning") return b.provider === "anthropic" ? (b.data as ApiBlock) : undefined;
   if (b.type === "tool_use") return { type: "tool_use", id: b.id, name: b.name, input: b.input }; // not invalid_input
+  if (b.type === "tool_result") return { type: "tool_result", tool_use_id: b.tool_use_id, content: b.content, ...(b.is_error !== undefined ? { is_error: b.is_error } : {}) };
   return b;
 }
 
@@ -44,6 +45,9 @@ export function requestBody(req: ProviderRequest) {
 export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider {
   const url = `${(opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "")}/v1/messages`;
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void) {
+    let raw: Record<string, number> = {};
+    const usageOf = (): Usage => ({ input: raw.input_tokens ?? 0, output: raw.output_tokens ?? 0, cache_read: raw.cache_read_input_tokens ?? 0, cache_write: raw.cache_creation_input_tokens ?? 0 });
+    try {
     const body = requestBody(req);
     let res: Response;
     try {
@@ -57,11 +61,14 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
       if (req.signal?.aborted) throw e;
       throw retryable(new AgentError("ProviderError", `request failed: ${(e as Error).message}`));
     }
-    if (!res.ok || !res.body) throw httpError(res, await res.text());
+    if (!res.ok || !res.body) {
+      const text = await res.text();
+      try { raw = { ...JSON.parse(text)?.usage }; } catch {}
+      throw httpError(res, text);
+    }
 
     const blocks: ApiBlock[] = [];
     const json: string[] = [];
-    let raw: Record<string, number> = {};
     let stopReason = "";
     const handle = (e: ApiBlock) => {
       switch (e.type) {
@@ -103,6 +110,8 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
           stopReason = e.delta.stop_reason ?? stopReason;
           for (const [k, v] of Object.entries(e.usage ?? {})) if (typeof v === "number") raw[k] = v;
           break;
+        case "message_stop":
+          break;
         case "error": {
           const err = new AgentError("ProviderError", `${e.error?.type}: ${e.error?.message}`);
           throw e.error?.type === "overloaded_error" || e.error?.type === "api_error" ? retryable(err) : err;
@@ -126,15 +135,17 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
     }
     if (!stopReason) throw new AgentError("ProviderError", "stream ended before message_delta");
 
-    const usage: Usage = {
-      input: raw.input_tokens ?? 0,
-      output: raw.output_tokens ?? 0,
-      cache_read: raw.cache_read_input_tokens ?? 0,
-      cache_write: raw.cache_creation_input_tokens ?? 0,
-    };
+    const usage = usageOf();
+    const usageStatus = typeof raw.input_tokens === "number" && typeof raw.output_tokens === "number" ? "reported" as const : Object.keys(raw).length ? "partial" as const : "unavailable" as const;
     // Empty text blocks are rejected when sent back, so drop them.
     const content = blocks.filter((b) => b && !(b.type === "text" && !b.text)).map(fromApi);
-    return { message: { role: "assistant" as const, content }, usage, stopReason };
+    return { message: { role: "assistant" as const, content }, usage, usageStatus, stopReason };
+    } catch (error) {
+      const e = error instanceof AgentError ? error : new AgentError(req.signal?.aborted ? "UserAborted" : "ProviderError", (error as Error).message);
+      e.usage = usageOf();
+      e.usageStatus = Object.keys(raw).length ? "partial" : "unavailable";
+      throw e;
+    }
 }
-  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on)) };
+  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on), req.metering) };
 }

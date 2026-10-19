@@ -1,23 +1,24 @@
-import { useEffect, useState } from "react";
-import { Loading, api, cost, fmt, hitRate, useApi } from "./ui.tsx";
+import { useCallback, useEffect, useState } from "react";
+import { Loading, api, cost, fmt, hitRate, useApi, useWorkspaceEvents, type TokenSummary } from "./ui.tsx";
 
-type Row = { runs: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number };
-type Usage = {
+type Row = TokenSummary & { calls: number; runs: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number };
+export type Usage = {
   cap: { usd: number | null; tokens: number | null; used_usd: number; used_tokens: number; month: string };
-  totals: Row;
+  totals: Row; execution: Row; background: Row; purposes: (Row & { purpose: string; background: boolean })[];
+  completeness: { complete_since: number; historical_incomplete: boolean; partial: number; unavailable: number };
   days: (Row & { day: string })[];
-  models: (Row & { model: string })[];
+  models: (Row & { provider_id: string | null; provider_name: string; model: string; billing_mode: string })[];
   tickets: (Row & { id: string; key: string; title: string })[];
 };
 
-// "In" is uncached prompt tokens (incl. cache writes), "Cached" cache reads; the bar is the cache hit rate.
+// Display the four disjoint categories; legacy tokens_in includes writes for the existing cache-hit formula.
 function Cells({ r }: { r: Row }) {
   const share = r.tokens_in + r.tokens_cached ? (100 * r.tokens_cached) / (r.tokens_in + r.tokens_cached) : 0;
   return (
     <>
-      <td>{r.runs}</td><td>{fmt(r.tokens_in)}</td><td>{fmt(r.tokens_out)}</td><td>{fmt(r.tokens_cached)}</td>
+      <td>{r.runs}</td><td>{fmt(r.input_uncached)}</td><td>{fmt(r.tokens_out)}</td><td>{fmt(r.tokens_cached)}</td><td>{fmt(r.tokens_cache_write)}</td><td>{fmt(r.tokens_total)}</td>
       <td><span className="bar" aria-hidden="true"><span style={{ width: `${share}%` }} /></span> {hitRate(r.tokens_in, r.tokens_cached)}</td>
-      <td>{cost(r.cost_usd)}</td>
+      <td>{r.subscription_calls > 0 && "ChatGPT plan · "}{r.local_calls > 0 && "Local · "}{cost(r.cost_usd)}{r.unknown_price > 0 && " (some prices unknown)"}</td>
     </>
   );
 }
@@ -28,10 +29,10 @@ function Table({ label, first, rows }: { label: string; first: string; rows: { k
       <h3>{label}</h3>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>{first}</th><th>Runs</th><th>In</th><th>Out</th><th>Cached</th><th>Cache hit</th><th>Cost</th></tr></thead>
+          <thead><tr><th>{first}</th><th>Runs</th><th>Input</th><th>Out</th><th>Cache read</th><th>Cache write</th><th>Total tokens</th><th>Cache hit</th><th>Cost</th></tr></thead>
           <tbody>
             {rows.map((r) => <tr key={r.key}><td>{r.cell}</td><Cells r={r.row} /></tr>)}
-            {rows.length === 0 && <tr><td colSpan={7} className="muted">No runs yet.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={10} className="muted">No usage yet.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -95,7 +96,7 @@ function Runs() {
                 </tr>
               );
             })}
-            {models.length === 0 && <tr><td colSpan={7} className="muted">No runs yet.</td></tr>}
+            {models.length === 0 && <tr><td colSpan={10} className="muted">No runs yet.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -104,7 +105,7 @@ function Runs() {
 }
 
 // The workspace's monthly spending caps (Settings), when set: used / cap, full and red once reached.
-function Caps({ cap }: { cap: Usage["cap"] }) {
+export function Caps({ cap }: { cap: Usage["cap"] }) {
   const bars = [
     cap.usd !== null && { label: "Cost", used: cap.used_usd, max: cap.usd, text: `$${cap.used_usd.toFixed(2)} of $${cap.usd.toFixed(2)}` },
     cap.tokens !== null && { label: "Tokens", used: cap.used_tokens, max: cap.tokens, text: `${fmt(cap.used_tokens)} of ${fmt(cap.tokens)}` },
@@ -130,11 +131,13 @@ function Caps({ cap }: { cap: Usage["cap"] }) {
 export function UsagePage() {
   const [u, setU] = useState<Usage | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => void api<Usage>("/api/usage").then(setU, (e) => setError(e.message)), []);
+  const reload = useCallback(() => void api<Usage>("/api/usage").then(setU, (e) => setError(e.message)), []);
+  useEffect(reload, [reload]);
+  useWorkspaceEvents("usage", reload);
   if (!u) return <Loading error={error} />;
   const t = u.totals;
   const stats: [string, string][] = [
-    ["Tokens in", fmt(t.tokens_in)], ["Tokens out", fmt(t.tokens_out)], ["Cached", fmt(t.tokens_cached)],
+    ["Input tokens", fmt(t.input_uncached)], ["Tokens out", fmt(t.tokens_out)], ["Cache read", fmt(t.tokens_cached)], ["Cache write", fmt(t.tokens_cache_write)], ["Total processed", fmt(t.tokens_total)],
     ["Cost", cost(t.cost_usd)], ["Cache hit rate", hitRate(t.tokens_in, t.tokens_cached)],
   ];
   return (
@@ -142,10 +145,15 @@ export function UsagePage() {
       <section className="stats" aria-label="Totals">
         {stats.map(([k, v]) => <div key={k}><span className="muted">{k}</span><strong>{v}</strong></div>)}
       </section>
+      <p className="muted">{fmt(u.execution.tokens_total)} execution tokens · {fmt(u.background.tokens_total)} background tokens. Counts use each model's tokenizer.</p>
+      {(u.completeness.historical_incomplete || u.completeness.partial > 0 || u.completeness.unavailable > 0) && <p className="warn" role="status">Usage coverage: {u.completeness.partial} partial requests, {u.completeness.unavailable} unavailable. {u.completeness.historical_incomplete && `Older background usage is incomplete; full accounting began ${new Date(u.completeness.complete_since).toLocaleString()}.`} Unknown usage is not measured zero.</p>}
+      {t.subscription_calls > 0 && <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage ChatGPT plan usage</a>}
       <Caps cap={u.cap} />
       <Runs />
-      <Table label="Per day" first="Day (UTC)" rows={u.days.map((d) => ({ key: d.day, cell: <span className="mono">{d.day}</span>, row: d }))} />
-      <Table label="Per model" first="Model" rows={u.models.map((m) => ({ key: m.model, cell: <span className="mono">{m.model}</span>, row: m }))} />
+      {/* Only days with activity: a fortnight of zero rows buries the ones that matter. */}
+      <Table label="Per day" first="Day (UTC)" rows={u.days.filter((d) => d.runs > 0 || d.tokens_total > 0).map((d) => ({ key: d.day, cell: <span className="mono">{d.day}</span>, row: d }))} />
+      <Table label="Per model" first="Provider / model" rows={u.models.map((m, i) => ({ key: `${m.provider_id}-${m.model}-${i}`, cell: <span className="mono">{m.provider_name} / {m.model}</span>, row: m }))} />
+      <Table label="By activity" first="Activity" rows={u.purposes.map((p) => ({ key: p.purpose, cell: `${p.purpose}${p.background ? " (background)" : ""}`, row: p }))} />
       <Table label="Top tickets" first="Ticket" rows={u.tickets.map((k) => ({ key: k.id, cell: <><span className="mono">{k.key}</span> {k.title}</>, row: k }))} />
     </div>
   );

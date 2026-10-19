@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, useWorkspaceEvents, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket } from "./ui.tsx";
+import { Popover } from "./Filters.tsx";
+import { Alert, COLUMNS, Confirm, Dialog, Icon, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, useWorkspaceEvents, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket, type TokenSummary } from "./ui.tsx";
 
 // spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
-type Detail = Ticket & { runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
+type Detail = Ticket & { usage?: TokenSummary; background_usage?: TokenSummary; runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
 type Ev = { seq: number; type: string; payload: any };
 
 export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (number: number) => void }) {
@@ -13,6 +14,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const [workspaceTest, setWorkspaceTest] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [menu, setMenu] = useState(false);
   const [error, setError] = useState("");
   const [retrying, setRetrying] = useState<Run | null>(null);
   const [validating, setValidating] = useState(false);
@@ -100,7 +102,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         {waiting(ticket) && <span className="muted" role="status">waiting for children</span>}
         {ticket.escalated_key && <span className="muted">Escalated to {link(ticket.escalated_key)}</span>}
         {ticket.split_from_key && <span className="muted">Split from {link(ticket.split_from_key)}</span>}
-        {ticket.mined_class && <span className="badge" title="Drafted by failure mining (Improvement page)">mined from {ticket.mined_class}</span>}
+        {ticket.mined_class && <span className="badge" title="Drafted by failure mining (Learning page)">mined from {ticket.mined_class}</span>}
         <span className="grow" />
         {providers && <ModelPicker providers={providers} provider_id={ticket.provider_id} model={ticket.model} onChange={patch} />}
         {ticket.status === "done" && !epic &&
@@ -108,7 +110,15 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
             <button className="btn" onClick={addToEvals} disabled={validating}>{validating ? "Validating…" : "Add to evals"}</button>
           ))}
         <button className="btn primary" onClick={() => run()} disabled={running}>{epic ? "Run planner" : "Run agent"}</button>
-        <button className="btn danger" onClick={() => setConfirming(true)}>Delete ticket</button>
+        {/* Destructive actions live behind the overflow menu, away from Run agent. */}
+        <span className="menu-anchor end">
+          <button className="btn icon-btn" aria-label="More actions" aria-expanded={menu} onClick={() => setMenu((m) => !m)}><Icon name="more" /></button>
+          {menu && (
+            <Popover close={() => setMenu(false)}>
+              <button className="item danger" onClick={() => (setMenu(false), setConfirming(true))}>Delete ticket</button>
+            </Popover>
+          )}
+        </span>
       </div>
       <Alert error={error} />
       <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
@@ -123,6 +133,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       <Comments ticketId={ticket.id} />
       {epic && detail?.children && <Epic ticket={ticket} detail={detail} items={detail.children} open={open} patch={(b) => patch(b).then(load)} />}
 
+      {detail?.usage && <p className="muted" aria-label="Ticket token usage">{fmt(detail.usage.tokens_total)} total processed tokens · {fmt(detail.background_usage?.tokens_total ?? 0)} background{epic && " · includes descendants"}. Input {fmt(detail.usage.input_uncached)} · output {fmt(detail.usage.tokens_out)} · cache read {fmt(detail.usage.tokens_cached)} · cache write {fmt(detail.usage.tokens_cache_write)}{(detail.usage.partial > 0 || detail.usage.unavailable > 0) && " · some request usage is incomplete"}</p>}
       <h3>{epic ? "Planner rounds" : "Runs"}</h3>
       {runs.length === 0 ? (
         <p className="muted">No runs yet.</p>
@@ -130,7 +141,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <div className="table-wrap">
           <table className="runs">
             <thead>
-              <tr><th>{epic ? "Round" : "Attempt"}</th><th>Model</th><th>Status</th><th>In</th><th>Out</th><th>Cached</th><th>Cache hit</th><th>Cost</th><th>Time</th><th>Metrics</th><th></th></tr>
+              <tr><th>{epic ? "Round" : "Attempt"}</th><th>Model</th><th>Status</th><th>Tokens</th><th>Cache hit</th><th>Cost</th><th>Time</th><th>Turns</th><th></th></tr>
             </thead>
             <tbody>
               {runs.map((r) => (
@@ -138,13 +149,16 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
                   <td><button className="link" onClick={() => setSelected(r.id)} aria-label={r.role === "wiki" ? "Show wiki run" : `Show run #${r.attempt}`}>{r.role === "wiki" ? "wiki" : `#${r.attempt}`}</button></td>
                   <td className="mono">{r.model}</td>
                   <td><StatusIcon status={r.status === "passed" ? "review" : r.status === "cancelled" ? "todo" : r.status} /> {r.status}</td>
-                  <td>{fmt(r.tokens_in)}</td><td>{fmt(r.tokens_out)}</td><td>{fmt(r.tokens_cached)}</td><td>{hitRate(r.tokens_in, r.tokens_cached)}</td>
-                  <td>{cost(r.cost_usd, r.auth_type)}</td><td>{duration(r)}</td>
+                  {/* The split (input, output, cache read/write) is the hover title and the transcript header: the table stays scannable. */}
+                  <td title={`input ${fmt(r.usage?.input_uncached ?? r.tokens_in)} · output ${fmt(r.usage?.tokens_out ?? r.tokens_out)} · cache read ${fmt(r.usage?.tokens_cached ?? r.tokens_cached)} · cache write ${fmt(r.usage?.tokens_cache_write ?? r.tokens_cache_write ?? 0)}`}>
+                    {fmt(r.usage?.tokens_total ?? r.tokens_in + r.tokens_out + r.tokens_cached)}{r.usage && (r.usage.partial > 0 || r.usage.unavailable > 0) && <span title="Some request usage is partial or unavailable"> *</span>}
+                  </td><td>{hitRate(r.usage?.tokens_in ?? r.tokens_in, r.usage?.tokens_cached ?? r.tokens_cached)}</td>
+                  <td>{r.usage ? <>{r.usage.subscription_calls > 0 && "ChatGPT plan · "}{r.usage.local_calls > 0 && "Local · "}{cost(r.cost_usd)}{r.usage.unknown_price > 0 && " (price unknown)"}</> : cost(r.cost_usd, r.auth_type)}</td><td>{duration(r)}</td>
                   {/* ponytail: the full line is the hover title, so the table stays narrow at phone width */}
                   <td title={r.metrics ? metricsLine(r.metrics, r) : undefined}>
                     {r.metrics ? <>{plural(r.metrics.turns, "turn")} · {r.metrics.tool_errors} err{r.metrics.stuck && <span className="warn-text"> · stuck</span>}</> : "—"}
                   </td>
-                  <td>{!epic && r.role !== "wiki" && r.status !== "queued" && r.status !== "running" && <button className="link" disabled={running} onClick={() => setRetrying(r)}>Retry with…</button>}</td>
+                  <td>{!epic && r.role !== "wiki" && r.status !== "queued" && r.status !== "running" && <button className="link nowrap" disabled={running} onClick={() => setRetrying(r)}>Retry with…</button>}</td>
                 </tr>
               ))}
             </tbody>
@@ -241,10 +255,12 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
     return () => es.close();
   }, [run.id]);
 
-  const usage = events.filter((e) => e.type === "usage").reduce(
-    (a, e) => ({ in: a.in + e.payload.input + e.payload.cache_write, out: a.out + e.payload.output, cached: a.cached + e.payload.cache_read }),
-    { in: 0, out: 0, cached: 0 },
+  const projected = events.filter((e) => e.type === "usage").reduce(
+    (a, e) => ({ input: a.input + e.payload.input, output: a.output + e.payload.output, cache_read: a.cache_read + e.payload.cache_read, cache_write: a.cache_write + e.payload.cache_write }),
+    { input: 0, output: 0, cache_read: 0, cache_write: 0 },
   );
+  const usage = run.usage ?? { input_uncached: projected.input, tokens_in: projected.input + projected.cache_write, tokens_out: projected.output, tokens_cached: projected.cache_read,
+    tokens_cache_write: projected.cache_write, tokens_total: projected.input + projected.output + projected.cache_read + projected.cache_write, partial: 0, unavailable: 0 };
   const finished = events.find((e) => e.type === "run_finished");
   const skills = events.find((e) => e.type === "setup" && e.payload.step === "skills")?.payload.skills as any[] | undefined;
 
@@ -255,7 +271,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
           {run.eval_run_id ? "Eval run" : run.role === "planner" ? `Planner round #${run.attempt}` : run.role === "wiki" ? "Wiki run" : `Run #${run.attempt}`} <span className="muted">{finished ? finished.payload.status : run.status}</span>
           {run.prompt_version && <span className="muted mono"> · prompt v{run.prompt_version}</span>}
         </h3>
-        <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.in)} · out {fmt(usage.out)} · cached {fmt(usage.cached)} · cache hit {hitRate(usage.in, usage.cached)}</span>
+        <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.input_uncached)} · out {fmt(usage.tokens_out)} · cached {fmt(usage.tokens_cached)} · cache write {fmt(usage.tokens_cache_write)} · total {fmt(usage.tokens_total)} · cache hit {hitRate(usage.tokens_in, usage.tokens_cached)}{(usage.partial > 0 || usage.unavailable > 0) && " · some usage partial/unavailable"}</span>
         {!finished && (run.status === "running" || run.status === "queued") && (
           <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch((e) => setError(e.message))}>Cancel</button>
         )}
@@ -383,7 +399,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
             </div>
           );
         if (e.type === "run_metrics") return <p key={e.seq} className="muted" aria-label="Run metrics">{metricsLine(p, run)}</p>;
-        if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns.</p>;
+        if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns. Tokens: input {fmt(p.usage.input)}, output {fmt(p.usage.output)}, cache read/write {fmt(p.usage.cache_read)}/{fmt(p.usage.cache_write)}, total {fmt(p.usage.input + p.usage.output + p.usage.cache_read + p.usage.cache_write)}.</p>;
         return null;
       })}
       {!finished && <p className="muted">{run.status === "queued" && !events.length ? "Queued, waiting for a free slot…" : "Waiting for events…"}</p>}

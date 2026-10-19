@@ -19,7 +19,7 @@ builds its own remaining milestones (`tasks.md`).
 ## Core abstractions (do not bypass)
 
 1. **Workspace scoping.** Every resource has `workspace_id` (directly, or via its ticket). Every `/api/*` route except auth goes through the session + membership middleware in `server/app.ts` and filters by `c.get("workspaceId")`.
-2. **Event log is the source of truth.** A run appends `events(run_id, seq, type, payload)`; dashboard views, token totals, replays and evals are projections. Never store state only in memory.
+2. **Transcript events and usage measurements are persisted.** The append-only `usage_ledger` is the accounting source of truth; run counters and usage events are compatible projections and never charge the same request twice. A run appends `events(run_id, seq, type, payload)`; dashboard views, token totals, replays and evals are projections. Never store state only in memory.
 3. **Ticket → Run → Event.** A ticket has many runs (retries, other models). A run records role, model, worktree, attempt, status, token totals.
 4. **Secrets** (provider keys, OAuth tokens) are encrypted at rest with a key from env and never enter agent context or events.
 
@@ -86,13 +86,11 @@ budget ended it. The loop now watches for that, without a decision model. Consta
 ## Spending caps (M12)
 
 - **Caps.** Workspace settings `monthly_cap_usd` and `monthly_cap_tokens` (default `null` = no cap; non-negative, tokens
-  whole; `""` from the form clears) over the current UTC calendar month by run start, every run of the workspace (eval
+  whole; `""` from the form clears) over the current UTC calendar month by request start, every model call of the workspace (eval
   cases and wiki runs included). Per ticket `cap_usd` / `cap_tokens` (ticket POST/PATCH, edited in an epic's header)
   over the ticket's own runs and every descendant's, any month: an epic's covers its planner rounds and the whole tree.
   Children inherit nothing; a ticket is checked against its own cap and every capped epic above it.
-- **Measure.** Tokens = in + out + cached, as `/api/usage` counts them. USD from the same `PRICES` that books `cost_usd`,
-  computed from the runs rows' tokens, so a run in flight counts what it used so far; a model without a price (Ollama,
-  demo) costs $0 but its tokens count.
+- **Measure.** Tokens = uncached input + output + cache reads + cache writes, measured once per actual request attempt in `usage_ledger`, as `/api/usage` counts them. USD comes from the ledger’s provider/model/billing snapshots and verified price estimates, including mixed-model reviews. Local/subscription inference has no provider API bill, while unknown API prices are identified as unknown. All tokens count.
 - **Enforcement**: one function, `capCheck` (`server/runs.ts`), called by `pipeline()` before a run's work (no worktree,
   sandbox or call yet) and before every later model call of a run: a gate or review fix round, each reviewer, a wiki fix
   round (a planner round is its own run). A call in flight always finishes. Reached (used ≥ cap): an `error` event `{kind:
@@ -102,7 +100,7 @@ budget ended it. The loop now watches for that, without a decision model. Consta
   epic at once (no fresh-round retry). At 80% of any cap: one `error` event `SpendingCapWarning` per run.
 - **Visibility.** `GET /api/usage` has `cap: {usd, tokens, used_usd, used_tokens, month}` (the Usage page shows a bar per
   set cap); an epic's `GET /api/tickets/:id` has `spent: {usd, tokens}` (its header: "spent $x of $y").
-- Not capped: CLI runs (`npm run agent`, no pipeline) and triage calls (Ollama, free).
+- Background requests (reflection, proposal, mining, triage, connection tests) check the same caps before each call. CLI runs (`npm run agent`, no pipeline) remain uncapped but measured.
 
 ## Failure mining (M12)
 
@@ -123,7 +121,7 @@ Code: `server/failures.ts`; migration 017.
   runs, tickets, examples: [{run_id, ticket_id, ticket_key, title, reason, model}] (≤ 3, different tickets first, newest
   first), mined: {id, key, status} | null}], rows: [{day, class, runs}]}`, classes by runs, then name. Runs of tickets
   labelled `mined` never count (mining its own drafts would feed on itself).
-- **`POST /api/failures/mine`** (Improvement page, "Mine failures"; manual only): for each class with ≥ 2 runs in the
+- **`POST /api/failures/mine`** (Learning page, "Mine failures"; manual only): for each class with ≥ 2 runs in the
   last 30 days, no open mined ticket (`mined_class` = the class, status not done/failed) and not `cancelled` (a person's
   choice), one call with the workspace default model (as Propose improvement): system prompt `MINE_SYSTEM`, a dossier
   (class + description, counts, the examples' run digests as reflection sees them: outcome, tool errors, setup/gate output
@@ -193,7 +191,7 @@ interface Provider {
 | Anthropic | Messages | API key |
 | Ollama | Messages (Anthropic-compatible endpoint) | none + `base_url` |
 | OpenAI | Responses | API key |
-| OpenAI subscription | Responses via Codex backend | ChatGPT OAuth (unofficial; personal use) |
+| OpenAI subscription | Public Responses API (`store:false`, `stream:true`) | Sign in with ChatGPT dynamic registration |
 
 Internal message format is Anthropic-style content blocks. Reasoning is an opaque block passed back verbatim.
 
@@ -201,7 +199,7 @@ Internal message format is Anthropic-style content blocks. Reasoning is an opaqu
 
 The harness gets better at the user's repo in three loops of increasing risk. Everything they produce lives in the DB
 (`lessons`, `prompts`, `eval_cases`, `eval_runs`, `eval_results`; migration 006), never in the worktree, so no agent tool
-can read or write it, and every change is a new version you can see in full on the **Improvement** page.
+can read or write it, and every change is a new version you can see in full on the **Learning** page (route `/improvement`).
 
 1. **Reflection → lessons** (lowest risk, applies at once). When a run series ends (it passed → review, it failed for
    good after its retries, or a reviewer rejected it with a note) the harness makes one extra call: a fresh one-message
@@ -213,9 +211,9 @@ can read or write it, and every change is a new version you can see in full on t
    shapes redacted. Same text → no new version. Each version records its source (reflection on run X / human edit /
    restore of vN). The latest version goes into the first user message of every new run as `# Lessons from earlier runs`
    (never the system prompt: that would bust the cache prefix); runs record `lessons_version`. Because lessons apply
-   immediately, the Improvement page shows them in full with a diff per version and one-click **Restore** (a new version).
+   immediately, the Learning page shows them in full with a diff per version and one-click **Restore** (a new version).
    The run gets a `reflection` event (lessons version, chars, usage) just before `run_finished`, so it shows in the
-   transcript; reflection tokens are not booked on the run. Reflections of one workspace are serialized.
+   transcript; reflection tokens are booked as background usage in the ledger, separately from execution counters on the run. Reflections of one workspace are serialized.
 2. **Eval suite from past tickets.** "Add to evals" on an approved (done) ticket freezes a case: title + spec, repo,
    `base_sha` = the commit the approved run started from, the workspace's setup command, the test command (the ticket's own, else the workspace's), protected paths and image
    as they are now. **A case must fail at base_sha**: the harness checks out base_sha in a clean detached worktree + sandbox,
@@ -343,7 +341,7 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
 Workspace setting `model_review` (migration 009, default on). After a worker run passes the test gate, the run's own
 provider and model review the change before a human sees it (not for eval case runs or planner rounds), unless the
 workspace names a reviewer: `review_provider_id` / `review_model` (migration 019, `PUT /api/settings/review-provider
-{provider_id, model}`, both null = the run's own; Settings → Reviewer model). The reviewer's choice resolves like a
+{provider_id, model}`, both null = the run's own; Settings → Models → Reviewer model). The reviewer's choice resolves like a
 run's (a deleted provider leaves the model on the environment provider). `model_review_started.model` names it; its
 tokens count in the run's totals and caps, priced at the reviewer model's rates (`recordCost` splits the usage).
 
@@ -603,3 +601,41 @@ is a 400 in a body and matches nothing in a filter).
 - Hot lookups are indexed (migration 015): child and split subqueries, project/milestone/cycle progress, the queue and
   restart recovery, eval runs.
 - Deps pinned via lockfile; install with `npm install --before <date ≥ 2 weeks ago>`.
+
+
+## Provider-independent accounting and ChatGPT plan access
+
+Migration 020 adds append-only `usage_ledger`: a unique request-attempt ID, workspace, optional ticket/run,
+provider/model/billing snapshots, purpose, execution/background category, timestamps, outcome, completeness,
+uncached input/output/cache read/cache write, and optional estimated USD. Normalized counts are non-negative
+provider-reported integers; reasoning is already part of output. The session token-budget formula is unchanged.
+Transport retries each emit one measurement. Failed/cancelled streams retain known partial counts; absence of
+usage is `unavailable`, not measured zero. Run projections are updated atomically only for new execution records.
+Reflections stay linked to their source run but never inflate its turns or execution totals. Proposals/mining/tests
+have workspace background usage. Triage records unavailable usage when its endpoint reports none.
+
+The ledger drives Usage and cap checks. `/api/usage` retains the legacy fields and adds uncached input,
+cache-write and total tokens, execution/background summaries, provider/model/billing and purpose breakdowns,
+request completeness and a historical coverage boundary. `tokens_in` still includes cache writes for compatibility.
+Run and ticket responses include usage summaries. Workspace `usage` events refresh the dashboard. Historical
+usage/reflection events and surviving run summaries are imported idempotently with source-derived IDs; missing
+old background data is never invented. Eval scoring remains execution-only with its established tie-break.
+
+Subscription providers use the public SIWC dynamic client flow, never Codex's client ID or private backend. The
+installation host ID persists in `POLARIS_DATA_DIR/openai-host-id` (owner-only creation). A version-2 encrypted
+credential envelope retains issued client ID, validated identity, host ID, scopes, ID token and rotating credentials.
+Sign-in uses PKCE, state and nonce with a `127.0.0.1` callback; signature/issuer/audience/expiry/nonce are checked
+using JWKS. Returning authorization verifies the same account. Refreshes serialize per registration and use a
+conditional write so logout/reconnection wins over in-flight renewal. Signout retains registration and attempts
+revocation. Legacy credentials require reconnect. Multiple accounts use separate providers.
+
+ChatGPT catalog discovery reads account-visible model slugs/display names; there is no static catalog fallback.
+Subscription requests use `instructions`, a full input history, `store:false`, `stream:true`, and Polaris function
+tools under the `polaris` namespace. Namespace metadata and encrypted reasoning survive history replay. Unsupported
+subscription fields/hosted tools are omitted; only `response.completed` permits results/tool execution. Errors
+never trigger billing/provider fallback. A plan usage-limit error pauses that registration until an explicit Test
+or reconnect. Test completes a tool/result round trip. Provider responses include safe account/permission state;
+Continue with ChatGPT, a first-use confirmation, Disconnect, and Manage usage expose the lifecycle in Settings.
+Local inference has no provider bill; subscription inference is labelled ChatGPT plan; unknown API prices stay unknown.
+
+Sources: https://developers.openai.com/siwc/token-sharing-open-source (registration, sessions, models, limitations).
