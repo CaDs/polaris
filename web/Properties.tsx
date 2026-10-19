@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Popover } from "./Filters.tsx";
-import { Alert, COLUMNS, api, type Status, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, DateField, api, type Status, type Ticket } from "./ui.tsx";
 import { COLORS, cycleName, ESTIMATES, LabelChip, PRIORITIES, PRIORITY_ORDER, useTracker } from "./tracker.tsx";
 
 // The ticket's properties sidebar. Native selects keep it keyboard-friendly; on the ticket page s / p / a open status,
@@ -101,7 +101,7 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
           {ESTIMATES.map((n) => <option key={n} value={n}>{n} {n === 1 ? "point" : "points"}</option>)}
         </select>
       ))}
-      {prop("Due date", <input type="date" aria-label="Due date" value={ticket.due_date ?? ""} onChange={(e) => patch({ due_date: e.target.value || null })} />)}
+      {prop("Due date", <DateField aria-label="Due date" value={ticket.due_date} onSave={(due_date) => patch({ due_date })} />)}
       {prop("Parent epic", (
         <select aria-label="Parent epic" value={ticket.parent_id ?? ""} disabled={!movable} title={movable ? undefined : "Only a todo task without runs can be moved between epics"}
           onChange={(e) => patch({ parent_id: e.target.value || null })}>

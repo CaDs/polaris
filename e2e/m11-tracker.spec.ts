@@ -125,6 +125,18 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await page.getByLabel("Assignee").selectOption({ label: "Me (me)" });
   await page.getByLabel("Milestone").selectOption({ label: "Beta" });
   await page.getByLabel("Estimate").selectOption({ label: "3 points" });
+  // A typed date saves once, when the field is left (not on every keystroke that makes a valid date).
+  const patches: string[] = [];
+  const onPatch = (r: { method(): string; url(): string; postData(): string | null }) => r.method() === "PATCH" && r.url().includes("/api/tickets/") && patches.push(r.postData() ?? "");
+  page.on("request", onPatch);
+  await page.getByLabel("Due date").focus();
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowUp"); // each step is a valid date (an input event)
+  const due = await page.getByLabel("Due date").inputValue();
+  expect(due).not.toBe("2026-11-30");
+  expect(patches).toEqual([]);
+  await page.getByLabel("Due date").blur();
+  await expect.poll(() => patches).toEqual([JSON.stringify({ due_date: due })]);
+  page.off("request", onPatch);
   await page.locator("h1").click();
   await page.keyboard.press("l");
   await page.getByLabel("Find or create label").fill("regression");

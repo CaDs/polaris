@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { Alert, Confirm, Loading, api, useApi, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, DateField, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, useTracker, type Member, type Progress } from "./tracker.tsx";
 
 type Milestone = { id: string; name: string; target_date: string | null; position: number; progress: Progress };
@@ -103,7 +103,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
           </select>
         </label>
         <label className="inline">Target
-          <input type="date" className="narrow" value={p.target_date ?? ""} onChange={(e) => patch({ target_date: e.target.value || null })} />
+          <DateField className="narrow" value={p.target_date} onSave={(target_date) => patch({ target_date })} />
         </label>
         <span className="grow" />
         <button className="btn danger" onClick={() => setConfirming(true)}>Delete project</button>
@@ -120,7 +120,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
         {p.milestones.map((m, i) => (
           <li key={m.id} className="row" aria-label={m.name}>
             <input aria-label={`Milestone ${m.name}`} defaultValue={m.name} className="grow narrow" maxLength={100} onBlur={(e) => e.target.value.trim() && e.target.value !== m.name && call(`/api/milestones/${m.id}`, "PATCH", { name: e.target.value })} />
-            <input type="date" aria-label={`Target date of ${m.name}`} className="narrow" value={m.target_date ?? ""} onChange={(e) => call(`/api/milestones/${m.id}`, "PATCH", { target_date: e.target.value || null })} />
+            <DateField aria-label={`Target date of ${m.name}`} className="narrow" value={m.target_date} onSave={(target_date) => call(`/api/milestones/${m.id}`, "PATCH", { target_date })} />
             <Bar p={m.progress} />
             <button className="btn" aria-label={`Move ${m.name} up`} disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
             <button className="btn" aria-label={`Move ${m.name} down`} disabled={i === p.milestones.length - 1} onClick={() => move(i, 1)}>↓</button>
