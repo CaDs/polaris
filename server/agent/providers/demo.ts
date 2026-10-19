@@ -10,7 +10,8 @@ import { fakeProvider } from "./fake.ts";
 // M12: STUCK-LOOP in a ticket makes attempt 1 read README.md over and over (the stuck monitor stops it); a retry works normally.
 // So does a system prompt containing ALWAYS-CREATE-OK (M6: eval scores differ between prompt versions).
 // "slow"/"compact" are matched in the ticket part only (after "# Task"), so lessons naming such a ticket don't leak.
-// Requests without tools are M6 meta calls (reflection, prompt proposal), answered at once by demoMeta.
+// Requests without tools are M6 meta calls (reflection, prompt proposal), answered at once by demoMeta; M12 failure mining
+// (submit_mined_ticket) by demoMine.
 // M7: requests with create_ticket are planner rounds (plannerScript); a task asking for a "## Handoff" is a child of an epic
 // (childScript).
 // M8: requests with submit_review are the model reviewer (reviewScript): it looks at `git status --short`, approves, but a
@@ -192,6 +193,17 @@ function demoMeta(req: ProviderRequest): ProviderResponse {
   return { message: { role: "assistant", content: [{ type: "text", text }] }, usage: { input: 50, output: 10, cache_read: 0, cache_write: 0 }, stopReason: "end_turn" };
 }
 
+// M12 failure mining (a request with submit_mined_ticket): a repo verdict naming the dossier's class and count.
+function demoMine(req: ProviderRequest): ProviderResponse {
+  const msg = req.messages[0].content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+  const cls = /<class>(\w+)/.exec(msg)?.[1];
+  const count = /<count>(.*)<\/count>/.exec(msg)?.[1];
+  return {
+    message: { role: "assistant", content: [use("m1", "submit_mined_ticket", { verdict: "repo", title: `Stop ${cls} failures`, spec: `Demo draft: change the repository so runs stop failing with ${cls} (${count}).`, confidence: 0.5 })] },
+    usage: { input: 50, output: 10, cache_read: 0, cache_write: 0 }, stopReason: "tool_use",
+  };
+}
+
 // The scripted turns. ok: also create ok.txt; why says so in the first turn's text.
 function script(task: string, ok: boolean, why: string) {
   const ticket = task.includes("# Task") ? task.slice(task.lastIndexOf("# Task")) : task;
@@ -240,6 +252,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
   return {
     async stream(req, onEvent) {
       if (!req.tools.length) return demoMeta(req);
+      if (req.tools.some((t) => t.name === "submit_mined_ticket")) return demoMine(req);
       const retry = /Previous attempt (failed|was stopped)/.test(task);
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));

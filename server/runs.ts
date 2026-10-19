@@ -12,6 +12,7 @@ import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, typ
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
+import { classifyRun } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
@@ -652,6 +653,7 @@ async function execute(runId: string) {
       log({ type: "handoff", payload: { text } });
     }
   }, async ({ status, reason, turns }) => {
+    if (!run.eval_run_id) classifyRun(runId); // M12 failure class
     // Passing ticket runs keep worktree + branch for review; anything else is cleaned up now (output is in the event log).
     if ((status !== "passed" || run.eval_run_id) && cfg) await removeWorktree(cfg.repo_path, worktree, branch ?? null, dataDir());
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
@@ -1010,6 +1012,7 @@ export async function reject(ticketId: string, note: string) {
   const t = ticketRow(ticketId)!;
   const r = reviewRun(ticketId) ?? (db.prepare("SELECT id FROM runs WHERE ticket_id = ? AND eval_run_id IS NULL ORDER BY rowid DESC LIMIT 1").get(ticketId) as { id: string } | undefined);
   if (r) eventLog(r.id)({ type: "review", payload: { decision: "rejected", note: note || undefined } });
+  if (r) classifyRun(r.id); // human_rejected (a worker run)
   if (r && note && t.kind !== "epic") {
     const run = db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(r.id) as { provider_id: string | null; model: string };
     background(reflectOn(r.id, t.workspace_id, run, undefined, note).then((payload) => eventLog(r.id)({ type: "reflection", payload })), "reflection on a reject failed");

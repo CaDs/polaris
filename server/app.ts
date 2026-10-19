@@ -7,6 +7,7 @@ import { db, migrate } from "./db.ts";
 import { subscribe, type StoredEvent } from "./agent/events.ts";
 import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
+import { failures, mine } from "./failures.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, withStates } from "./planner.ts";
@@ -346,6 +347,18 @@ app.get("/api/metrics", (c) => {
       AND m.seq = (SELECT MAX(seq) FROM events WHERE run_id = r.id AND type = 'run_metrics')
     WHERE t.workspace_id = ? AND r.started_at >= ? GROUP BY day, r.model ORDER BY day DESC, r.model`).all(c.get("workspaceId"), since);
   return c.json({ days, rows });
+});
+
+// M12 failure mining (server/failures.ts): the failure classes of the last `days` (1..90, default 30), and "Mine failures":
+// draft tickets (or lessons) from them with the workspace default model. Mined tickets never run on their own.
+app.get("/api/failures", (c) => c.json(failures(c.get("workspaceId"), Math.min(90, Math.max(1, Math.floor(Number(c.req.query("days") ?? 30)) || 30)))));
+app.post("/api/failures/mine", async (c) => {
+  try {
+    const { provider, model } = metaProvider(c.get("workspaceId"));
+    return c.json(await mine({ workspaceId: c.get("workspaceId"), provider, model, author: email(c) }), 201);
+  } catch (e) {
+    return c.json({ error: `Mining failed: ${(e as Error).message}` }, 502);
+  }
 });
 
 // --- M6 self-improvement: lessons, prompt versions, evals. Workspace-scoped like everything else; humans only (agents have
