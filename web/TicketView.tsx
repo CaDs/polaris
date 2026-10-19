@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { COLUMNS, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
 
 type Detail = Ticket & { runs: Run[]; children?: Child[] };
 type Ev = { seq: number; type: string; payload: any };
@@ -112,7 +112,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <button className="btn primary" onClick={() => run()} disabled={running}>{epic ? "Run planner" : "Run agent"}</button>
         <button className="btn danger" onClick={() => setConfirming(true)}>Delete ticket</button>
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
       <label>
         Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={workspaceTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
@@ -154,13 +154,9 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <RetryDialog run={retrying} providers={providers} close={() => setRetrying(null)} go={(c) => (setRetrying(null), run(c))} />
       )}
       {confirming && (
-        <Dialog title="Delete ticket?" onClose={() => setConfirming(false)}>
-          <p className="muted">{ticket.key} and all of its runs will be permanently deleted.</p>
-          <div className="row end">
-            <button className="btn" onClick={() => setConfirming(false)}>Cancel</button>
-            <button className="btn danger" autoFocus onClick={remove}>Delete</button>
-          </div>
-        </Dialog>
+        <Confirm title="Delete ticket?" onConfirm={remove} onClose={() => setConfirming(false)}>
+          {ticket.key} and all of its runs will be permanently deleted.
+        </Confirm>
       )}
     </div>
   );
@@ -381,7 +377,7 @@ function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
         <button className="btn" onClick={() => setRejecting(true)} disabled={busy}>Reject</button>
         <button className="btn primary" onClick={() => decide("approve")} disabled={busy || (!epic && !d)}>Approve</button>
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {epic ? (
         <p className="muted">The planner completed this epic. Its children were merged one by one; approving marks the epic done.</p>
       ) : d ? <Diff text={d.diff} /> : !error && <p className="muted">Loading diff…</p>}

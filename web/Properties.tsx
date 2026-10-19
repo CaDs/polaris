@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Popover } from "./Filters.tsx";
-import { COLUMNS, api, type Status, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, api, type Status, type Ticket } from "./ui.tsx";
 import { COLORS, cycleName, ESTIMATES, LabelChip, PRIORITIES, PRIORITY_ORDER, useTracker } from "./tracker.tsx";
 
 // The ticket's properties sidebar. Native selects keep it keyboard-friendly; on the ticket page s / p / a open status,
@@ -109,7 +109,7 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
           {epics.map((x) => <option key={x.id} value={x.id}>{x.key} {x.title}</option>)}
         </select>
       ))}
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
     </aside>
   );
 }

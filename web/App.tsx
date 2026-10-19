@@ -11,7 +11,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Dialog, api, useTheme, type Ticket, type Theme } from "./ui.tsx";
+import { Alert, Dialog, Loading, api, errorText, useTheme, type Ticket, type Theme } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -41,7 +41,7 @@ function AuthForm() {
       mode === "up"
         ? await authClient.signUp.email({ name: f.name, email: f.email, password: f.password })
         : await authClient.signIn.email({ email: f.email, password: f.password });
-    setError(error?.message ?? "");
+    setError(error ? errorText(error, error.status) : ""); // e.g. "Sign-up is closed: this Polaris already has an owner (…)"
   }
 
   return (
@@ -65,8 +65,8 @@ function AuthForm() {
           autoComplete={mode === "in" ? "current-password" : "new-password"}
         />
       </label>
-      {error && <p className="error" role="alert">{error}</p>}
-      <button>{mode === "in" ? "Sign in" : "Create account"}</button>
+      <Alert error={error} />
+      <button className="btn primary">{mode === "in" ? "Sign in" : "Create account"}</button>
       <button
         type="button"
         className="link"
@@ -88,7 +88,7 @@ function CreateWorkspace() {
     const { name } = fields(e);
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const { error } = await authClient.organization.create({ name, slug });
-    setError(error?.message ?? "");
+    setError(error ? errorText(error, error.status) : "");
   }
 
   return (
@@ -98,8 +98,8 @@ function CreateWorkspace() {
       <label>
         Name <input name="name" required autoFocus />
       </label>
-      {error && <p className="error" role="alert">{error}</p>}
-      <button>Create</button>
+      <Alert error={error} />
+      <button className="btn primary">Create</button>
     </form>
   );
 }
@@ -229,7 +229,7 @@ function Dashboard({ email }: { email: string }) {
                 <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={open} />
                 <Properties ticket={ticket} tickets={tickets ?? []} reload={reload} />
               </div>
-            ) : <p className="muted pad">{tickets ? "Ticket not found." : "Loading…"}</p>
+            ) : tickets ? <p className="muted pad">Ticket not found.</p> : <Loading />
           ) : (
             <Issues search={search} go={go} all={tickets} open={open} />
           )}
@@ -320,7 +320,7 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
             ))}
           </fieldset>
         )}
-        {error && <p className="error" role="alert">{error}</p>}
+        <Alert error={error} />
         <div className="row end">
           <button type="button" className="btn" onClick={close}>Cancel</button>
           <button className="btn primary">Create ticket</button>

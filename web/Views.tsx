@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./ui.tsx";
+import { Alert, api } from "./ui.tsx";
 
 type View = { id: string; name: string; filters: Record<string, string>; sort: string; layout: "board" | "list"; shared: boolean; mine: boolean; owner: string };
 
@@ -19,7 +19,7 @@ export function Views({ go }: { go: (to: string) => void }) {
   const remove = (v: View) => api(`/api/views/${v.id}`, "DELETE").then(reload, (e) => setError(e.message));
   return (
     <div className="page">
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {views?.length === 0 && <p className="muted">No saved views. Filter the board or list, then press Save view.</p>}
       <ul className="plist" aria-label="Views">
         {views?.map((v) => (

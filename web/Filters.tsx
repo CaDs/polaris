@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Board } from "./Board.tsx";
 import { GROUPS, List, type Group } from "./List.tsx";
-import { COLUMNS, Dialog, api, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, Dialog, api, type Ticket } from "./ui.tsx";
 import { cycleName, PRIORITIES, useTracker, type Tracker } from "./tracker.tsx";
 
 // Board/list with a filter bar. All state lives in the URL query (shareable, bookmarkable, a saved view is just a query):
@@ -153,7 +153,7 @@ function FilterBar({ params, set, all, open, error }: {
         </select>
       )}
       <button className="btn" onClick={() => setSaving(true)}>Save view</button>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {saving && <SaveView params={params} close={() => setSaving(false)} />}
     </div>
   );
@@ -217,7 +217,7 @@ function SaveView({ params, close }: { params: URLSearchParams; close: () => voi
         </label>
         <label className="check"><input type="checkbox" name="shared" /> Share with the workspace</label>
         <p className="muted">Saves the current filters, search, sort and layout. Open it from Views.</p>
-        {error && <p className="error" role="alert">{error}</p>}
+        <Alert error={error} />
         <div className="row end">
           <button type="button" className="btn" onClick={close}>Cancel</button>
           <button className="btn primary">Save</button>

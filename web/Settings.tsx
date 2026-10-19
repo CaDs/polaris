@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Providers } from "./Providers.tsx";
 import { LabelSettings } from "./tracker.tsx";
-import { api } from "./ui.tsx";
+import { Alert, Loading, api } from "./ui.tsx";
 
 type WorkspaceSettings = {
   repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
@@ -20,15 +20,17 @@ export function Settings() {
     setError("");
     setSaved(false);
     try {
-      const f = new FormData(e.currentTarget);
-      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(f), auto_approve_children: f.has("auto_approve_children"), model_review: f.has("model_review"), auto_split: f.has("auto_split"), wiki: f.has("wiki") }));
+      // Unchecked boxes are missing from FormData (and an omitted field keeps its value): send every checkbox's state.
+      const form = e.currentTarget;
+      const toggles = [...form.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].map((c) => [c.name, c.checked]);
+      setS(await api<WorkspaceSettings>("/api/settings", "PUT", { ...Object.fromEntries(new FormData(form)), ...Object.fromEntries(toggles) }));
       setSaved(true);
     } catch (e) {
       setError((e as Error).message);
     }
   }
 
-  if (!s) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!s) return <Loading error={error} />;
   // key: re-mount after a save so server-filled values (e.g. the default base branch) show up.
   return (
     <div className="settings">
@@ -134,7 +136,7 @@ export function Settings() {
         </span>
       </label>
 
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <div className="row">
         <button className="btn primary">Save settings</button>
         {saved && <span className="muted" role="status">Saved</span>}

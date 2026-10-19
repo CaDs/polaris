@@ -41,7 +41,14 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   }
   await labels.getByLabel("New label", { exact: true }).fill("BUG");
   await labels.getByRole("button", { name: "Add label" }).click();
-  await expect(labels.getByRole("alert")).toHaveText('a label named "bug" already exists');
+  await expect(labels.getByRole("alert")).toHaveText('A label named "bug" already exists');
+  // API error codes and server failures read as sentences (one helper for every screen).
+  await page.route("/api/labels", (r) => r.fulfill({ status: 403, json: { error: "forbidden_origin" } }), { times: 1 });
+  await labels.getByRole("button", { name: "Add label" }).click();
+  await expect(labels.getByRole("alert")).toHaveText(/^Refused: the request did not come from this Polaris page/);
+  await page.route("/api/labels", (r) => r.fulfill({ status: 500, body: "boom" }), { times: 1 });
+  await labels.getByRole("button", { name: "Add label" }).click();
+  await expect(labels.getByRole("alert")).toHaveText(/^Something went wrong on the server/);
 
   // A project with a milestone.
   await page.getByRole("link", { name: "Projects" }).click();

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { api, type Ticket } from "./ui.tsx";
+import { Alert, Loading, api, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type Progress } from "./tracker.tsx";
 
 type Cycle = CycleRef & { progress: Progress; added_after_start: number };
@@ -65,7 +65,7 @@ export function Cycles({ go }: { go: (to: string) => void }) {
         <input name="ends_at" type="date" aria-label="Ends" defaultValue={addDays(start, 13)} required className="narrow" />
         <button className="btn primary">Create cycle</button>
       </form>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {cycles?.length === 0 && <p className="muted">No cycles yet. A cycle is a time box (usually 1–2 weeks) with a set of tickets to finish in it.</p>}
       {cycles && section("current", "Current", cycles.filter((c) => c.state === "current"))}
       {cycles && section("upcoming", "Upcoming", cycles.filter((c) => c.state === "upcoming"))}
@@ -100,7 +100,7 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
     if (r) setMsg(`Moved ${r.moved} unfinished ticket${r.moved === 1 ? "" : "s"} to ${cycleName(r.to)}.`);
   }
 
-  if (c === undefined) return <p className="muted pad">Loading…</p>;
+  if (c === undefined) return <Loading />;
   if (c === null) return <p className="muted pad">{id === "current" ? "No cycle includes today. Create one under Cycles." : "Cycle not found."}</p>;
   const unfinished = c.progress.total - c.progress.done;
   return (
@@ -120,7 +120,7 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
         )}
       </section>
       {msg && <p className="muted">{msg}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
     </div>

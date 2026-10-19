@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { Dialog, api, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, useTracker, type Member, type Progress } from "./tracker.tsx";
 
 type Milestone = { id: string; name: string; target_date: string | null; position: number; progress: Progress };
@@ -9,16 +9,8 @@ type Project = {
 };
 const STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 
-function useProject<T>(path: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState("");
-  const reload = useCallback(() => api<T>(path).then(setData, (e) => setError(e.message)), [path]);
-  useEffect(() => void reload(), [reload]);
-  return { data, error, setError, reload };
-}
-
 export function Projects({ go }: { go: (to: string) => void }) {
-  const { data, error, setError, reload } = useProject<Project[]>("/api/projects");
+  const { data, error, setError, reload } = useApi<Project[]>("/api/projects");
   const { reload: reloadTracker } = useTracker();
   async function create(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -40,7 +32,7 @@ export function Projects({ go }: { go: (to: string) => void }) {
         <input name="target_date" type="date" aria-label="Target date" className="narrow" />
         <button className="btn primary">Create project</button>
       </form>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {data?.length === 0 && <p className="muted">No projects yet. A project groups tickets toward one outcome, with milestones along the way.</p>}
       {!!data?.length && (
         <div className="table-wrap">
@@ -66,7 +58,7 @@ export function Projects({ go }: { go: (to: string) => void }) {
 }
 
 export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: string) => void; open: (n: number) => void; tick: unknown }) {
-  const { data: p, error, setError, reload } = useProject<Project>(`/api/projects/${id}`);
+  const { data: p, error, setError, reload } = useApi<Project>(`/api/projects/${id}`);
   const { tracker, reload: reloadTracker } = useTracker();
   const tickets = useTicketList(`project=${id}`, tick);
   const [confirming, setConfirming] = useState(false);
@@ -96,7 +88,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
     call(`/api/projects/${id}/milestones/order`, "PUT", { ids });
   };
 
-  if (!p) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!p) return <Loading error={error} />;
   return (
     <div className="page" key={p.id}>
       <input className="h-input" aria-label="Project name" defaultValue={p.name} maxLength={100} onBlur={(e) => e.target.value.trim() && e.target.value !== p.name && patch({ name: e.target.value })} />
@@ -117,7 +109,7 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
         <button className="btn danger" onClick={() => setConfirming(true)}>Delete project</button>
       </div>
       <textarea aria-label="Description" placeholder="What is this project for?" rows={3} defaultValue={p.description} onBlur={(e) => e.target.value !== p.description && patch({ description: e.target.value })} />
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <section aria-label="Progress" className="row">
         <Bar p={p.progress} /> <ByStatus p={p.progress} />
         {p.progress.points > 0 && <span className="muted">{p.progress.points_done}/{p.progress.points} points</span>}
@@ -145,13 +137,9 @@ export function ProjectPage({ id, go, open, tick }: { id: string; go: (to: strin
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
       {confirming && (
-        <Dialog title="Delete project?" onClose={() => setConfirming(false)}>
-          <p className="muted">{p.name} and its milestones are deleted. Its tickets stay, without a project.</p>
-          <div className="row end">
-            <button className="btn" onClick={() => setConfirming(false)}>Cancel</button>
-            <button className="btn danger" autoFocus onClick={() => call(`/api/projects/${id}`, "DELETE").then(() => go("/projects"))}>Delete</button>
-          </div>
-        </Dialog>
+        <Confirm title="Delete project?" onConfirm={() => call(`/api/projects/${id}`, "DELETE").then(() => go("/projects"))} onClose={() => setConfirming(false)}>
+          {p.name} and its milestones are deleted. Its tickets stay, without a project.
+        </Confirm>
       )}
     </div>
   );

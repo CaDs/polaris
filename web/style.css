@@ -32,7 +32,7 @@ p { margin: 0 0 8px; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .center { text-align: center; padding: 2rem 16px; }
 .pad { padding: 16px; }
-.error { color: var(--error); margin: 0; }
+.error { color: var(--error); margin: 0; white-space: pre-wrap; }
 .grow { flex: 1; }
 
 input, textarea, select, button { font: inherit; color: inherit; }
@@ -80,7 +80,7 @@ button.link:hover { text-decoration: underline; }
 }
 .card h1 { font-size: 16px; }
 .card label { margin: 0; }
-.card > button:not(.link) { padding: 7px 10px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; }
+.card > .btn { padding: 6px 10px; }
 @media (max-width: 420px) { .card { margin: 2rem 16px; } }
 
 /* shell */

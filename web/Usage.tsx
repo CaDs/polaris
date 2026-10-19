@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, cost, fmt, hitRate } from "./ui.tsx";
+import { Loading, api, cost, fmt, hitRate } from "./ui.tsx";
 
 type Row = { runs: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number };
 type Usage = {
@@ -42,7 +42,7 @@ export function UsagePage() {
   const [u, setU] = useState<Usage | null>(null);
   const [error, setError] = useState("");
   useEffect(() => void api<Usage>("/api/usage").then(setU, (e) => setError(e.message)), []);
-  if (!u) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!u) return <Loading error={error} />;
   const t = u.totals;
   const stats: [string, string][] = [
     ["Tokens in", fmt(t.tokens_in)], ["Tokens out", fmt(t.tokens_out)], ["Cached", fmt(t.tokens_cached)],

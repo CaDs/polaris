@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Transcript } from "./TicketView.tsx";
-import { Dialog, api, cost, fmt, type Run } from "./ui.tsx";
+import { Alert, Dialog, Loading, api, cost, fmt, when, type Run } from "./ui.tsx";
 
 // M6: the three self-improvement loops, all visible and reversible. Lessons apply to the next run at once (so Restore is
 // one click); a prompt version only applies once a human promotes it, and only when its eval beats the active one.
@@ -24,7 +24,6 @@ type Data = {
   evals: { cases: EvalCase[]; runs: EvalRun[] };
 };
 
-const when = (ms: number) => new Date(ms).toLocaleString();
 const score = (e: EvalRun) => (e.status === "done" ? `${e.passed}/${e.total}` : `running, ${e.results?.filter((r) => r.case_passed !== null).length ?? 0}/${e.case_ids.length} done`);
 
 export function Improvement() {
@@ -51,10 +50,10 @@ export function Improvement() {
     await load();
   };
 
-  if (!d) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!d) return <Loading error={error} />;
   return (
     <div className="improve">
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <Lessons data={d.lessons} act={act} />
       <Prompts data={d.prompts} runs={d.evals.runs} act={act} />
       <Evals data={d.evals} act={act} />

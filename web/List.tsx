@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { COLUMNS, StatusIcon, api, type Ticket } from "./ui.tsx";
+import { COLUMNS, Loading, StatusIcon, api, type Ticket } from "./ui.tsx";
 import { Avatar, cycleName, LabelChip, PRIORITIES, PRIORITY_ORDER, PriorityIcon } from "./tracker.tsx";
 
 export const GROUPS = ["status", "priority", "project", "assignee", "cycle", "label"] as const;
@@ -29,7 +29,7 @@ function buckets(tickets: Ticket[], group: Group): Bucket[] {
 
 // Dense Linear-style rows, grouped. Each row is one button (opens the ticket); the server's sort order is kept inside a group.
 export function List({ tickets, group, open }: { tickets: Ticket[] | null; group: Group; open: (t: Ticket) => void }) {
-  if (!tickets) return <p className="muted pad">Loading…</p>;
+  if (!tickets) return <Loading />;
   return (
     <div className="list">
       {buckets(tickets, group).map((b) => (

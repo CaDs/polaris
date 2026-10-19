@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent } from "react";
-import { api } from "./ui.tsx";
+import { Alert, api } from "./ui.tsx";
 
 // M11 tracker: shared types, the picker data (one GET /api/tracker), and the small pieces every tracker view uses.
 
@@ -99,7 +99,7 @@ export function LabelSettings() {
         <ColorSelect value="blue" label="New label color" />
         <button className="btn">Add label</button>
       </form>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
     </section>
   );
 }
