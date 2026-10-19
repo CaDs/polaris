@@ -90,11 +90,11 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   // Usage page. The Runs section is driven by a mocked /api/metrics, so its numbers are exact.
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-  const row = { cancelled: 0, stuck: 0, mean_turns_pct: null, tool_error_rate: null, mean_files_changed: null };
-  await page.route((u) => u.pathname === "/api/metrics", (r) => r.fulfill({ json: { days: [
-    { ...row, day: yesterday, model: "demo", runs: 1, passed: 1, failed: 0, mean_turns_pct: 60, tool_error_rate: 0.05, mean_files_changed: 4 },
-    { ...row, day: today, model: "demo", runs: 4, passed: 2, failed: 1, cancelled: 1, mean_turns_pct: 30, tool_error_rate: 0.1, mean_files_changed: 2 },
-    { ...row, day: today, model: "other-model", runs: 2, passed: 0, failed: 2, stuck: 2, mean_turns_pct: 100 },
+  const row = { cancelled: 0, stuck: 0, mean_files_changed: null };
+  await page.route((u) => u.pathname === "/api/metrics", (r) => r.fulfill({ json: { days: 14, rows: [
+    { ...row, day: yesterday, model: "demo", runs: 1, passed: 1, failed: 0, measured: 1, sum_turns_pct: 60, tool_calls: 20, tool_errors: 1, mean_files_changed: 4 },
+    { ...row, day: today, model: "demo", runs: 4, passed: 2, failed: 1, cancelled: 1, measured: 4, sum_turns_pct: 120, tool_calls: 40, tool_errors: 4, mean_files_changed: 2 },
+    { ...row, day: today, model: "other-model", runs: 2, passed: 0, failed: 2, stuck: 2, measured: 2, sum_turns_pct: 200, tool_calls: 0, tool_errors: 0 },
   ] } }));
   await page.getByRole("link", { name: "Usage" }).click();
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
@@ -113,7 +113,7 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   // Runs: per model pass rate, stuck, mean turns %, tool-error rate, mean files (weighted by runs); bars by status per day.
   const runs = page.getByRole("region", { name: "Runs" });
   await expect(runs.locator("tbody tr")).toHaveCount(2);
-  await expect(runs.locator("tbody tr").nth(0).locator("td")).toHaveText(["demo", "5", "60%", "0", "36%", "9.0%", "2.4"]);
+  await expect(runs.locator("tbody tr").nth(0).locator("td")).toHaveText(["demo", "5", "75%", "0", "36%", "8.3%", "2.4"]);
   await expect(runs.locator("tbody tr").nth(1).locator("td")).toHaveText(["other-model", "2", "0%", "2", "100%", "—", "—"]);
   const bars = runs.getByRole("img", { name: "Runs per day by status, last 14 days" });
   await expect(bars.locator("> div")).toHaveCount(14);

@@ -38,34 +38,30 @@ function Table({ label, first, rows }: { label: string; first: string; rows: { k
   );
 }
 
-// GET /api/metrics: one row per UTC day × model. stuck is a subset of failed; tool_error_rate is 0–1, mean_turns_pct 0–100.
-type MetricsDay = {
-  day: string; model: string; runs: number; passed: number; failed: number; cancelled: number; stuck: number;
-  mean_turns_pct: number | null; tool_error_rate: number | null; mean_files_changed: number | null;
+// GET /api/metrics: one row per UTC day × model. stuck is a subset of failed; measured = runs with a run_metrics event;
+// the sums let the table aggregate days exactly.
+type MetricsRow = {
+  day: string; model: string; runs: number; passed: number; failed: number; cancelled: number; stuck: number; measured: number;
+  sum_turns_pct: number; tool_calls: number; tool_errors: number; mean_files_changed: number | null;
 };
-type Measure = "mean_turns_pct" | "tool_error_rate" | "mean_files_changed";
-// ponytail: a mean of daily means weighted by runs; exact if the server returns sums instead
-function mean(rows: MetricsDay[], k: Measure) {
-  const w = rows.filter((r) => r[k] !== null);
-  const n = w.reduce((a, r) => a + r.runs, 0);
-  return n ? w.reduce((a, r) => a + r[k]! * r.runs, 0) / n : null;
-}
-const sum = (rows: MetricsDay[], k: "runs" | "passed" | "failed" | "cancelled" | "stuck") => rows.reduce((a, r) => a + r[k], 0);
+type Count = "runs" | "passed" | "failed" | "cancelled" | "stuck" | "measured" | "sum_turns_pct" | "tool_calls" | "tool_errors";
+const sum = (rows: MetricsRow[], k: Count) => rows.reduce((a, r) => a + r[k], 0);
+const ratio = (a: number, b: number) => (b ? a / b : null);
 const pctText = (n: number | null, digits = 0) => (n === null ? "—" : `${n.toFixed(digits)}%`);
 const STATUSES = ["passed", "failed", "stuck", "cancelled"] as const;
 
 // Runs by status per day (stacked bars, failed excludes stuck), then quality per model.
 function Runs() {
-  const { data, error } = useApi<{ days: MetricsDay[] }>("/api/metrics?days=14");
+  const { data, error } = useApi<{ rows: MetricsRow[] }>("/api/metrics?days=14");
   if (!data) return <section aria-label="Runs"><h3>Runs</h3><Loading error={error} /></section>;
   const days = Array.from({ length: 14 }, (_, i) => new Date(Date.now() - (13 - i) * 86_400_000).toISOString().slice(0, 10));
   const perDay = days.map((day) => {
-    const rows = data.days.filter((d) => d.day === day);
+    const rows = data.rows.filter((d) => d.day === day);
     const stuck = sum(rows, "stuck");
     return { day, passed: sum(rows, "passed"), failed: sum(rows, "failed") - stuck, stuck, cancelled: sum(rows, "cancelled") };
   });
   const max = Math.max(1, ...perDay.map((d) => d.passed + d.failed + d.stuck + d.cancelled));
-  const models = [...Map.groupBy(data.days, (d) => d.model)];
+  const models = [...Map.groupBy(data.rows, (d) => d.model)];
   return (
     <section aria-label="Runs">
       <h3>Runs <span className="muted">last 14 days</span></h3>
@@ -86,12 +82,15 @@ function Runs() {
           <tbody>
             {models.map(([model, rows]) => {
               const runs = sum(rows, "runs");
-              const files = mean(rows, "mean_files_changed");
-              const errors = mean(rows, "tool_error_rate");
+              const withFiles = rows.filter((r) => r.mean_files_changed !== null);
+              const files = ratio(withFiles.reduce((a, r) => a + r.mean_files_changed! * r.measured, 0), sum(withFiles, "measured"));
+              const errors = ratio(sum(rows, "tool_errors"), sum(rows, "tool_calls"));
+              const turns = ratio(sum(rows, "sum_turns_pct"), sum(rows, "measured"));
+              const pass = ratio(100 * sum(rows, "passed"), sum(rows, "passed") + sum(rows, "failed")); // cancelled runs are neither
               return (
                 <tr key={model}>
-                  <td className="mono">{model}</td><td>{runs}</td><td>{pctText(runs ? (100 * sum(rows, "passed")) / runs : null)}</td><td>{sum(rows, "stuck")}</td>
-                  <td>{pctText(mean(rows, "mean_turns_pct"))}</td><td>{pctText(errors === null ? null : 100 * errors, 1)}</td><td>{files === null ? "—" : files.toFixed(1)}</td>
+                  <td className="mono">{model}</td><td>{runs}</td><td>{pctText(pass)}</td><td>{sum(rows, "stuck")}</td>
+                  <td>{pctText(turns)}</td><td>{pctText(errors === null ? null : 100 * errors, 1)}</td><td>{files === null ? "—" : files.toFixed(1)}</td>
                 </tr>
               );
             })}
