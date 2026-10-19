@@ -94,7 +94,9 @@ function reviewScript(task: string) {
   ], { input: 60, output: 10, cache_read: 5, cache_write: 0 }).provider;
 }
 
-function fixScript() {
+function fixScript(task: string) {
+  // REVIEW-FIX-STALL: the review fix round never finishes (it runs out of turns), like GATE-FIX-STALL.
+  if (task.slice(task.lastIndexOf("# Task")).includes("REVIEW-FIX-STALL")) return fakeProvider(Array.from({ length: 130 }, (_, i) => [use(`s${i}`, "shell", { command: "true" })]), { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
   return fakeProvider([
     [say("Fixing the review findings."), use("f1", "edit_file", { path: "fixed.txt", old_string: "", new_string: "fixed\n" })],
     [say("Created fixed.txt.")],
@@ -239,7 +241,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
       const gateFix = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Tests failed"));
-      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript() : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
+      scripted ??= req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript(task) : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delayMs);
         req.signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });
