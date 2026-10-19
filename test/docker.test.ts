@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -33,6 +33,16 @@ test("container per run: /work mount, read-only protected dirs, in-container kil
     assert.match(r.stdout, /^\/work\nfrom host\n/);
     assert.match(r.stdout, /git\n.*rg/s);
     assert.equal(readFileSync(join(wt, "b.txt"), "utf8"), "made\n");
+    assert.equal(statSync(join(wt, "b.txt")).uid, process.getuid!()); // the host user's, not root's (Docker Desktop maps it)
+
+    // Non-root, no capabilities, writable HOME and npm cache: a setup command like `npm ci` works.
+    const pkg = { name: "t", version: "1.0.0" };
+    writeFileSync(join(wt, "package.json"), JSON.stringify(pkg));
+    writeFileSync(join(wt, "package-lock.json"), JSON.stringify({ ...pkg, lockfileVersion: 3, requires: true, packages: { "": pkg } }));
+    const user = await run("id -u; grep CapEff /proc/self/status; npm --version && touch ~/.w ~/.npm/.w && npm ci --no-audit --no-fund");
+    assert.equal(user.code, 0, user.stderr);
+    assert.doesNotMatch(user.stdout, /^0\n/);
+    assert.match(user.stdout, /^CapEff:\s+0{16}$/m);
 
     const ro = await run("echo pwned > tests/t.txt");
     assert.notEqual(ro.code, 0);

@@ -20,16 +20,31 @@ const dockerDir = fileURLToPath(new URL("../docker/", import.meta.url));
 
 export type Sandbox = { name: string; exec: Exec; close: () => Promise<void> };
 
+// Commands run as this uid:gid. On Linux the host user's, so files the agent creates in the bind-mounted worktree stay
+// theirs (the image is built with the same ids). Docker Desktop (macOS, Windows) maps bind-mount ownership to the host
+// user itself: the image's default user.
+export const SANDBOX_USER = process.platform === "linux" ? `${process.getuid!()}:${process.getgid!()}` : "1000:1000";
+export const IMAGE_VERSION = 2; // bump with docker/sandbox.Dockerfile: an image labelled older (or unlabelled) is rebuilt
+const NPM_CACHE = "/home/polaris/.npm";
+
 let building: Promise<unknown> | undefined;
-// Builds the default image from docker/sandbox.Dockerfile the first time it is missing. Custom images must exist.
+// Builds the default image from docker/sandbox.Dockerfile when it is missing or its polaris.image.version label is older
+// than IMAGE_VERSION, then makes the npm cache volume the sandbox user's (one an older image used is root-owned).
+// Custom images must exist.
 export function ensureImage(image: string) {
   if (image !== SANDBOX_IMAGE) return Promise.resolve();
-  building ??= execFileP("docker", ["image", "inspect", image]).catch(() =>
-    execFileP("docker", ["build", "-q", "-t", image, "-f", join(dockerDir, "sandbox.Dockerfile"), dockerDir], { maxBuffer: 50e6 }).catch((e) => {
+  const [uid, gid] = SANDBOX_USER.split(":");
+  building ??= execFileP("docker", ["image", "inspect", "-f", '{{index .Config.Labels "polaris.image.version"}}', image])
+    .then(({ stdout }) => Number(stdout.trim()) >= IMAGE_VERSION || Promise.reject(new Error("outdated")))
+    .catch(() =>
+      execFileP("docker", ["build", "-q", "-t", image, "--label", `polaris.image.version=${IMAGE_VERSION}`, "--build-arg", `UID=${uid}`,
+        "--build-arg", `GID=${gid}`, "-f", join(dockerDir, "sandbox.Dockerfile"), dockerDir], { maxBuffer: 50e6 }))
+    .then(() => execFileP("docker", ["run", "--rm", "--user", "root", "-v", `polaris-npm-cache:${NPM_CACHE}`, image, "sh", "-c",
+      `[ "$(stat -c %u:%g ${NPM_CACHE})" = ${SANDBOX_USER} ] || chown -R ${SANDBOX_USER} ${NPM_CACHE}`]))
+    .catch((e) => {
       building = undefined;
       throw new Error(`building ${image} failed: ${truncate(String(e.stderr || e.message), 2000, "tail")}`);
-    }),
-  );
+    });
   return building;
 }
 
@@ -60,11 +75,12 @@ export async function openSandbox(runId: string, worktree: string, protectedPath
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
   const gitDir = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => "");
   if (gitDir) ro.push("-v", `${gitDir}:${gitDir}:ro`);
-  // ponytail: runs as root; on Linux hosts files it creates in the worktree are root-owned. Add --user when that bites.
+  // Not root, no capabilities, no privilege gain through setuid binaries, bounded process count.
   await execFileP("docker", [
     "run", "-d", "--name", name, "--label", "polaris=1", "--label", `polaris.data=${dataDir()}`,
-    "-v", `${worktree}:/work`, ...ro, "-v", "polaris-npm-cache:/root/.npm",
-    "-w", "/work", "--cpus", "2", "--memory", "2g", image, "sleep", "infinity",
+    "-v", `${worktree}:/work`, ...ro, "-v", `polaris-npm-cache:${NPM_CACHE}`, "-w", "/work",
+    "--user", SANDBOX_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
+    "--cpus", "2", "--memory", "2g", image, "sleep", "infinity",
   ]);
   return { name, exec: dockerExec(name), close: () => removeContainer(name) };
 }
