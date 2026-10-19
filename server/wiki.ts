@@ -311,7 +311,7 @@ export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
     [
       "# Environment",
       `- Repository: ${o.repo}; \`code/\` is a read-only checkout at commit ${o.sha} (read_file, search)`,
-      "- `wiki/` is the wiki's working copy: read it and edit it with edit_file (nothing else is writable). Read `wiki/SCHEMA.md` first",
+      "- `wiki/` is the wiki's working copy: read it and change it with edit_file and delete_file (nothing else is writable). Read `wiki/SCHEMA.md` first",
       `- Commit for \`verified\`: ${o.sha}; today is ${today()}`,
     ].join("\n"),
   ];

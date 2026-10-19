@@ -111,7 +111,7 @@ export function seriesDigest(runId: string, final?: Final, note?: string) {
 export const REFLECT_SYSTEM = `You maintain LESSONS: a short document of what a coding agent has learned about one repository and the harness it runs in (sandbox, test gate, tools). After each finished ticket you get the current lessons and a compact digest of the run.
 
 Reply with the full updated lessons document and nothing else. Rules:
-- Short imperative bullets about THIS repository and THIS harness ("Run npm ci before the tests", "The sandbox has no network", "Read tests/ first"). No prose, no headings needed.
+- Short imperative bullets about THIS repository and THIS harness ("Run one test file with node --test test/<name>.test.ts", "Read tests/ first"). Facts the first message already states (test command, read-only paths, budget, git) need no bullet. No prose, no headings needed.
 - Merge new insights into the existing bullets, deduplicate, and remove bullets the digest shows to be wrong.
 - Keep only what will help future tickets; skip one-off details of this ticket.
 - The digest is followed by <tools>, the exact tool names the agent has. Name tools exactly as listed there, and never mention a tool that is not listed (do not invent tools or call a missing capability a missing tool).

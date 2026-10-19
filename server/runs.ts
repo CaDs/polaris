@@ -125,13 +125,19 @@ export async function runWindow(stored: ReturnType<typeof providerById>, model: 
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
 // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
 // lessons, the project wiki's index (M10) and feedback (see below).
-function taskFor(t: { title: string; spec: string; header?: string }, info: { sandbox: string; repo: string; base: string; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string }, feedback: string[]) {
+// The environment block is the one place for these facts; worker.md only points at it.
+function taskFor(t: { title: string; spec: string; header?: string }, info: {
+  sandbox: string; repo: string; base: string; test: string; protectedPaths: string[]; budget: { turns: number; minutes: number }; skills: Skill[]; lessons?: string; wiki?: string;
+}, feedback: string[]) {
   const parts = [
     [
       "# Environment",
-      `- Sandbox: ${info.sandbox || "unknown"}; your working directory is the repository root`,
+      `- Sandbox: ${info.sandbox || "unknown"}`,
       `- Repository: ${info.repo}, branched from ${info.base}. It is at /work in the sandbox, which is also every shell command's working directory; tool paths are relative to it (absolute /work/... is accepted too)`,
+      `- Test command: ${info.test.trim() ? `\`${info.test}\`. The harness runs it after you finish and it must exit 0` : "none (the harness runs no tests)"}`,
       ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
+      "- git is read-only: status, diff and log work; commit and other writes fail. The harness commits your change after the tests pass",
+      `- Budget: ${info.budget.turns} turns (a fix round after failed tests or a review gets as many again) and ${info.budget.minutes} minutes for this attempt; a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
   ];
   if (info.skills.length) parts.push(skillsText(info.skills));
@@ -519,16 +525,17 @@ async function execute(runId: string) {
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
+    // Turns count per agent call (initial run, each fix round); the minutes run from the attempt's start, across all of them.
+    const limits = ev || !s ? EVAL_WORKER : s;
     const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
-      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, protectedPaths, skills, lessons: lessons?.body, wiki,
+      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
+      budget: { turns: limits.max_turns, minutes: limits.max_minutes }, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
     const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
       onEvent: (e: AgentEvent) => e.type !== "run_finished" && log(e), // this pipeline writes the final run_finished
     };
-    // Turns count per agent call (initial run, each fix round); the minutes run from the attempt's start, across all of them.
-    const limits = ev || !s ? EVAL_WORKER : s;
     const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
     let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
     ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason } = a);
@@ -906,7 +913,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
           log({ type: "error", payload: { kind: "InvalidArguments", message: `${res.reason}:\n${r.problems.join("\n")}` } });
           return;
         }
-        const resume = { messages: a.messages, message: `# Wiki check failed\n\nThe harness found these problems in your wiki changes:\n${r.problems.map((p) => `- ${p}`).join("\n")}\n\nFix them with edit_file, then reply with a short summary. The check runs again.` };
+        const resume = { messages: a.messages, message: `# Wiki check failed\n\nThe harness found these problems in your wiki changes:\n${r.problems.map((p) => `- ${p}`).join("\n")}\n\nFix them with edit_file or delete_file, then reply with a short summary. The check runs again.` };
         a = await runAgent({ ...common, resume, budget: WIKI_FIX_BUDGET });
       }
     });
