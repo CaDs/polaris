@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // SPLIT-ME: the demo worker also writes tests/broken.txt, so every attempt fails the gate and the harness splits the ticket.
 // The "Split:" epic's demo planner creates part1.txt and part2.txt, each with its own test command; the workspace test
@@ -11,26 +11,17 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
   const status = page.getByLabel("Status");
   const transcript = page.getByRole("region", { name: "Transcript" });
 
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f part1.txt && test -f part2.txt");
-  await page.getByLabel("Auto-approve child tickets").check();
-  await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
-  await expect(page.getByLabel("Child size hint")).toHaveValue("at most 3 files and about 60 changed lines, finishable in 20 agent turns");
-  await expect(page.getByLabel("Triage model")).toHaveValue("");
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f part1.txt && test -f part2.txt", async () => {
+    await page.getByLabel("Auto-approve child tickets").check();
+    await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
+    await expect(page.getByLabel("Child size hint")).toHaveValue("at most 3 files and about 60 changed lines, finishable in 20 agent turns");
+    await expect(page.getByLabel("Triage model")).toHaveValue("");
+  });
   await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
 
   await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Title").fill("Big change");
-  await dialog.getByLabel("Spec").fill("Write both parts. SPLIT-ME");
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(dialog).toBeHidden();
-  await page.getByRole("button", { name: /Big change/ }).click();
+  await newTicket(page, "Big change", "Write both parts. SPLIT-ME");
+  await openTicket(page, "Big change");
   await page.getByRole("button", { name: "Run agent" }).click();
 
   // Three attempts fail the gate (protected path), then the ticket is replaced by a "Split:" epic.

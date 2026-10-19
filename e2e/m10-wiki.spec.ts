@@ -1,33 +1,23 @@
 import { test, expect } from "@playwright/test";
-import { signUp, tempRepo } from "./helpers.ts";
+import { newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M10: approving a ticket ingests it into the wiki; the next run's first message carries the index", async ({ page }) => {
   test.setTimeout(240_000);
   const repo = tempRepo();
   await signUp(page, "Wikis");
 
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f notes.txt");
-  await expect(page.getByLabel("Keep a project wiki")).toBeChecked();
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f notes.txt", () => expect(page.getByLabel("Keep a project wiki")).toBeChecked());
 
-  const newTicket = async (title: string, spec: string) => {
+  // Creates the ticket from the board and runs it to review.
+  const runTicket = async (title: string, spec: string) => {
     await page.getByRole("link", { name: "Board" }).click();
-    await page.getByRole("button", { name: "New ticket" }).click();
-    const dialog = page.getByRole("dialog");
-    await dialog.getByLabel("Title").fill(title);
-    await dialog.getByLabel("Spec").fill(spec);
-    await dialog.getByRole("button", { name: "Create ticket" }).click();
-    await expect(page.getByRole("dialog")).toBeHidden();
-    await page.getByRole("button", { name: new RegExp(title) }).click();
+    await newTicket(page, title, spec);
+    await openTicket(page, title);
     await page.getByRole("button", { name: "Run agent" }).click();
     await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 90_000 });
   };
 
-  await newTicket("Add notes", "WIKI-NOTES");
+  await runTicket("Add notes", "WIKI-NOTES");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("done");
   await expect(page.getByRole("button", { name: "Show wiki run" })).toBeVisible({ timeout: 60_000 }); // listed with the ticket's runs
@@ -62,7 +52,7 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   await expect(page.getByRole("status").filter({ hasText: "Lint passed" })).toBeVisible();
 
   // A second ticket: its first message has the "Project wiki" section with the index.
-  await newTicket("Second change", "plain");
+  await runTicket("Second change", "plain");
   await page.getByRole("region", { name: "Transcript" }).getByText("First message").first().click();
   const first = page.getByRole("region", { name: "Transcript" }).locator("pre").first();
   await expect(first).toContainText("# Project wiki");

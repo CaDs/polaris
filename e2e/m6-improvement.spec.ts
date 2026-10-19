@@ -1,30 +1,15 @@
-import { test, expect, type Page } from "@playwright/test";
-import { git, signUp, tempRepo } from "./helpers.ts";
-
-async function newTicket(page: Page, title: string, spec: string) {
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Title").fill(title);
-  await dialog.getByLabel("Spec").fill(spec);
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(dialog).toBeHidden();
-  await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: new RegExp(title) }).click();
-}
+import { test, expect } from "@playwright/test";
+import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M6: reflection → lessons, eval case from an approved ticket, eval-gated prompt promotion", async ({ page }) => {
   test.setTimeout(240_000);
   const repo = tempRepo();
   await signUp(page, "Improver");
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f ok.txt");
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f ok.txt");
 
   // Attempt 1 fails the gate (no ok.txt), the retry creates it and passes; approve. Its base commit has no ok.txt.
   await newTicket(page, "Make ok file", "create ok.txt");
+  await openTicket(page, "Make ok file");
   const status = page.getByLabel("Status");
   const transcript = page.getByRole("region", { name: "Transcript" });
   await page.getByRole("button", { name: "Run agent" }).click();
@@ -88,6 +73,7 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   // The source ticket was never touched; the next run uses prompt v2.
   expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   await newTicket(page, "After promotion", "anything");
+  await openTicket(page, "After promotion");
   await page.getByRole("button", { name: "Run agent" }).click();
   await expect(transcript).toContainText("prompt v2");
   await expect(transcript).toContainText("the system prompt says so", { timeout: 60_000 });

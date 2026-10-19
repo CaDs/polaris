@@ -1,27 +1,13 @@
 import { test, expect } from "@playwright/test";
-import { tempRepo } from "./helpers.ts";
+import { newTicket, putSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "No account? Create one" }).click();
-  await page.getByLabel("Name").fill("Me");
-  await page.getByLabel("Email").fill(`m2-${Date.now()}@x.dev`);
-  await page.getByLabel("Password").fill("password-123");
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByRole("heading", { name: "Create a workspace" })).toBeVisible();
-  await page.getByLabel("Name").fill("Homestead");
-  await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.locator("header strong")).toHaveText("Homestead");
+  await signUp(page, "Homestead");
   // Since M3 runs need a repository; the gate checks the demo agent's notes.txt.
-  const saved = await page.request.put("/api/settings", { data: { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false } });
-  expect(saved.ok()).toBeTruthy();
+  await putSettings(page, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false });
 
   // Create one ticket with the button, one with the C shortcut; Esc closes the dialog.
-  await page.getByRole("button", { name: "New ticket" }).click();
-  await page.getByLabel("Title").fill("First ticket");
-  await page.getByLabel("Spec").fill("write a notes file");
-  await page.getByRole("button", { name: "Create ticket" }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+  await newTicket(page, "First ticket", "write a notes file");
 
   await page.keyboard.press("c");
   await expect(page.getByRole("dialog")).toBeVisible();

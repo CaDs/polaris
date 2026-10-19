@@ -1,7 +1,7 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { signUp, tempRepo } from "./helpers.ts";
+import { addProvider, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // A tiny Anthropic-compatible (and Ollama /api/tags) server: a tool call first, then a final answer.
 const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
@@ -41,27 +41,11 @@ test.beforeAll(async () => {
 });
 test.afterAll(() => mock.close());
 
-async function addProvider(page: Page, f: { name: string; kind: string; baseUrl?: string; apiKey?: string }) {
-  await page.getByRole("button", { name: "Add provider" }).click();
-  const d = page.getByRole("dialog");
-  await d.getByLabel("Name").fill(f.name);
-  await d.getByLabel("Kind").selectOption(f.kind);
-  if (f.baseUrl) await d.getByLabel("Base URL").fill(f.baseUrl);
-  if (f.apiKey) await d.locator("input[name=api_key]").fill(f.apiKey);
-  await d.getByRole("button", { name: "Add provider" }).click();
-  await expect(d).toBeHidden();
-}
-
 test("M4: providers, tool-calling test, masked keys, defaults, model picker and retry-with", async ({ page }) => {
   test.setTimeout(180_000);
   const repo = tempRepo();
   await signUp(page, "Provider");
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("true");
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "true");
 
   const providers = page.getByRole("region", { name: "Providers" });
   const row = (name: string) => providers.getByRole("listitem").filter({ hasText: name });
@@ -91,11 +75,8 @@ test("M4: providers, tool-calling test, masked keys, defaults, model picker and 
 
   // A ticket picks the mock provider and runs on it.
   await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: "New ticket" }).click();
-  await page.getByRole("dialog").getByLabel("Title").fill("Say hi");
-  await page.getByRole("dialog").getByLabel("Spec").fill("run echo");
-  await page.getByRole("dialog").getByRole("button", { name: "Create ticket" }).click();
-  await page.getByRole("button", { name: /Say hi/ }).click();
+  await newTicket(page, "Say hi", "run echo");
+  await openTicket(page, "Say hi");
   await page.getByLabel("Provider", { exact: true }).selectOption({ label: "Mock Ollama" });
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("mock-a");
   await page.getByRole("button", { name: "Run agent" }).click();

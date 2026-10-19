@@ -1,28 +1,18 @@
 import { test, expect } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { git, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M5: spilled output, compaction, skills, cache hit rate and the Usage page", async ({ page }) => {
   test.setTimeout(180_000);
-  const repo = tempRepo();
   // A committed skill the run should be offered.
-  mkdirSync(join(repo, ".polaris/skills"), { recursive: true });
-  writeFileSync(join(repo, ".polaris/skills/lint.md"), "---\nname: lint\ndescription: How to run the linter\n---\nRun npm run lint.\n");
-  git(repo, "add", "-A");
-  git(repo, "-c", "user.name=e2e", "-c", "user.email=e2e@x.dev", "commit", "-q", "-m", "add skill");
+  const repo = tempRepo({ ".polaris/skills/lint.md": "---\nname: lint\ndescription: How to run the linter\n---\nRun npm run lint.\n" });
   await signUp(page, "Context");
 
   // Settings: repo, a gate that needs the demo agent's notes.txt, and a tiny compaction cap.
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f notes.txt");
-  await expect(page.getByLabel("Compact at (tokens)")).toHaveValue("150000");
-  await page.getByLabel("Compact at (tokens)").fill("1000");
-  await page.getByLabel("Model review before human review").uncheck(); // this spec counts the worker's tokens
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f notes.txt", async () => {
+    await expect(page.getByLabel("Compact at (tokens)")).toHaveValue("150000");
+    await page.getByLabel("Compact at (tokens)").fill("1000");
+    await page.getByLabel("Model review before human review").uncheck(); // this spec counts the worker's tokens
+  });
   await expect(page.getByLabel("Compact at (tokens)")).toHaveValue("1000");
 
   // Provider dialog: context window with a per-kind default.
@@ -35,13 +25,8 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await dialog.getByRole("button", { name: "Cancel" }).click();
 
   // A session that prints 4000 lines and then crosses the compaction threshold.
-  await page.getByRole("button", { name: "New ticket" }).click();
-  await dialog.getByLabel("Title").fill("Long session");
-  await dialog.getByLabel("Spec").fill("please compact along the way");
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(dialog).toBeHidden();
-  await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: /Long session/ }).click();
+  await newTicket(page, "Long session", "please compact along the way");
+  await openTicket(page, "Long session");
   await page.getByRole("button", { name: "Run agent" }).click();
 
   const transcript = page.getByRole("region", { name: "Transcript" });

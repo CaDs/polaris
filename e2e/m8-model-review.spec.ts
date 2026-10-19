@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M8: the model review asks for a fix, the worker fixes it in the same run, the second review approves", async ({ page }) => {
   test.setTimeout(240_000);
@@ -7,23 +7,12 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
   await signUp(page, "Review");
   const transcript = page.getByRole("region", { name: "Transcript" });
 
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f notes.txt");
-  await expect(page.getByLabel("Model review before human review")).toBeChecked();
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f notes.txt", () => expect(page.getByLabel("Model review before human review")).toBeChecked());
   await expect(page.getByLabel("Model review before human review")).toBeChecked();
 
   await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Title").fill("Reviewed change");
-  await dialog.getByLabel("Spec").fill("REVIEW-ONCE: write the notes");
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
-  await page.getByRole("button", { name: /Reviewed change/ }).click();
+  await newTicket(page, "Reviewed change", "REVIEW-ONCE: write the notes");
+  await openTicket(page, "Reviewed change");
   await page.getByRole("button", { name: "Run agent" }).click();
 
   await expect(transcript).toContainText("Model review requested changes", { timeout: 60_000 });

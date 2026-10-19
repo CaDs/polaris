@@ -1,21 +1,17 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signUp } from "./helpers.ts";
+import { newTicket as create, signUp } from "./helpers.ts";
 
 // The tracker without agents: labels, a project with a milestone, a current cycle, tickets with properties, filter chips that
 // live in the URL, "/" search and key jump, list grouping, the properties sidebar with shortcuts, the command palette, a saved
 // view, and both themes (screenshots attached to the report).
-async function newTicket(page: Page, title: string, o: { priority?: string; labels?: string[]; project?: string; cycle?: boolean; due?: string } = {}) {
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const d = page.getByRole("dialog");
-  await d.getByLabel("Title").fill(title);
-  if (o.priority) await d.getByLabel("Priority").selectOption({ label: o.priority });
-  for (const l of o.labels ?? []) await d.getByRole("checkbox", { name: l }).check();
-  if (o.project) await d.getByLabel("Project").selectOption({ label: o.project });
-  if (o.cycle) await d.getByLabel("Cycle").selectOption({ label: "Cycle 1 (current)" });
-  if (o.due) await d.getByLabel("Due date").fill(o.due);
-  await d.getByRole("button", { name: "Create ticket" }).click();
-  await expect(d).toBeHidden();
-}
+const newTicket = (page: Page, title: string, o: { priority?: string; labels?: string[]; project?: string; cycle?: boolean; due?: string } = {}) =>
+  create(page, title, undefined, async (d) => {
+    if (o.priority) await d.getByLabel("Priority").selectOption({ label: o.priority });
+    for (const l of o.labels ?? []) await d.getByRole("checkbox", { name: l }).check();
+    if (o.project) await d.getByLabel("Project").selectOption({ label: o.project });
+    if (o.cycle) await d.getByLabel("Cycle").selectOption({ label: "Cycle 1 (current)" });
+    if (o.due) await d.getByLabel("Due date").fill(o.due);
+  });
 
 async function addFilter(page: Page, field: string, option: string) {
   await page.getByRole("button", { name: "+ Filter" }).click();

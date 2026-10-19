@@ -1,23 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { git, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openTicket, putSettings, signUp, tempRepo } from "./helpers.ts";
 
 const column = (page: Page, name: string) => page.getByRole("region", { name, exact: true });
-
-async function newTicket(page: Page, title: string, spec: string) {
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Title").fill(title);
-  await dialog.getByLabel("Spec").fill(spec);
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
-}
-
-async function openTicket(page: Page, title: string) {
-  await page.getByRole("link", { name: "Board" }).click();
-  await page.getByRole("button", { name: new RegExp(title) }).click();
-}
 
 test("M3: settings, queue, docker sandbox, test gate retry, approve and reject", async ({ page }) => {
   test.setTimeout(240_000);
@@ -109,18 +95,11 @@ test("M3: a failed gate is fixed in the same run; the ticket's own test command 
   test.setTimeout(120_000);
   const repo = tempRepo();
   await signUp(page, "Gatefix");
-  const saved = await page.request.put("/api/settings", { data: { repo_path: repo, setup_command: "", test_command: "test -f never.txt", model_review: false } });
-  expect(saved.ok()).toBe(true);
+  await putSettings(page, { repo_path: repo, setup_command: "", test_command: "test -f never.txt", model_review: false });
   const transcript = page.getByRole("region", { name: "Transcript" });
 
   // The New ticket dialog takes an optional test command; the ticket view shows it and saves changes like the spec.
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Title").fill("Fix in run");
-  await dialog.getByLabel("Spec").fill("GATE-FIX-ONCE");
-  await dialog.getByLabel("Test command (optional)").fill("test -f ok.txt");
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+  await newTicket(page, "Fix in run", "GATE-FIX-ONCE", (d) => d.getByLabel("Test command (optional)").fill("test -f ok.txt"));
   await openTicket(page, "Fix in run");
   const command = page.getByLabel("Test command", { exact: true });
   await expect(command).toHaveValue("test -f ok.txt");

@@ -1,29 +1,19 @@
 import { test, expect, type Page } from "@playwright/test";
-import { git, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // The demo planner creates "Create a.txt" and "Create b.txt" (after a.txt); the demo worker creates the file its ticket
 // names and hands off. The gate passes once either file exists; children run in the real Docker sandbox.
 async function setup(page: Page, workspace: string, autoApprove: boolean) {
   const repo = tempRepo();
   await signUp(page, workspace);
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f a.txt || test -f b.txt");
-  if (autoApprove) await page.getByLabel("Auto-approve child tickets").check();
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await saveSettings(page, repo, "test -f a.txt || test -f b.txt", async () => {
+    if (autoApprove) await page.getByLabel("Auto-approve child tickets").check();
+  });
   return repo;
 }
 
 async function newEpic(page: Page, title: string, spec: string) {
-  await page.getByRole("button", { name: "New ticket" }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByRole("radio", { name: "Epic" }).check();
-  await dialog.getByLabel("Title").fill(title);
-  await dialog.getByLabel("Spec").fill(spec);
-  await dialog.getByRole("button", { name: "Create ticket" }).click();
-  await expect(dialog).toBeHidden();
+  await newTicket(page, title, spec, (d) => d.getByRole("radio", { name: "Epic" }).check());
   await page.getByRole("link", { name: "Board" }).click();
   const card = page.getByRole("button", { name: new RegExp(title) });
   await expect(card).toContainText("Epic");
