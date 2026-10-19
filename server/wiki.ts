@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { resolveIn } from "./agent/tools.ts";
+import { resolveIn, truncate } from "./agent/tools.ts";
 import { AgentError } from "./agent/types.ts";
 import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
@@ -302,7 +302,6 @@ export function editPage(ws: string, path: string, body: string, email: string, 
 // --- maintainer tasks (the first user message of a wiki run) ---
 
 export const MAX_DIFF = 15_000;
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n[… truncated at ${n} chars]` : s);
 
 export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
   repo: string; sha: string; index: string;
@@ -322,8 +321,8 @@ export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
       `# Task: ingest an approved change\n\nThe change below was reviewed, merged (merge commit ${o.sha}) and is part of \`code/\`. Update the wiki for it.`,
       `# Ticket\n\n${t.key} ${t.title}${t.spec ? `\n\n${t.spec}` : ""}`,
       `# Files changed\n\n${o.files!.join("\n") || "(none)"}`,
-      `# Merged diff\n\n\`\`\`diff\n${clip(o.diff ?? "", MAX_DIFF)}\n\`\`\``,
-      `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? clip(o.reply.trim(), 4000) : "(none)"}`,
+      `# Merged diff\n\n\`\`\`diff\n${truncate(o.diff ?? "", MAX_DIFF, "head")}\n\`\`\``,
+      `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? truncate(o.reply.trim(), 4000, "head") : "(none)"}`,
     );
   } else if (op === "bootstrap")
     parts.push("# Task: build the wiki\n\nWrite `overview.md` (architecture map), a `modules/` page for each main part, `howto/` pages for common changes (from the README, AGENTS.md or CLAUDE.md if present, and from the code) and `gotchas.md`. Pages that already exist: improve them rather than duplicating.");

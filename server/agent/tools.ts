@@ -17,10 +17,12 @@ const MAX_CAPTURE = 20_000_000; // hard cap per stream on pathological output (i
 export const SPILL_AT = 8_000;
 const SPILL_TAIL = 2_000;
 
-export function truncate(s: string, max = MAX_OUTPUT) {
+// s cut to max chars around a marker line: its head and tail halves, or only its head or tail (keep). toWellFormed: a cut
+// by UTF-16 unit can leave half of a surrogate pair (emoji), which providers reject.
+export function truncate(s: string, max = MAX_OUTPUT, keep: "both" | "head" | "tail" = "both", marker = `[... ${s.length - max} chars truncated ...]`) {
   if (s.length <= max) return s;
-  const half = max / 2;
-  return `${s.slice(0, half)}\n[... ${s.length - max} chars truncated ...]\n${s.slice(-half)}`;
+  const cut = keep === "head" ? `${s.slice(0, max)}\n${marker}` : keep === "tail" ? `${marker}\n${s.slice(-max)}` : `${s.slice(0, max / 2)}\n${marker}\n${s.slice(-max / 2)}`;
+  return cut.toWellFormed();
 }
 
 // A result longer than SPILL_AT is written in full to .polaris/outputs/<turn>-<tool>-<id>.txt in the run root (visible as

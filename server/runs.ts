@@ -7,7 +7,7 @@ import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { runAgent } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
-import { parseProtected, tools, toolsFor, wikiTools, type ExecResult } from "./agent/tools.ts";
+import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
@@ -95,10 +95,7 @@ function recordCost(runId: string, model: string, usage: Usage) {
   db.prepare("UPDATE runs SET cost_usd = ? WHERE id = ?").run(cost / 1e6, runId);
 }
 
-const tail = (r: ExecResult, n = 4000) => {
-  const s = (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim();
-  return s.length > n ? `[...]\n${s.slice(-n)}` : s;
-};
+const tail = (r: ExecResult, n = 4000) => truncate((r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim(), n, "tail");
 
 // A failing test command (non-zero exit or timeout) is run once more at once: passing then means a flake, not a failure.
 // again is only called after a failure; the second result is the failure when it fails too.
@@ -319,10 +316,10 @@ function previousAttempt(ticketId: string, reply: string) {
     all("run_finished").map((f) => `- Attempt ${f.attempt}: ${f.status}${f.reason && f.reason !== f.status ? ` (${f.reason})` : ""}, ${f.turns} turns`).join("\n"),
   ];
   const gate = all("test_result").findLast((g) => !g.passed);
-  if (gate) parts.push(`Last test gate failure: ${gateFailure(gate)}\n\`\`\`\n${gate.output.slice(-2000)}\n\`\`\``);
+  if (gate) parts.push(`Last test gate failure: ${gateFailure(gate)}\n\`\`\`\n${truncate(gate.output, 2000, "tail")}\n\`\`\``);
   const review = all("model_review").findLast((r) => r.verdict === "request_changes");
   if (review) parts.push(`Last model review findings:\n${findingsText(review.findings)}`);
-  if (reply) parts.push(`The worker's final reply:\n${reply.length > 4000 ? `${reply.slice(0, 4000)}\n[… truncated]` : reply}`);
+  if (reply) parts.push(`The worker's final reply:\n${truncate(reply, 4000, "head")}`);
   return parts.join("\n\n");
 }
 
@@ -605,7 +602,7 @@ async function execute(runId: string) {
     if (!run.eval_run_id && s && !retry && status !== "cancelled")
       log({ type: "reflection", payload: await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
     if (t.parent_id && !run.eval_run_id && !retry && status !== "cancelled") {
-      const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${gateOutput.slice(-1000)}\n\`\`\`` : ""}`);
+      const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${truncate(gateOutput, 1000, "tail")}\n\`\`\`` : ""}`);
       db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(text, t.id);
       log({ type: "handoff", payload: { text } });
     }

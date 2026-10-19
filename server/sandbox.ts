@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { capture, hostExec, type Exec } from "./agent/tools.ts";
+import { capture, hostExec, truncate, type Exec } from "./agent/tools.ts";
 import { git } from "./git.ts";
 
 // One Docker container per run: the worktree is bind-mounted at /work, protected paths are re-mounted read-only on
@@ -27,7 +27,7 @@ export function ensureImage(image: string) {
   building ??= execFileP("docker", ["image", "inspect", image]).catch(() =>
     execFileP("docker", ["build", "-q", "-t", image, "-f", join(dockerDir, "sandbox.Dockerfile"), dockerDir], { maxBuffer: 50e6 }).catch((e) => {
       building = undefined;
-      throw new Error(`building ${image} failed: ${String(e.stderr || e.message).slice(-2000)}`);
+      throw new Error(`building ${image} failed: ${truncate(String(e.stderr || e.message), 2000, "tail")}`);
     }),
   );
   return building;

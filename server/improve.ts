@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "./db.ts";
-import { parseProtected } from "./agent/tools.ts";
+import { parseProtected, truncate } from "./agent/tools.ts";
 import type { EventPayloads, Provider } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
@@ -67,7 +67,6 @@ export function addPrompt(ws: string, body: string, from: { source: "human" | "p
 // --- digests: what reflection and proposals see instead of transcripts ---
 
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-const tailOf = (s: string, n: number) => (s.length > n ? `[...]${s.slice(-n)}` : s);
 const ticketOf = (runId: string) =>
   db.prepare(`SELECT ${ticketKey()} AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
     JOIN organization o ON o.id = t.workspace_id WHERE r.id = ?`).get(runId) as { key: string; title: string };
@@ -85,8 +84,8 @@ export function runDigest(runId: string, final?: Final) {
   if (errors.length > 10) out.push(`- … ${errors.length - 10} more tool errors`);
   for (const e of ev) {
     if (e.type === "error" && !e.p.retrying) out.push(`- ${e.p.kind}: ${short(e.p.message, 300)}`);
-    if (e.type === "setup" && e.p.step === "command" && e.p.code !== 0) out.push(`- setup \`${e.p.command}\` exited with ${e.p.code}:\n${tailOf(e.p.output, 1000)}`);
-    if (e.type === "test_result" && !e.p.passed) out.push(`- gate failed: ${gateFailure(e.p)}\n${tailOf(e.p.output, 1000)}`);
+    if (e.type === "setup" && e.p.step === "command" && e.p.code !== 0) out.push(`- setup \`${e.p.command}\` exited with ${e.p.code}:\n${truncate(e.p.output, 1000, "tail")}`);
+    if (e.type === "test_result" && !e.p.passed) out.push(`- gate failed: ${gateFailure(e.p)}\n${truncate(e.p.output, 1000, "tail")}`);
   }
   return out.join("\n");
 }

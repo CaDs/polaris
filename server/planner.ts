@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { db } from "./db.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
-import { readOnlyTools, type Tool } from "./agent/tools.ts";
+import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
 import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, ticketKey, trackerHeader } from "./tracker.ts";
 
@@ -32,7 +32,7 @@ export const finalText = (messages: Msg[]) =>
 export function extractHandoff(text: string) {
   const m = /^#{1,6}[ \t]*Handoff\b[^\n]*$/im.exec(text);
   const s = (m ? text.slice(m.index + m[0].length) : text).trim();
-  return s.length > HANDOFF_MAX ? `${s.slice(0, HANDOFF_MAX)}\n[… truncated]` : s;
+  return truncate(s, HANDOFF_MAX, "head", "[… truncated]");
 }
 
 // failure: why the series failed (reason + gate output tail), appended to whatever the worker handed off.
