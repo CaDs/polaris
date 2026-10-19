@@ -247,7 +247,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(todo.getByRole("button", { name: /Polish cart button/ }).locator(".chip")).toHaveText("ui");
 
   // Both themes render the board (screenshots in the report).
-  for (const [theme, bg] of [["Dark", "rgb(16, 16, 18)"], ["Light", "rgb(255, 255, 255)"]]) {
+  for (const [theme, bg] of [["Dark", "rgb(10, 15, 29)"], ["Light", "rgb(255, 255, 255)"]]) {
     await page.getByLabel("Theme").selectOption(theme);
     await expect(page.locator("body")).toHaveCSS("background-color", bg);
     await shot(`board-${theme.toLowerCase()}`);
