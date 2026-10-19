@@ -1,18 +1,26 @@
 /* light-dark() follows color-scheme: System = both (OS decides), html[data-theme] pins one. */
 :root {
   color-scheme: light dark;
-  --bg: light-dark(#ffffff, #101012);
-  --sidebar: light-dark(#f7f7f8, #161618);
-  --surface: light-dark(#ffffff, #1a1a1d);
-  --hover: light-dark(#efeff1, #222226);
-  --text: light-dark(#1b1b1f, #e6e6e9);
-  --muted: light-dark(#6a6a73, #9a9aa3);
-  --border: light-dark(#e4e4e8, #2a2a2f);
-  --accent: #5e6ad2;
-  --accent-text: light-dark(#4b57c0, #9aa3f5);
+  /* Polaris "Polar Night": navy ink, star-white, one north-blue accent. Pairs checked for WCAG AA (DESIGN.md). */
+  --bg: light-dark(#ffffff, #0a0f1d);
+  --sidebar: light-dark(#f5f7fb, #0e1527);
+  --surface: light-dark(#ffffff, #121a2e);
+  --hover: light-dark(#eaeef6, #1a2440);
+  --text: light-dark(#0f1729, #e6ebf5);
+  --muted: light-dark(#5a6478, #8f9ab3);
+  --border: light-dark(#dde3ee, #243049);
+  --accent: #3d68ee;
+  --accent-hover: #2f5bea;
+  --on-accent: #ffffff;
+  --accent-text: light-dark(#2449c7, #8fb0ff);
   --error: light-dark(#c4331f, #ff8a7a);
-  --ok: light-dark(#1f8f4e, #4cc38a);
-  --warn: light-dark(#b7791f, #f0b429);
+  --ok: light-dark(#146c36, #4cc38a);
+  --warn: light-dark(#8f5a0a, #f0b429);
+  --night: #0b1224; /* brand panel, same in both themes */
+  /* Gradient rule: inside the app a gradient means "a model is working" (DESIGN.md). */
+  --flow-a: light-dark(#3d68ee, #5b86ff);
+  --flow-b: light-dark(#8fb0ff, #9dbbff);
+  --star: #f4f6fb;
 }
 html[data-theme="light"] { color-scheme: light; }
 html[data-theme="dark"] { color-scheme: dark; }
@@ -61,27 +69,59 @@ button.link:hover { text-decoration: underline; }
 }
 .btn:hover:not(:disabled) { background: var(--hover); }
 .btn:disabled { opacity: 0.5; cursor: default; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover:not(:disabled) { background: #6e79da; }
+.btn.primary {
+  background: linear-gradient(180deg, #4f7cff, #3d68ee); border-color: #2f5bea; color: var(--on-accent); font-weight: 500;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+.btn.primary:hover:not(:disabled) { background: linear-gradient(180deg, #5b86ff, #3d68ee); }
 .btn.danger { color: var(--error); }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .row.end { justify-content: flex-end; }
 
-/* auth screens */
+/* landing + auth: night-sky brand panel beside the form; stacks on phones */
+.landing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 100vh; }
+.brand {
+  position: relative; overflow: hidden;
+  display: grid; align-content: center; gap: 12px; padding: 48px clamp(24px, 6vw, 80px);
+  color: var(--star); background: linear-gradient(160deg, #0b1224 0%, #0f1a3d 55%, #16245c 100%);
+}
+.brand > * { position: relative; }
+.brand > .aurora, .brand > .stars { position: absolute; inset: 0; pointer-events: none; }
+.aurora { background: radial-gradient(420px 320px at 78% 18%, rgb(61 104 238 / 0.45), transparent 70%), radial-gradient(360px 260px at 12% 92%, rgb(143 176 255 / 0.18), transparent 70%); }
+.stars {
+  opacity: 0.8;
+  background:
+    radial-gradient(1px 1px at 14% 18%, #f4f6fb 50%, transparent), radial-gradient(1.4px 1.4px at 66% 9%, #c9d3ea 50%, transparent),
+    radial-gradient(1px 1px at 88% 34%, #f4f6fb 50%, transparent), radial-gradient(1.6px 1.6px at 42% 27%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 8% 64%, #c9d3ea 50%, transparent), radial-gradient(1.2px 1.2px at 76% 72%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 31% 86%, #c9d3ea 50%, transparent), radial-gradient(1.4px 1.4px at 93% 90%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 55% 56%, #c9d3ea 50%, transparent);
+}
+.brand .mark { width: 44px; height: 44px; filter: drop-shadow(0 6px 24px rgb(61 104 238 / 0.45)); }
+.wordmark { font-size: 34px; font-weight: 650; letter-spacing: -0.015em; line-height: 1.1; }
+.tagline { margin: 0; max-width: 32ch; font-size: 15px; color: #c9d3ea; }
+.brand-rule { width: 72px; height: 2px; background: linear-gradient(90deg, #8fb0ff, rgb(143 176 255 / 0)); }
+.landing .card { margin: auto; width: min(360px, calc(100% - 32px)); }
 .card {
   display: grid;
-  gap: 12px;
-  max-width: 340px;
+  gap: 14px;
+  max-width: 360px;
   margin: 12vh auto;
-  padding: 24px;
+  padding: 28px 24px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px light-dark(rgb(15 23 41 / 0.04), rgb(0 0 0 / 0.4)), 0 12px 32px light-dark(rgb(15 23 41 / 0.06), rgb(0 0 0 / 0.35));
 }
-.card h1 { font-size: 16px; }
+.card h1 { font-size: 18px; letter-spacing: -0.01em; }
 .card label { margin: 0; }
-.card > .btn { padding: 6px 10px; }
-@media (max-width: 420px) { .card { margin: 2rem 16px; } }
+.card > .btn { padding: 7px 10px; }
+.mark { flex: none; display: block; width: 20px; height: 20px; }
+@media (max-width: 720px) {
+  .landing { grid-template-columns: minmax(0, 1fr); align-content: start; }
+  .brand { padding: 32px 16px 28px; }
+  .landing .card { margin: 24px auto; }
+}
 
 /* shell */
 .shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
@@ -98,7 +138,7 @@ aside {
 }
 .ws { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
 .ws strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.avatar { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; flex: none; }
+.avatar { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; flex: none; }
 nav a { display: block; padding: 4px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
 nav a:hover { background: var(--hover); }
 nav a.active { background: var(--hover); font-weight: 500; }
@@ -125,6 +165,8 @@ nav a.active { background: var(--hover); font-weight: 500; }
   background: var(--surface);
 }
 .ticket:hover { background: var(--hover); }
+.ticket.running { position: relative; overflow: hidden; }
+.ticket.running::before { content: ""; position: absolute; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, var(--flow-a), var(--flow-b)); }
 .ticket .id { color: var(--muted); font-size: 11px; }
 .ticket .meta { font-size: 11px; }
 
@@ -156,7 +198,8 @@ td .icon { vertical-align: -2px; }
 .transcript h3 { margin: 8px 0; }
 .tokens { color: var(--muted); }
 .msg { white-space: pre-wrap; }
-.call { padding: 3px 8px; margin: 4px 0; border-left: 2px solid var(--accent); background: var(--hover); border-radius: 0 4px 4px 0; overflow-wrap: anywhere; }
+.msg.model { padding-left: 8px; border-left: 2px solid; border-image: linear-gradient(180deg, var(--flow-a), var(--flow-b)) 1; }
+.call { padding: 3px 8px; margin: 4px 0; border-left: 2px solid var(--muted); background: var(--hover); border-radius: 0 4px 4px 0; overflow-wrap: anywhere; }
 .call .name { color: var(--accent-text); font-weight: 600; }
 .result { margin: 2px 0 6px 10px; }
 .result summary { cursor: pointer; color: var(--muted); }
@@ -193,7 +236,7 @@ td .icon { vertical-align: -2px; }
 .diff pre div { padding: 0 10px; white-space: pre; min-height: 1.5em; }
 .diff .add { background: light-dark(#e6f6ec, #12301f); color: light-dark(#14653a, #7ee2a8); }
 .diff .del { background: light-dark(#fdeceb, #3a1714); color: light-dark(#a3271a, #ff9c8f); }
-.diff .hunk { color: var(--accent-text); background: light-dark(#f0f1fb, #1c1d33); }
+.diff .hunk { color: var(--accent-text); background: light-dark(#eef2fc, #152042); }
 
 /* M4: providers */
 .settings form { display: block; }
@@ -306,7 +349,7 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font:
 /* priority glyphs, people */
 .prio { color: var(--muted); }
 .prio.p1 { color: light-dark(#d9480f, #ff8f5a); }
-.avatar.person { width: 18px; height: 18px; border-radius: 50%; font-size: 9px; background: light-dark(#7c86e0, #4c55a8); }
+.avatar.person { width: 18px; height: 18px; border-radius: 50%; font-size: 9px; background: light-dark(#5b7be0, #34509e); }
 .avatar.none { width: 18px; height: 18px; border-radius: 50%; border: 1px dashed var(--border); background: none; }
 .ticket .props { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 2px; font-size: 11px; }
 .ticket .props .avatar { margin-left: auto; }

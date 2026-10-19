@@ -76,10 +76,10 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   // Theme: persisted across reload.
   await page.getByLabel("Theme").selectOption("Dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(16, 16, 18)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(16, 16, 18)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
   await page.getByLabel("Theme").selectOption("Light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(255, 255, 255)");

@@ -12,7 +12,7 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
               <StatusIcon status={col} /> {col} <span className="muted">{list.length}</span>
             </h2>
             {list.map((t) => (
-              <button key={t.id} className="ticket" onClick={() => open(t)}>
+              <button key={t.id} className={t.status === "running" ? "ticket running" : "ticket"} onClick={() => open(t)}>
                 <span className="id mono">
                   {t.key}
                   {t.parent_key && <span title="Parent epic"> · {t.parent_key}</span>}

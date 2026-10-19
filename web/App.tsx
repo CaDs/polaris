@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { authClient } from "./auth-client.ts";
 import { CyclePage, Cycles } from "./Cycles.tsx";
 import { Issues, Popover } from "./Filters.tsx";
@@ -31,6 +31,41 @@ function fields(e: FormEvent<HTMLFormElement>) {
   return Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
 }
 
+// The north-star mark: long cardinal rays, short diagonals, on a north-blue tile. Inline so it needs no asset.
+function Mark() {
+  return (
+    <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <defs>
+        {/* ponytail: fixed id, only one Mark is ever on screen (landing or sidebar) */}
+        <linearGradient id="polaris-mark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#5b86ff" />
+          <stop offset="1" stopColor="#2f5bea" />
+        </linearGradient>
+      </defs>
+      <rect width="32" height="32" rx="8" fill="url(#polaris-mark)" />
+      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--star)" opacity=".55" transform="rotate(45 16 16)" />
+      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--star)" />
+    </svg>
+  );
+}
+
+// Unauthenticated screens: brand panel + the form.
+function Landing({ children }: { children: ReactNode }) {
+  return (
+    <div className="landing">
+      <div className="brand">
+        <div className="aurora" aria-hidden="true" />
+        <div className="stars" aria-hidden="true" />
+        <Mark />
+        <div className="wordmark">Polaris</div>
+        <p className="tagline">A fixed point while your agents work: tickets in, reviewed diffs out.</p>
+        <div className="brand-rule" aria-hidden="true" />
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function AuthForm() {
   const [mode, setMode] = useState<"in" | "up">("in");
   const [error, setError] = useState("");
@@ -45,39 +80,41 @@ function AuthForm() {
   }
 
   return (
-    <form className="card" onSubmit={submit}>
-      <h1>{mode === "in" ? "Sign in" : "Create account"}</h1>
-      {mode === "up" && (
+    <Landing>
+      <form className="card" onSubmit={submit}>
+        <h1>{mode === "in" ? "Sign in" : "Create account"}</h1>
+        {mode === "up" && (
+          <label>
+            Name <input name="name" required autoComplete="name" />
+          </label>
+        )}
         <label>
-          Name <input name="name" required autoComplete="name" />
+          Email <input name="email" type="email" required autoComplete="email" />
         </label>
-      )}
-      <label>
-        Email <input name="email" type="email" required autoComplete="email" />
-      </label>
-      <label>
-        Password
-        <input
-          name="password"
-          type="password"
-          required
-          minLength={8}
-          autoComplete={mode === "in" ? "current-password" : "new-password"}
-        />
-      </label>
-      <Alert error={error} />
-      <button className="btn primary">{mode === "in" ? "Sign in" : "Create account"}</button>
-      <button
-        type="button"
-        className="link"
-        onClick={() => {
-          setMode(mode === "in" ? "up" : "in");
-          setError("");
-        }}
-      >
-        {mode === "in" ? "No account? Create one" : "Have an account? Sign in"}
-      </button>
-    </form>
+        <label>
+          Password
+          <input
+            name="password"
+            type="password"
+            required
+            minLength={8}
+            autoComplete={mode === "in" ? "current-password" : "new-password"}
+          />
+        </label>
+        <Alert error={error} />
+        <button className="btn primary">{mode === "in" ? "Sign in" : "Create account"}</button>
+        <button
+          type="button"
+          className="link"
+          onClick={() => {
+            setMode(mode === "in" ? "up" : "in");
+            setError("");
+          }}
+        >
+          {mode === "in" ? "No account? Create one" : "Have an account? Sign in"}
+        </button>
+      </form>
+    </Landing>
   );
 }
 
@@ -92,15 +129,17 @@ function CreateWorkspace() {
   }
 
   return (
-    <form className="card" onSubmit={submit}>
-      <h1>Create a workspace</h1>
-      <p className="muted">Tickets, runs and provider keys live in a workspace.</p>
-      <label>
-        Name <input name="name" required autoFocus />
-      </label>
-      <Alert error={error} />
-      <button className="btn primary">Create</button>
-    </form>
+    <Landing>
+      <form className="card" onSubmit={submit}>
+        <h1>Create a workspace</h1>
+        <p className="muted">Tickets, runs and provider keys live in a workspace.</p>
+        <label>
+          Name <input name="name" required autoFocus />
+        </label>
+        <Alert error={error} />
+        <button className="btn primary">Create</button>
+      </form>
+    </Landing>
   );
 }
 
@@ -209,7 +248,7 @@ function Dashboard({ email }: { email: string }) {
     <div className="shell">
       <aside>
         <header className="ws">
-          <span className="avatar" aria-hidden="true">{name[0]?.toUpperCase()}</span>
+          <Mark />
           <strong>{name}</strong>
         </header>
         <nav aria-label="Main">
