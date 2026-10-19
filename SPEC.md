@@ -83,6 +83,38 @@ budget ended it. The loop now watches for that, without a decision model. Consta
   mean_turns_pct, sum_turns_pct, stuck, tool_calls, tool_errors, tool_error_rate (0–1), mean_files_changed}]}` per UTC day of
   run start and model, newest first; `measured` = runs with `run_metrics` (the averages and sums are over those).
 
+## Failure mining (M12)
+
+The workspace's own model turns repeated failures into draft tickets, so nobody has to read transcripts to find them.
+Code: `server/failures.ts`; migration 017.
+
+- **Failure class**, mechanical (no model), on `runs.failure_class` for worker ticket runs (not eval case runs), set when
+  the pipeline finishes a run and when a person rejects a passed one; runs that ended elsewhere (cancelled while queued, a
+  restart) or before migration 017 are classified on the next `GET /api/failures`. From the `run_finished` reason:
+  `stuck` (`stuck:`), `budget_turns` (turn or token budget), `budget_time`, `gate_tests` (`` `cmd` exited with code N `` /
+  timed out), `gate_protected` (`modified protected path`), `review_rejected` (`model review…`), `provider_error`
+  (`ProviderError:`, a reply cut off), `environment` (`UnexpectedEnvironment:`/`Timeout:`: setup command, sandbox, a
+  restart), `cancelled`; `human_rejected` = a passed run with a `review` rejection; anything else
+  `unknown`. A fix round's ending (`<why>; the fix round ended: <how>`) wins only when it is stuck, provider, environment
+  or cancel; a budget running out in a fix round leaves the gate or review that started it as the class. With no
+  recognizable reason the last `stuck` stop, then a failed `test_result` decide.
+- **`GET /api/failures?days=30`** (1..90; UTC days by run end, today included): `{days, classes: [{class, description,
+  runs, tickets, examples: [{run_id, ticket_id, ticket_key, title, reason, model}] (≤ 3, different tickets first, newest
+  first), mined: {id, key, status} | null}], rows: [{day, class, runs}]}`, classes by runs, then name. Runs of tickets
+  labelled `mined` never count (mining its own drafts would feed on itself).
+- **`POST /api/failures/mine`** (Improvement page, "Mine failures"; manual only): for each class with ≥ 2 runs in the
+  last 30 days, no open mined ticket (`mined_class` = the class, status not done/failed) and not `cancelled` (a person's
+  choice), one call with the workspace default model (as Propose improvement): system prompt `MINE_SYSTEM`, a dossier
+  (class + description, counts, the examples' run digests as reflection sees them: outcome, tool errors, setup/gate output
+  tails, plus the review note for `human_rejected`; the current lessons), and one declared tool `submit_mined_ticket
+  {verdict: repo|harness, title, spec, lesson, confidence 0–1}` that is read, never run. `repo` → a `todo` ticket with
+  `mined_class`, the label `mined` (created when missing), and the model's spec followed by `## Mined from failures`
+  (class, counts, confidence, the example reasons); at most 5 per mining. `harness` → the lesson is appended to the
+  lessons as a new version (source reflection on the newest example run) unless it is there already or would overflow
+  them. A broken answer skips its class. The result `{id, created: [{class, ticket_id, key, title, confidence}], lessons:
+  [{class, version, lesson, confidence}], skipped: [{class, why}]}` is stored in `minings` and returned.
+- Mined tickets never run on their own: a person reads them and presses Run. The ticket page shows "mined from <class>".
+
 ## Context management (M5)
 
 **Conversations are append-only.** Current Claude models bind thinking blocks to the exact conversation that produced them:
