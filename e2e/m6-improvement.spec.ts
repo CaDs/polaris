@@ -79,3 +79,38 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await expect(transcript).toContainText("the system prompt says so", { timeout: 60_000 });
   await expect(status).toHaveValue("review", { timeout: 60_000 });
 });
+
+test("M12: failure classes on the Improvement page; Mine failures drafts a ticket that shows where it was mined from", async ({ page }) => {
+  test.setTimeout(180_000);
+  await signUp(page, "Miner");
+  await saveSettings(page, tempRepo(), "test -f ok.txt");
+
+  // STUCK-LOOP: the stuck monitor stops attempt 1 of each ticket; the retry passes.
+  for (const title of ["Loop one", "Loop two"]) {
+    await newTicket(page, title, "STUCK-LOOP");
+    await openTicket(page, title);
+    await page.getByRole("button", { name: "Run agent" }).click();
+    await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 90_000 });
+  }
+
+  await page.getByRole("link", { name: "Improvement" }).click();
+  const stuck = page.getByRole("table", { name: "Failure classes" }).getByRole("row", { name: "stuck", exact: true });
+  await expect(stuck).toContainText("the stuck monitor stopped the attempt");
+  await expect(stuck.getByRole("cell").nth(1)).toHaveText("2");
+  await expect(stuck).toContainText("stuck: repeat_call (read_file");
+  await expect(stuck.getByRole("img")).toHaveAccessibleName("stuck: runs per day, last 30 days");
+
+  await page.getByRole("button", { name: "Mine failures" }).click();
+  const result = page.getByRole("list", { name: "Mining result" });
+  await expect(result).toContainText("Created MIN-3 Stop stuck failures");
+  await expect(stuck).toContainText("mined: MIN-3");
+
+  // A second click skips the class: its mined ticket is still open.
+  await page.getByRole("button", { name: "Mine failures" }).click();
+  await expect(result).toContainText("Skipped stuck: MIN-3 is still open");
+
+  await stuck.getByRole("button", { name: "MIN-3" }).click();
+  await expect(page.getByText("mined from stuck")).toBeVisible();
+  await expect(page.getByLabel("Status")).toHaveValue("todo");
+  await expect(page.getByLabel("Spec")).toHaveValue(/## Mined from failures\n\nClass `stuck`/);
+});

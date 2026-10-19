@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "./db.ts";
 import { parseProtected, truncate } from "./agent/tools.ts";
-import type { EventPayloads, Provider } from "./agent/types.ts";
+import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
 import { ticketKey } from "./tracker.ts";
@@ -90,7 +90,7 @@ const ticketOf = (runId: string) =>
 
 // One run from its event log: outcome, counts, tool errors (name + class + first line), setup/gate failures with output tails.
 // final: the outcome when run_finished is not logged yet (reflection runs just before it).
-function runDigest(runId: string, final?: Final) {
+export function runDigest(runId: string, final?: Final) {
   const r = db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as Record<string, any>;
   const ev = (db.prepare("SELECT type, payload FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string }[]).map((e) => ({ type: e.type, p: JSON.parse(e.payload) }));
   const fin: Final = final ?? ev.find((e) => e.type === "run_finished")?.p ?? { status: r.status, turns: 0 };
@@ -147,24 +147,25 @@ The full revised system prompt.
 </prompt>`;
 
 const SECRET = /\b(sk-[\w-]{16,}|ghp_\w{20,}|github_pat_\w{20,}|xox[abp]-[\w-]{10,}|AKIA[0-9A-Z]{16})\b/g;
-const scrub = (s: string) => s.replace(SECRET, "[redacted]"); // ponytail: common key shapes only; the prompt forbids the rest
+export const scrub = (s: string) => s.replace(SECRET, "[redacted]"); // ponytail: common key shapes only; the prompt forbids the rest
 
 // Over the cap: cut at the last line break before it.
-function capLessons(s: string) {
+export function capLessons(s: string) {
   s = s.trim();
   if (s.length <= LESSONS_MAX) return s;
   const cut = s.slice(0, LESSONS_MAX);
   return cut.slice(0, cut.lastIndexOf("\n") > 0 ? cut.lastIndexOf("\n") : LESSONS_MAX).trimEnd();
 }
 
-// timeoutMs: a hung reflection must not hold its run's queue slot for long.
-async function ask(provider: Provider, model: string, system: string, text: string, maxTokens: number, timeoutMs: number, signal?: AbortSignal) {
+// timeoutMs: a hung reflection must not hold its run's queue slot for long. tools are only declared, never run (failure
+// mining's submit tool): the caller reads the call from content.
+export async function ask(provider: Provider, model: string, system: string, text: string, maxTokens: number, timeoutMs: number, signal?: AbortSignal, tools: ToolDef[] = []) {
   const res = await provider.stream(
-    { system: [{ type: "text", text: system }], messages: [{ role: "user", content: [{ type: "text", text }] }], tools: [], model, maxTokens,
+    { system: [{ type: "text", text: system }], messages: [{ role: "user", content: [{ type: "text", text }] }], tools, model, maxTokens,
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) },
     () => {},
   );
-  return { text: res.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim(), usage: res.usage };
+  return { text: res.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim(), usage: res.usage, content: res.message.content };
 }
 
 // Reflections of one workspace run one at a time, each on the then-current lessons, so none overwrites another.

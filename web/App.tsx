@@ -220,7 +220,7 @@ function Dashboard({ email }: { email: string }) {
           ) : section === "usage" ? (
             <UsagePage />
           ) : section === "improvement" ? (
-            <Improvement />
+            <Improvement open={open} changed={reload} />
           ) : section === "wiki" ? (
             <Wiki />
           ) : section === "projects" ? (
