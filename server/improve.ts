@@ -44,10 +44,26 @@ export function saveLessons(ws: string, body: string, from: { source: "reflectio
 // --- prompt versions (role 'worker') ---
 
 // The active worker prompt; v1 is seeded from prompts/worker.md the first time a workspace needs one.
+// When worker.md changes, a workspace without a seed version of the new text gets one (the next version, source seed). It
+// becomes active only when the active version is itself a seed (rows are never edited, so that is unmodified built-in
+// text); a workspace on an edited or proposed version keeps it, and the new built-in waits as a candidate with a note.
+// ponytail: someone who promoted an old seed back on purpose is moved to the new built-in once; the old one stays in history.
 export function activePrompt(ws: string): Prompt {
   db.prepare(`INSERT INTO prompts (id, workspace_id, role, version, body, active) SELECT ?, ?, 'worker', 1, ?, 1
     WHERE NOT EXISTS (SELECT 1 FROM prompts WHERE workspace_id = ? AND role = 'worker')`).run(randomUUID(), ws, SEED, ws);
-  return db.prepare("SELECT * FROM prompts WHERE workspace_id = ? AND role = 'worker' AND active = 1").get(ws) as Prompt;
+  const active = db.prepare("SELECT * FROM prompts WHERE workspace_id = ? AND role = 'worker' AND active = 1").get(ws) as Prompt;
+  if (active.body === SEED || db.prepare("SELECT 1 FROM prompts WHERE workspace_id = ? AND role = 'worker' AND source = 'seed' AND body = ?").get(ws, SEED)) return active;
+  const stock = active.source === "seed";
+  const id = randomUUID();
+  const note = stock
+    ? `prompts/worker.md changed. The active v${active.version} was the unmodified built-in, so this version replaced it (v${active.version} stays in history).`
+    : `prompts/worker.md changed. Not activated: the active v${active.version} is an edited or proposed version. Run an eval and promote this one if it scores better.`;
+  db.prepare(`INSERT INTO prompts (id, workspace_id, role, version, body, source, rationale)
+    SELECT ?, ?, 'worker', MAX(version) + 1, ?, 'seed', ? FROM prompts WHERE workspace_id = ? AND role = 'worker'`).run(id, ws, SEED, note, ws);
+  const fresh = db.prepare("SELECT * FROM prompts WHERE id = ?").get(id) as Prompt;
+  if (!stock) return active;
+  promote(ws, fresh);
+  return { ...fresh, active: 1 };
 }
 export const promptAt = (ws: string, version: number) =>
   db.prepare("SELECT * FROM prompts WHERE workspace_id = ? AND role = 'worker' AND version = ?").get(ws, version) as Prompt | undefined;

@@ -347,3 +347,32 @@ test("workspaces are isolated: prompts, cases and eval runs", async () => {
   assert.equal((await call("DELETE", `/api/evals/cases/${shared.caseId}`, alice)).status, 204);
   assert.equal((await call("DELETE", `/api/tickets/${shared.ticket.id}`, alice)).status, 204);
 });
+
+test("a changed worker.md reaches a workspace on the stock built-in; one on its own version keeps it and gets a candidate", async () => {
+  const old = "OLD BUILT-IN PROMPT";
+  // What an older Polaris left in the DB (written directly: activePrompt would upgrade in between).
+  const seed = (ws: string, own?: string) => {
+    db.prepare("INSERT INTO prompts (id, workspace_id, role, version, body, active) VALUES (?, ?, 'worker', 1, ?, ?)").run(crypto.randomUUID(), ws, old, own ? 0 : 1);
+    if (own) db.prepare("INSERT INTO prompts (id, workspace_id, role, version, body, active, source, author) VALUES (?, ?, 'worker', 2, ?, 1, 'human', 'c@x.dev')").run(crypto.randomUUID(), ws, own);
+  };
+  const versions = (ws: string) => (db.prepare("SELECT version, active, source, body, rationale FROM prompts WHERE workspace_id = ? AND role = 'worker' ORDER BY version").all(ws) as any[])
+    .map((p) => [p.version, p.active, p.source, p.body === worker ? "worker.md" : p.body, !!p.rationale]);
+
+  await user("stocky");
+  const stock = wsOf("stocky");
+  seed(stock);
+  assert.equal(activePrompt(stock).body, worker);
+  assert.deepEqual(versions(stock), [[1, 0, "seed", old, false], [2, 1, "seed", "worker.md", true]]);
+
+  await user("custom");
+  const custom = wsOf("custom");
+  seed(custom, "MY PROMPT");
+  assert.equal(activePrompt(custom).body, "MY PROMPT");
+  assert.deepEqual(versions(custom), [[1, 0, "seed", old, false], [2, 1, "human", "MY PROMPT", false], [3, 0, "seed", "worker.md", true]]);
+
+  // Once per built-in text: a later call, or promoting the old seed back, adds nothing.
+  activePrompt(custom);
+  promote(stock, db.prepare("SELECT * FROM prompts WHERE workspace_id = ? AND version = 1").get(stock) as any);
+  assert.equal(activePrompt(stock).body, old);
+  assert.deepEqual([versions(stock).length, versions(custom).length], [2, 3]);
+});
