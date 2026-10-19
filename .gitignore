@@ -24,3 +24,4 @@ playwright-report
 # OS and editor files, logs
 .DS_Store
 *.log
+.claude/worktrees/
