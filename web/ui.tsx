@@ -55,7 +55,7 @@ const CODES: Record<string, string> = {
 export function errorText(data: any, status = 0) {
   const e: string = typeof data?.error === "string" ? data.error : typeof data?.message === "string" ? data.message : "";
   if (e === "invalid_transition")
-    return `A ${data.from} ticket can't be set to ${data.to} by hand. By hand: todo, done and failed, and review back to todo, never while a run is queued or running. Run, Cancel, Approve and Reject do the rest.`;
+    return `A ${data.from} ticket can't be set to ${data.to} by hand. Only todo, done and failed can be set by hand (review only back to todo), and not while a run is queued or running; Run, Cancel, Approve and Reject do the rest.`;
   const s = CODES[e] ?? (e || (status >= 500 || !status ? CODES["internal error"] : `The request failed (HTTP ${status}).`));
   return s.replace(/^[a-z][a-z-]*(?=[\s:,])/, (w) => w[0].toUpperCase() + w.slice(1)); // "cancel the run first" → "Cancel …"; leaves "a/b.md …"
 }
@@ -154,7 +154,7 @@ export const Loading = ({ error = "" }: { error?: string }) => (error ? <p class
 export function useApi<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
-  const reload = useCallback(() => api<T>(path).then((d) => (setData(d), setError("")), (e) => setError(e.message)), [path]);
+  const reload = useCallback(() => api<T>(path).then(setData, (e) => setError(e.message)), [path]);
   useEffect(() => void reload(), [reload]);
   return { data, error, setError, reload };
 }

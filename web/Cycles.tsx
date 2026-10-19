@@ -122,8 +122,9 @@ export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string)
       <Alert error={error} />
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
+      {/* call() gives null for the 204 of a delete, undefined when it failed (the error shows here). */}
       {confirming && (
-        <Confirm title="Delete cycle?" onConfirm={() => call(`/api/cycles/${c.id}`, "DELETE").then(() => go("/cycles"))} onClose={() => setConfirming(false)}>
+        <Confirm title="Delete cycle?" onConfirm={() => (setConfirming(false), call(`/api/cycles/${c.id}`, "DELETE").then((r) => r === null && go("/cycles")))} onClose={() => setConfirming(false)}>
           {cycleName(c)} ({c.starts_at} → {c.ends_at}) is deleted. Its {c.progress.total} {c.progress.total === 1 ? "ticket stays" : "tickets stay"}, without a cycle.
         </Confirm>
       )}
