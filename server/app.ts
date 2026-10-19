@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
@@ -11,7 +12,7 @@ import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvide
 import { OWN_RUNS, withStates } from "./planner.ts";
 import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
-import { applyTracker, hydrate, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
+import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 
 migrate();
@@ -19,6 +20,16 @@ migrate();
 type Env = { Variables: { userId: string; workspaceId: string } };
 
 export const app = new Hono<Env>();
+
+// Every error a route throws is {error} JSON: a bad request (tracker Invalid, a wiki AgentError: bad path, unknown page)
+// is 400, a refused merge 409; anything else is a bug, logged, and 500 with a generic message.
+app.onError((e, c) => {
+  if (e instanceof Invalid || e instanceof AgentError) return c.json({ error: e.message }, 400);
+  if (e instanceof MergeError) return c.json({ error: e.message }, 409);
+  if (e instanceof HTTPException) return c.json({ error: e.message }, e.status);
+  console.error(e);
+  return c.json({ error: "internal error" }, 500);
+});
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
@@ -217,13 +228,8 @@ app.post("/api/tickets/:id/approve", async (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
   if (t.status !== "review") return c.json({ error: "ticket is not in review" }, 409);
-  try {
-    const r = await approve(t.id);
-    if ("error" in r) return c.json(r, 409);
-  } catch (e) {
-    if (e instanceof MergeError) return c.json({ error: e.message }, 409);
-    throw e;
-  }
+  const r = await approve(t.id);
+  if ("error" in r) return c.json(r, 409);
   return c.json(ticketIn(c));
 });
 
@@ -461,12 +467,6 @@ app.delete("/api/evals/cases/:id", (c) => {
 // --- M10 project wiki (see SPEC "Project wiki (M10)", server/wiki.ts). Workspace-scoped like everything else; page paths are
 // checked against root .md / modules/ / howto/ and resolved with resolveIn.
 
-// A wiki function's AgentError is the caller's mistake (bad path, unknown page): 400.
-const wikiErr = (c: Context<Env>, e: unknown) => {
-  if (!(e instanceof AgentError)) throw e;
-  return c.json({ error: e.message }, 400);
-};
-
 app.get("/api/wiki", async (c) => {
   const ws = c.get("workspaceId");
   const s = settingsFor(ws);
@@ -483,12 +483,8 @@ app.get("/api/wiki", async (c) => {
 
 app.get("/api/wiki/page", async (c) => {
   const path = c.req.query("path") ?? "";
-  try {
-    const body = await readPage(c.get("workspaceId"), path);
-    return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
-  } catch (e) {
-    return wikiErr(c, e);
-  }
+  const body = await readPage(c.get("workspaceId"), path);
+  return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
 });
 
 // A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>". base: the
@@ -496,12 +492,8 @@ app.get("/api/wiki/page", async (c) => {
 app.put("/api/wiki/page", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (typeof b?.path !== "string" || typeof b?.body !== "string" || b.body.length > 20_000) return c.json({ error: "path and body (at most 20000 chars) are required" }, 400);
-  try {
-    const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
-    return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
-  } catch (e) {
-    return wikiErr(c, e);
-  }
+  const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
+  return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
 });
 
 app.get("/api/wiki/history", async (c) => c.json(await history(c.get("workspaceId"))));
@@ -510,7 +502,8 @@ app.get("/api/wiki/diff", async (c) => {
   try {
     return c.json({ diff: await wikiDiff(c.get("workspaceId"), c.req.query("sha") ?? "") });
   } catch (e) {
-    return e instanceof AgentError ? wikiErr(c, e) : c.json({ error: "not_found" }, 404);
+    if (e instanceof AgentError) throw e;
+    return c.json({ error: "not_found" }, 404); // no such commit
   }
 });
 

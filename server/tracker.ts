@@ -21,15 +21,11 @@ const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled
 // Query params a filter (and a saved view) may hold. group only matters to the list layout.
 const FILTER_KEYS = ["status", "label", "label_mode", "priority", "assignee", "project", "milestone", "cycle", "kind", "parent", "due_before", "due_after", "q", "group"];
 
-// A bad request. Route handlers here throw it (onError → 400); app.ts gets {error} from the exported functions.
+// A bad request. Route handlers here throw it (app.ts onError → 400); app.ts gets {error} from the exported functions.
 class Invalid extends Error {}
 const fail = (message: string): never => {
   throw new Invalid(message);
 };
-trackerRoutes.onError((e, c) => {
-  if (e instanceof Invalid) return c.json({ error: e.message }, 400);
-  throw e;
-});
 const attempt = <T>(fn: () => T): T | { error: string } => {
   try {
     return fn();
