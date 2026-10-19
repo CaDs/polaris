@@ -104,6 +104,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         {waiting(ticket) && <span className="muted" role="status">waiting for children</span>}
         {ticket.escalated_key && <span className="muted">Escalated to {link(ticket.escalated_key)}</span>}
         {ticket.split_from_key && <span className="muted">Split from {link(ticket.split_from_key)}</span>}
+        {ticket.mined_class && <span className="badge" title="Drafted by failure mining (Improvement page)">mined from {ticket.mined_class}</span>}
         <span className="grow" />
         {providers && <ModelPicker providers={providers} provider_id={ticket.provider_id} model={ticket.model} onChange={patch} />}
         {ticket.status === "done" && !epic &&

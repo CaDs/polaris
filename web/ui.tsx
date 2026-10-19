@@ -7,6 +7,7 @@ export type Ticket = {
   provider_id: string | null; model: string | null; run_model: string | null; run_auth: string | null;
   run_status: string | null; run_count: number; tokens_in: number; tokens_out: number; tokens_cached: number; cost_usd: number;
   eval_case_id: string | null;
+  mined_class: string | null; // M12: drafted by failure mining from this failure class
   // M7: epic = planned by a planner; children have parent_id. handoff: a child's handoff, an epic's summary or failure reason.
   kind: "task" | "epic"; parent_id: string | null; parent_key: string | null; handoff: string | null; child_count: number; child_done: number;
   // M9: the "Split:" epic that replaced this ticket, and the ticket a "Split:" epic replaced.

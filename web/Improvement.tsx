@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Transcript } from "./TicketView.tsx";
-import { Alert, Confirm, Dialog, Loading, api, cost, fmt, when, type Run } from "./ui.tsx";
+import { Alert, Confirm, Dialog, Loading, api, cost, fmt, useApi, when, type Run } from "./ui.tsx";
 
 // M6: the three self-improvement loops, all visible and reversible. Lessons apply to the next run at once (so Restore is
 // one click); a prompt version only applies once a human promotes it, and only when its eval beats the active one.
@@ -26,7 +26,23 @@ type Data = {
 
 const score = (e: EvalRun) => (e.status === "done" ? `${e.passed}/${e.total}` : `running, ${e.results?.filter((r) => r.case_passed !== null).length ?? 0}/${e.case_ids.length} done`);
 
-export function Improvement() {
+// M12 failure mining: GET /api/failures (classes of the last `days`, runs per day and class) and POST /api/failures/mine.
+type Failures = {
+  days: number;
+  classes: {
+    class: string; description: string; runs: number; tickets: number; mined: { id: string; key: string; status: string } | null;
+    examples: { run_id: string; ticket_key: string; title: string; reason: string | null; model: string }[];
+  }[];
+  rows: { day: string; class: string; runs: number }[];
+};
+type Mining = {
+  created: { class: string; ticket_id: string; key: string; title: string; confidence: number }[];
+  lessons: { class: string; version: number; lesson: string }[];
+  skipped: { class: string; why: string }[];
+};
+
+// open: a ticket by number; changed: mining made tickets or lessons (the board and the Lessons section reload).
+export function Improvement({ open, changed }: { open: (n: number) => void; changed: () => void }) {
   const [d, setD] = useState<Data | null>(null);
   const [error, setError] = useState("");
   const load = () =>
@@ -54,6 +70,7 @@ export function Improvement() {
   return (
     <div className="improve">
       <Alert error={error} />
+      <FailureClasses open={open} changed={() => (changed(), load())} />
       <Lessons data={d.lessons} act={act} />
       <Prompts data={d.prompts} runs={d.evals.runs} act={act} />
       <Evals data={d.evals} act={act} />
@@ -62,6 +79,81 @@ export function Improvement() {
 }
 
 type Act = (fn: () => Promise<unknown>) => Promise<void>;
+
+function FailureClasses({ open, changed }: { open: (n: number) => void; changed: () => void }) {
+  const { data, error, setError, reload } = useApi<Failures>("/api/failures?days=30");
+  const [mining, setMining] = useState(false);
+  const [result, setResult] = useState<Mining | null>(null);
+  const link = (key: string) => <button className="link mono" onClick={() => open(Number(key.split("-").at(-1)))}>{key}</button>;
+  const mine = async () => {
+    setMining(true);
+    setError("");
+    try {
+      setResult(await api<Mining>("/api/failures/mine", "POST"));
+      changed();
+      await reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setMining(false);
+    }
+  };
+  if (!data) return <section aria-label="Failures"><h2>Failures</h2><Loading error={error} /></section>;
+  const days = Array.from({ length: data.days }, (_, i) => new Date(Date.now() - (data.days - 1 - i) * 86_400_000).toISOString().slice(0, 10));
+  return (
+    <section aria-label="Failures">
+      <div className="row">
+        <h2 className="grow">Failures</h2>
+        <button className="btn" disabled={mining} onClick={mine}>{mining ? "Mining…" : "Mine failures"}</button>
+      </div>
+      <p className="muted">
+        Why worker runs failed in the last {data.days} days, classified from their events (runs of tickets labelled mined are left out).
+        Mine failures asks the workspace's model, once per class with at least 2 runs and no open mined ticket, for a ticket that would stop
+        it (at most 5), or for a lesson when the cause is the harness. Mined tickets wait in todo until you read and run them.
+      </p>
+      <Alert error={error} />
+      {result && (
+        <ul className="checks" aria-label="Mining result">
+          {result.created.map((c) => (
+            <li key={c.ticket_id}>Created {link(c.key)} {c.title} <span className="muted">· from {c.class} · confidence {c.confidence.toFixed(2)}</span></li>
+          ))}
+          {result.lessons.map((l) => <li key={l.class}>Lesson added (v{l.version}) for {l.class}: {l.lesson}</li>)}
+          {result.skipped.map((s) => <li key={s.class} className="muted">Skipped {s.class}: {s.why}</li>)}
+          {!result.created.length && !result.lessons.length && !result.skipped.length && <li className="muted">No failures to mine.</li>}
+        </ul>
+      )}
+      <div className="table-wrap">
+        <table className="failures" aria-label="Failure classes">
+          <thead><tr><th>Class</th><th>Runs</th><th>Tickets</th><th>Per day</th><th>Examples</th></tr></thead>
+          <tbody>
+            {data.classes.map((c) => {
+              const per = days.map((d) => data.rows.find((r) => r.day === d && r.class === c.class)?.runs ?? 0);
+              const max = Math.max(1, ...per);
+              return (
+                <tr key={c.class} aria-label={c.class}>
+                  <td><span className="mono">{c.class}</span><div className="muted">{c.description}</div>{c.mined && <div>mined: {link(c.mined.key)}</div>}</td>
+                  <td>{c.runs}</td>
+                  <td>{c.tickets}</td>
+                  <td>
+                    <div className="spark mini" role="img" aria-label={`${c.class}: runs per day, last ${data.days} days`}>
+                      {per.map((n, i) => <div key={days[i]} title={`${days[i]}: ${n}`}>{n > 0 && <span className="failed" style={{ height: `${(100 * n) / max}%` }} />}</div>)}
+                    </div>
+                  </td>
+                  <td>
+                    <ul className="checks">
+                      {c.examples.map((e) => <li key={e.run_id}>{link(e.ticket_key)} <span className="muted">{e.model}</span> {e.reason}</li>)}
+                    </ul>
+                  </td>
+                </tr>
+              );
+            })}
+            {data.classes.length === 0 && <tr><td colSpan={5} className="muted">No failed runs in the last {data.days} days.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function Lessons({ data, act }: { data: Data["lessons"]; act: Act }) {
   const current = data.versions[0];

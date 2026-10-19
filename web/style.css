@@ -224,6 +224,10 @@ td .icon { vertical-align: -2px; }
 .spark .failed, .legend .failed { background: var(--error); }
 .spark .stuck, .legend .stuck { background: var(--warn); }
 .spark .cancelled, .legend .cancelled { background: var(--muted); }
+.spark.mini { width: 120px; height: 24px; gap: 1px; margin: 0; }
+.failures td { white-space: normal; vertical-align: top; }
+.failures td:first-child { min-width: 160px; }
+.failures td:last-child { min-width: 240px; overflow-wrap: anywhere; }
 
 /* M6: improvement page */
 .improve { max-width: 860px; padding: 12px 16px 48px; }
