@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { StatusIcon, type Ticket } from "./ui.tsx";
+import { Dialog, StatusIcon, type Ticket } from "./ui.tsx";
 
 // Cmd/Ctrl+K: jump to a ticket by key or title, create a ticket, go to a page. Arrow keys move, Enter runs, Esc closes.
 type Item = { id: string; name: string; hint?: string; ticket?: Ticket; run: () => void };
@@ -30,25 +30,23 @@ export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go:
       e.preventDefault();
       close();
       items[at].run();
-    } else if (e.key === "Escape") close();
+    }
   }
 
   return (
-    <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="dialog palette" role="dialog" aria-modal="true" aria-label="Command palette">
-        <input autoFocus aria-label="Command" placeholder="Search tickets or type a command…" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={key}
-          role="combobox" aria-expanded="true" aria-controls="palette-list" aria-activedescendant={items[at] ? `pi-${items[at].id}` : undefined} />
-        <ul id="palette-list" role="listbox" aria-label="Results">
-          {items.map((it, i) => (
-            <li key={it.id} id={`pi-${it.id}`} role="option" aria-selected={i === at} onMouseEnter={() => setSel(i)} onMouseDown={(e) => (e.preventDefault(), close(), it.run())}>
-              {it.ticket ? <><StatusIcon status={it.ticket.status} /><span className="mono muted">{it.ticket.key}</span></> : <span className="muted">›</span>}
-              <span className="grow">{it.name}</span>
-              {it.hint && <kbd>{it.hint}</kbd>}
-            </li>
-          ))}
-          {!items.length && <li className="muted">No results</li>}
-        </ul>
-      </div>
-    </div>
+    <Dialog title="Command palette" className="palette" heading={false} onClose={close}>
+      <input autoFocus aria-label="Command" placeholder="Search tickets or type a command…" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={key}
+        role="combobox" aria-expanded="true" aria-controls="palette-list" aria-activedescendant={items[at] ? `pi-${items[at].id}` : undefined} />
+      <ul id="palette-list" role="listbox" aria-label="Results">
+        {items.map((it, i) => (
+          <li key={it.id} id={`pi-${it.id}`} role="option" aria-selected={i === at} onMouseEnter={() => setSel(i)} onMouseDown={(e) => (e.preventDefault(), close(), it.run())}>
+            {it.ticket ? <><StatusIcon status={it.ticket.status} label /><span className="mono muted">{it.ticket.key}</span></> : <span className="muted">›</span>}
+            <span className="grow">{it.name}</span>
+            {it.hint && <kbd>{it.hint}</kbd>}
+          </li>
+        ))}
+        {!items.length && <li className="muted">No results</li>}
+      </ul>
+    </Dialog>
   );
 }

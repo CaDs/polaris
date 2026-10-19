@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
-import { api, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, DateField, Loading, api, useApi, type Ticket } from "./ui.tsx";
 import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type Progress } from "./tracker.tsx";
 
 type Cycle = CycleRef & { progress: Progress; added_after_start: number };
@@ -16,11 +16,8 @@ function Scope({ c }: { c: Cycle }) {
 }
 
 export function Cycles({ go }: { go: (to: string) => void }) {
-  const [cycles, setCycles] = useState<Cycle[] | null>(null);
-  const [error, setError] = useState("");
+  const { data: cycles, error, setError, reload } = useApi<Cycle[]>("/api/cycles");
   const { reload: reloadTracker } = useTracker();
-  const reload = useCallback(() => api<Cycle[]>("/api/cycles").then(setCycles, (e) => setError(e.message)), []);
-  useEffect(() => void reload(), [reload]);
   // Defaults: two weeks starting the day after the last cycle ends (or today).
   const last = cycles?.at(-1)?.ends_at;
   const today = new Date().toISOString().slice(0, 10);
@@ -65,7 +62,7 @@ export function Cycles({ go }: { go: (to: string) => void }) {
         <input name="ends_at" type="date" aria-label="Ends" defaultValue={addDays(start, 13)} required className="narrow" />
         <button className="btn primary">Create cycle</button>
       </form>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {cycles?.length === 0 && <p className="muted">No cycles yet. A cycle is a time box (usually 1–2 weeks) with a set of tickets to finish in it.</p>}
       {cycles && section("current", "Current", cycles.filter((c) => c.state === "current"))}
       {cycles && section("upcoming", "Upcoming", cycles.filter((c) => c.state === "upcoming"))}
@@ -75,10 +72,11 @@ export function Cycles({ go }: { go: (to: string) => void }) {
 }
 
 // One cycle ("current" = whichever cycle includes today): progress, scope, its tickets, and moving what is unfinished on.
-export function CyclePage({ id, open, tick }: { id: string; open: (n: number) => void; tick: unknown }) {
+export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string) => void; open: (n: number) => void; tick: unknown }) {
   const [c, setC] = useState<Cycle | null | undefined>(undefined);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
   const { reload: reloadTracker } = useTracker();
   const reload = useCallback(() => api<Cycle>(`/api/cycles/${id}`).then(setC, () => setC(null)), [id]);
   useEffect(() => void reload(), [reload, tick]);
@@ -100,7 +98,7 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
     if (r) setMsg(`Moved ${r.moved} unfinished ticket${r.moved === 1 ? "" : "s"} to ${cycleName(r.to)}.`);
   }
 
-  if (c === undefined) return <p className="muted pad">Loading…</p>;
+  if (c === undefined) return <Loading />;
   if (c === null) return <p className="muted pad">{id === "current" ? "No cycle includes today. Create one under Cycles." : "Cycle not found."}</p>;
   const unfinished = c.progress.total - c.progress.done;
   return (
@@ -109,8 +107,8 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
         <h2 className="cycle-title">{cycleName(c)}</h2>
         <span className={`badge cs-${c.state}`}>{c.state}</span>
         <input aria-label="Cycle name" placeholder="Name (optional)" defaultValue={c.name} maxLength={100} className="narrow" onBlur={(e) => e.target.value !== c.name && call(`/api/cycles/${c.id}`, "PATCH", { name: e.target.value })} />
-        <input type="date" aria-label="Starts" className="narrow" value={c.starts_at} onChange={(e) => e.target.value && call(`/api/cycles/${c.id}`, "PATCH", { starts_at: e.target.value })} />
-        <input type="date" aria-label="Ends" className="narrow" value={c.ends_at} onChange={(e) => e.target.value && call(`/api/cycles/${c.id}`, "PATCH", { ends_at: e.target.value })} />
+        <DateField aria-label="Starts" className="narrow" required value={c.starts_at} onSave={(starts_at) => call(`/api/cycles/${c.id}`, "PATCH", { starts_at })} />
+        <DateField aria-label="Ends" className="narrow" required value={c.ends_at} onSave={(ends_at) => call(`/api/cycles/${c.id}`, "PATCH", { ends_at })} />
       </div>
       <section aria-label="Progress" className="row">
         <Bar p={c.progress} /> <ByStatus p={c.progress} /> <Scope c={c} />
@@ -118,11 +116,18 @@ export function CyclePage({ id, open, tick }: { id: string; open: (n: number) =>
         {c.state !== "upcoming" && (
           <button className="btn" disabled={!unfinished} onClick={moveUnfinished}>Move unfinished to next cycle</button>
         )}
+        <button className="btn danger" onClick={() => setConfirming(true)}>Delete cycle</button>
       </section>
       {msg && <p className="muted">{msg}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <h3>Tickets</h3>
       <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
+      {/* call() gives null for the 204 of a delete, undefined when it failed (the error shows here). */}
+      {confirming && (
+        <Confirm title="Delete cycle?" onConfirm={() => (setConfirming(false), call(`/api/cycles/${c.id}`, "DELETE").then((r) => r === null && go("/cycles")))} onClose={() => setConfirming(false)}>
+          {cycleName(c)} ({c.starts_at} → {c.ends_at}) is deleted. Its {c.progress.total} {c.progress.total === 1 ? "ticket stays" : "tickets stay"}, without a cycle.
+        </Confirm>
+      )}
     </div>
   );
 }

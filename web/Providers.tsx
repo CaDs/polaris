@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Dialog, ModelPicker, api, useProviders, type Provider } from "./ui.tsx";
+import { Alert, Confirm, Dialog, ModelPicker, api, useProviders, type Provider } from "./ui.tsx";
 
 type Check = { model: string; ok: boolean; tool_call: boolean; latency_ms: number; error?: string };
 const KINDS = { anthropic: ["api_key"], openai: ["api_key", "oauth"], ollama: ["none"] } as const;
@@ -74,7 +74,7 @@ export function Providers({ defaults }: { defaults: { default_provider_id: strin
     <section className="providers" aria-label="Providers">
       <h2>Providers</h2>
       <p className="muted">Models the agents can run on. Keys and tokens are encrypted at rest and never shown again.</p>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <ul className="plist">
         {providers?.map((p) => {
           const c = checks[p.id];
@@ -123,13 +123,9 @@ export function Providers({ defaults }: { defaults: { default_provider_id: strin
 
       {editing && <ProviderDialog p={editing === "new" ? null : editing} close={() => setEditing(null)} saved={() => (setEditing(null), reload())} />}
       {deleting && (
-        <Dialog title="Delete provider?" onClose={() => setDeleting(null)}>
-          <p className="muted">{deleting.name} and its stored credentials are deleted. Tickets that use it fall back to the default.</p>
-          <div className="row end">
-            <button className="btn" onClick={() => setDeleting(null)}>Cancel</button>
-            <button className="btn danger" autoFocus onClick={() => remove(deleting)}>Delete</button>
-          </div>
-        </Dialog>
+        <Confirm title="Delete provider?" onConfirm={() => remove(deleting)} onClose={() => setDeleting(null)}>
+          {deleting.name} and its stored credentials are deleted. Tickets that use it fall back to the default.
+        </Confirm>
       )}
     </section>
   );
@@ -192,7 +188,7 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
             <span className="hint">Write-only: stored encrypted, only its last 4 characters are ever shown.</span>
           </label>
         )}
-        {error && <p className="error" role="alert">{error}</p>}
+        <Alert error={error} />
         <div className="row end">
           <button type="button" className="btn" onClick={close}>Cancel</button>
           <button className="btn primary">{p ? "Save provider" : "Add provider"}</button>

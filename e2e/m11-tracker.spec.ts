@@ -41,7 +41,14 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   }
   await labels.getByLabel("New label", { exact: true }).fill("BUG");
   await labels.getByRole("button", { name: "Add label" }).click();
-  await expect(labels.getByRole("alert")).toHaveText('a label named "bug" already exists');
+  await expect(labels.getByRole("alert")).toHaveText('A label named "bug" already exists');
+  // API error codes and server failures read as sentences (one helper for every screen).
+  await page.route("/api/labels", (r) => r.fulfill({ status: 403, json: { error: "forbidden_origin" } }), { times: 1 });
+  await labels.getByRole("button", { name: "Add label" }).click();
+  await expect(labels.getByRole("alert")).toHaveText(/^Refused: the request did not come from this Polaris page/);
+  await page.route("/api/labels", (r) => r.fulfill({ status: 500, body: "boom" }), { times: 1 });
+  await labels.getByRole("button", { name: "Add label" }).click();
+  await expect(labels.getByRole("alert")).toHaveText(/^Something went wrong on the server/);
 
   // A project with a milestone.
   await page.getByRole("link", { name: "Projects" }).click();
@@ -58,6 +65,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await page.getByRole("button", { name: "Create cycle" }).click();
   await expect(page.getByRole("region", { name: "Current" })).toContainText("Cycle 1");
   await expect(page.getByRole("link", { name: "Current cycle" })).toBeVisible();
+  // A second (upcoming) cycle is deleted after a confirmation.
+  await page.getByRole("button", { name: "Create cycle" }).click();
+  await page.getByRole("region", { name: "Upcoming" }).getByRole("button", { name: "Cycle 2" }).click();
+  await page.getByRole("button", { name: "Delete cycle" }).click();
+  await expect(page.getByRole("dialog", { name: "Delete cycle?" })).toContainText("Its 0 tickets stay, without a cycle.");
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await expect(page).toHaveURL(/\/cycles$/);
+  await expect(page.getByRole("region", { name: "Current" })).toContainText("Cycle 1");
+  await expect(page.getByRole("region", { name: "Upcoming" })).toHaveCount(0);
 
   // Tickets with properties from the dialog; cards show them.
   await page.getByRole("link", { name: "Board" }).click();
@@ -118,6 +134,18 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await page.getByLabel("Assignee").selectOption({ label: "Me (me)" });
   await page.getByLabel("Milestone").selectOption({ label: "Beta" });
   await page.getByLabel("Estimate").selectOption({ label: "3 points" });
+  // A typed date saves once, when the field is left (not on every keystroke that makes a valid date).
+  const patches: string[] = [];
+  const onPatch = (r: { method(): string; url(): string; postData(): string | null }) => r.method() === "PATCH" && r.url().includes("/api/tickets/") && patches.push(r.postData() ?? "");
+  page.on("request", onPatch);
+  await page.getByLabel("Due date").focus();
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowUp"); // each step is a valid date (an input event)
+  const due = await page.getByLabel("Due date").inputValue();
+  expect(due).not.toBe("2026-11-30");
+  expect(patches).toEqual([]);
+  await page.getByLabel("Due date").blur();
+  await expect.poll(() => patches).toEqual([JSON.stringify({ due_date: due })]);
+  page.off("request", onPatch);
   await page.locator("h1").click();
   await page.keyboard.press("l");
   await page.getByLabel("Find or create label").fill("regression");
@@ -125,6 +153,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(props.locator(".menu-anchor > .chip", { hasText: "regression" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByLabel("Status")).toHaveValue("todo"); // the status select moved into the sidebar
+  // Only the moves allowed by hand are offered; a refusal (e.g. a run started meanwhile) reads as a sentence.
+  await expect(page.getByLabel("Status").locator("option")).toHaveText(["todo", "done", "failed"]);
+  await page.route("**/api/tickets/*", (r) => r.request().method() === "PATCH" ? r.fulfill({ status: 409, json: { error: "invalid_transition", from: "running", to: "done" } }) : r.fallback(), { times: 1 });
+  await page.getByLabel("Status").selectOption("done");
+  await expect(props.getByRole("alert")).toHaveText(/^A running ticket can't be set to done by hand\./);
+  await page.getByLabel("Status").selectOption("done");
+  await expect(page.getByLabel("Status").locator("option")).toHaveText(["done", "todo", "failed"]);
+  await page.getByLabel("Status").selectOption("todo");
+  await expect(page.getByLabel("Status")).toHaveValue("todo");
   await expect(page.getByRole("button", { name: "Run agent" })).toBeVisible(); // agent controls unchanged
   await shot("ticket-properties");
 
@@ -136,6 +173,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/, /No priority 1/]);
   await expect(page.getByRole("region", { name: "High" })).toContainText("TRA-1");
   await expect(page.getByRole("region", { name: "High" }).locator(".lrow")).toContainText("regression");
+  await expect(page.getByRole("region", { name: "High" }).getByRole("img", { name: "todo" })).toBeVisible(); // a row's status is announced
 
   // Save the view (project filter + list grouped by priority), then reopen it from Views.
   await addFilter(page, "Project", "Checkout");
@@ -161,6 +199,33 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page).toHaveURL(/group=priority/);
   await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/]);
 
+  // Edit the view: regroup the board, then rename and update it in place from the filter bar.
+  await expect(page).toHaveURL(/view=/);
+  await page.getByLabel("Group by").selectOption("label");
+  await page.getByRole("button", { name: "Edit view: Checkout by priority" }).click();
+  const edit = page.getByRole("dialog", { name: "Edit view" });
+  await expect(edit.getByLabel("View name")).toHaveValue("Checkout by priority");
+  await edit.getByLabel("View name").fill("Checkout by label");
+  await edit.getByRole("button", { name: "Update view" }).click();
+  await expect(edit).toBeHidden();
+  await expect(page.getByRole("button", { name: "Edit view: Checkout by label" })).toBeVisible();
+  await page.getByRole("link", { name: "Views" }).click();
+  const saved = page.getByRole("listitem", { name: "Checkout by label" });
+  await expect(saved).toContainText("group=label");
+  await expect(page.getByRole("listitem", { name: "Checkout by priority" })).toHaveCount(0);
+  // Edit from the Views page opens the same dialog on the board; Cancel leaves the view as it was.
+  await saved.getByRole("button", { name: "Edit view Checkout by label" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit view" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await expect(page).not.toHaveURL(/edit=1/);
+  await expect(page.locator(".list h2").first()).toHaveText(/bug|regression|No labels/);
+  // Delete asks first.
+  await page.getByRole("link", { name: "Views" }).click();
+  await saved.getByRole("button", { name: "Delete view Checkout by label" }).click();
+  await expect(page.getByRole("dialog", { name: "Delete view?" })).toContainText("Tickets are not changed.");
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText("No saved views.")).toBeVisible();
+
   // Cycle and project pages show progress.
   await page.getByRole("link", { name: "Current cycle" }).click();
   await expect(page.getByRole("region", { name: "Progress" })).toContainText("0/1");
@@ -173,8 +238,15 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.getByRole("listitem", { name: "Beta" })).toContainText("0/1");
   await shot("project");
 
-  // Both themes render the board (screenshots in the report).
+  // A label renamed in Settings shows on the cards without a reload.
+  await page.getByRole("link", { name: "Settings" }).click();
+  await labels.getByLabel("Rename frontend").fill("ui");
+  await labels.getByLabel("Rename frontend").blur();
+  await expect(labels.locator(".chip", { hasText: /^ui$/ })).toBeVisible();
   await page.getByRole("link", { name: "Board" }).click();
+  await expect(todo.getByRole("button", { name: /Polish cart button/ }).locator(".chip")).toHaveText("ui");
+
+  // Both themes render the board (screenshots in the report).
   for (const [theme, bg] of [["Dark", "rgb(16, 16, 18)"], ["Light", "rgb(255, 255, 255)"]]) {
     await page.getByLabel("Theme").selectOption(theme);
     await expect(page.locator("body")).toHaveCSS("background-color", bg);
@@ -190,4 +262,8 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.getByLabel("Priority")).toHaveValue("2");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await shot("ticket-phone");
+  for (const link of ["Cycles", "Views"]) {
+    await page.getByRole("link", { name: link, exact: true }).click();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  }
 });

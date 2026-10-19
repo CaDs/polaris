@@ -22,4 +22,13 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
   await expect(page.getByRole("button", { name: "Show run #2" })).toHaveCount(0); // fixed within run #1
   await expect(page.getByLabel("Diff")).toContainText("fixed.txt");
   expect(git(repo, "for-each-ref", "refs/heads/polaris")).toContain("polaris/");
+
+  // A reviewer that writes files: the snapshot is restored and the transcript says so, between the review round and its verdict.
+  await page.getByRole("link", { name: "Board" }).click();
+  await newTicket(page, "Tampered review", "REVIEW-WRITES change");
+  await openTicket(page, "Tampered review");
+  await page.getByRole("button", { name: "Run agent" }).click();
+  await expect(transcript.getByRole("separator").filter({ hasText: "Model review round 1" })).toBeVisible({ timeout: 60_000 });
+  await expect(transcript).toContainText("The reviewer changed files; its changes were undone.", { timeout: 60_000 });
+  await expect(transcript).toContainText("Approved by model review");
 });

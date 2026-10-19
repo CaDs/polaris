@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Transcript } from "./TicketView.tsx";
-import { api, type Run } from "./ui.tsx";
+import { Alert, Loading, api, when, type Run } from "./ui.tsx";
 
 // M10: the project wiki. The index with stale flags, a page viewer/editor, the wiki repo's history, and the maintainer runs.
 type PageInfo = { path: string; title: string; summary: string; stale: string | null; verified: string; updated: string };
@@ -11,7 +11,6 @@ type WikiRun = {
 type Data = { enabled: boolean; configured: boolean; index: string; pages: PageInfo[]; log: string; problems: string[]; runs: WikiRun[] };
 type Commit = { sha: string; subject: string; date: string };
 
-const when = (iso: string | number) => new Date(iso).toLocaleString();
 const resolvePath = (from: string, to: string) => {
   const parts = from.split("/").slice(0, -1);
   for (const p of to.split("/")) p === ".." ? parts.pop() : p !== "." && parts.push(p);
@@ -60,12 +59,14 @@ function PageView({ path, open, reload }: { path: string; open: (path: string) =
   const [body, setBody] = useState<string | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => {
+  const load = () => {
     setBody(null);
     setDraft(null);
     setError("");
     api<{ body: string }>(`/api/wiki/page?path=${encodeURIComponent(path)}`).then((r) => setBody(r.body), (e) => setError(e.message));
-  }, [path]);
+  };
+  useEffect(load, [path]);
+  const stale = /changed since you opened it/.test(error); // a maintainer run (or another tab) wrote the page meanwhile
   async function save() {
     setError("");
     try {
@@ -84,7 +85,8 @@ function PageView({ path, open, reload }: { path: string; open: (path: string) =
         <h3 className="grow mono">{path}</h3>
         {body !== null && draft === null && <button className="btn" onClick={() => setDraft(body)}>Edit</button>}
       </div>
-      {error && <p className="error" role="alert" style={{ whiteSpace: "pre-wrap" }}>{error}</p>}
+      <Alert error={error} />
+      {stale && <button className="btn" onClick={load}>Reload page (discards your edit)</button>}
       {draft !== null ? (
         <>
           <textarea aria-label="Page text" className="mono" rows={18} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
@@ -163,7 +165,7 @@ export function Wiki() {
     await load();
   };
 
-  if (!d) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!d) return <Loading error={error} />;
   const stale = d.pages.filter((p) => p.stale);
   return (
     <div className="wiki">
@@ -175,7 +177,7 @@ export function Wiki() {
         {linted && (d.problems.length ? <span className="error" role="status">{d.problems.length} problem{d.problems.length === 1 ? "" : "s"}</span> : <span className="ok-text" role="status">Lint passed</span>)}
         {active && <span className="muted" role="status">A wiki run is working…</span>}
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {linted && d.problems.length > 0 && <ul aria-label="Lint problems">{d.problems.map((p) => <li key={p} className="error">{p}</li>)}</ul>}
 
       <section aria-label="Index">

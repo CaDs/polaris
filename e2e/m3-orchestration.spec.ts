@@ -87,6 +87,8 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await page.getByRole("dialog").getByRole("button", { name: "Reject" }).click();
   await expect(status).toHaveValue("todo");
   await expect(page.getByRole("region", { name: "Review" })).toBeHidden();
+  await expect(transcript.locator(".note.err")).toContainText("Rejected");
+  await expect(transcript.locator(".note.err")).toContainText("not needed");
   expect(git(repo, "for-each-ref", "refs/heads/polaris")).toBe("");
   expect(git(repo, "log", "--format=%s", "main")).not.toContain("Reject me");
 });

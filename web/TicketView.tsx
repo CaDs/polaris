@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { COLUMNS, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, Confirm, Dialog, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, waiting, type Child, type Run, type Status, type Ticket } from "./ui.tsx";
 
 type Detail = Ticket & { runs: Run[]; children?: Child[] };
 type Ev = { seq: number; type: string; payload: any };
@@ -26,12 +26,13 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   }, [ticket.id]);
   useEffect(() => void api<{ test_command: string }>("/api/settings").then((s) => setWorkspaceTest(s.test_command), () => {}), []);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
-  // An epic's children change while the epic itself does not.
+  // Poll what changes while the ticket itself does not: an epic's children, a wiki run after approval.
+  const busy = (ticket.kind === "epic" && ticket.status !== "done") || !!detail?.runs.some((r) => r.status === "queued" || r.status === "running");
   useEffect(() => {
-    if (ticket.kind !== "epic" || ticket.status === "done") return;
+    if (!busy) return;
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
-  }, [ticket.id, ticket.kind, ticket.status]);
+  }, [ticket.id, busy]);
 
   async function patch(body: object) {
     setError("");
@@ -112,7 +113,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <button className="btn primary" onClick={() => run()} disabled={running}>{epic ? "Run planner" : "Run agent"}</button>
         <button className="btn danger" onClick={() => setConfirming(true)}>Delete ticket</button>
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
       <label>
         Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={workspaceTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
@@ -148,19 +149,16 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
           </table>
         </div>
       )}
-      {current && <Transcript key={current.id} run={current} onFinish={() => (reload(), load())} />}
+      {/* Keyed on the status too: an approve or reject lands on a finished run's log, so the transcript replays it. */}
+      {current && <Transcript key={`${current.id}-${ticket.status}`} run={current} onFinish={() => (reload(), load())} />}
 
       {retrying && providers && (
         <RetryDialog run={retrying} providers={providers} close={() => setRetrying(null)} go={(c) => (setRetrying(null), run(c))} />
       )}
       {confirming && (
-        <Dialog title="Delete ticket?" onClose={() => setConfirming(false)}>
-          <p className="muted">{ticket.key} and all of its runs will be permanently deleted.</p>
-          <div className="row end">
-            <button className="btn" onClick={() => setConfirming(false)}>Cancel</button>
-            <button className="btn danger" autoFocus onClick={remove}>Delete</button>
-          </div>
-        </Dialog>
+        <Confirm title="Delete ticket?" onConfirm={remove} onClose={() => setConfirming(false)}>
+          {ticket.key} and all of its runs will be permanently deleted.
+        </Confirm>
       )}
     </div>
   );
@@ -206,6 +204,7 @@ function Prompt({ text }: { text: string }) {
 
 export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }) {
   const [events, setEvents] = useState<Ev[]>([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const es = new EventSource(`/api/runs/${run.id}/events`);
@@ -239,9 +238,10 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         </h3>
         <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.in)} · out {fmt(usage.out)} · cached {fmt(usage.cached)} · cache hit {hitRate(usage.in, usage.cached)}</span>
         {!finished && (run.status === "running" || run.status === "queued") && (
-          <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch(() => {})}>Cancel</button>
+          <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch((e) => setError(e.message))}>Cancel</button>
         )}
       </div>
+      <Alert error={error} />
       {skills && (
         <p className="muted" aria-label="Skills offered">
           Skills offered: {skills.length ? skills.map((k: any) => <span key={k.path} className="mono" title={`${k.description} (${k.path})`}>{k.name} </span>) : "none"}
@@ -338,6 +338,17 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
               )}
             </div>
           );
+        if (e.type === "review")
+          return p.decision === "approved"
+            ? <div key={e.seq} className="note ok"><strong>Approved</strong>{p.merge_sha && <> · merged as <span className="mono">{p.merge_sha.slice(0, 8)}</span></>}</div>
+            : <div key={e.seq} className="note err"><strong>Rejected</strong>{p.note && <p className="msg">{p.note}</p>}</div>;
+        if (e.type === "wiki")
+          return p.problems ? (
+            <details key={e.seq} className="gate err" open>
+              <summary>Wiki {p.op} rejected: {p.problems.length} problem{p.problems.length === 1 ? "" : "s"}, nothing committed</summary>
+              <ul>{p.problems.map((x: string) => <li key={x}>{x}</li>)}</ul>
+            </details>
+          ) : <div key={e.seq} className="note ok"><strong>Wiki {p.op}</strong> · {p.commit ? <>committed <span className="mono">{p.commit.slice(0, 8)}</span></> : "nothing to change"}</div>;
         if (e.type === "error") return <p key={e.seq} className={p.retrying ? "warn" : "error"}>{p.kind}: {p.message}</p>;
         if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns.</p>;
         return null;
@@ -381,7 +392,7 @@ function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
         <button className="btn" onClick={() => setRejecting(true)} disabled={busy}>Reject</button>
         <button className="btn primary" onClick={() => decide("approve")} disabled={busy || (!epic && !d)}>Approve</button>
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       {epic ? (
         <p className="muted">The planner completed this epic. Its children were merged one by one; approving marks the epic done.</p>
       ) : d ? <Diff text={d.diff} /> : !error && <p className="muted">Loading diff…</p>}
@@ -473,6 +484,7 @@ function Children({ parent, items, open }: { parent: string; items: Child[]; ope
             <span className="grow">{c.title} {c.kind === "epic" && <span className="badge epic">Epic</span>}</span>
             {c.depends_keys.length > 0 && <span className="muted" title="Dependencies">← {c.depends_keys.join(", ")}</span>}
             <span className="muted">{c.label}</span>
+            {c.test_command && <span className="mono muted" title="Test command">{c.test_command}</span>}
             {c.run_model && <span className="mono muted">{c.run_model}</span>}
             <span className="muted">{fmt(c.tokens_in + c.tokens_out)} tok</span>
           </div>

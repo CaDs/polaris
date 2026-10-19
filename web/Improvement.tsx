@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Transcript } from "./TicketView.tsx";
-import { Dialog, api, cost, fmt, type Run } from "./ui.tsx";
+import { Alert, Confirm, Dialog, Loading, api, cost, fmt, when, type Run } from "./ui.tsx";
 
 // M6: the three self-improvement loops, all visible and reversible. Lessons apply to the next run at once (so Restore is
 // one click); a prompt version only applies once a human promotes it, and only when its eval beats the active one.
@@ -24,7 +24,6 @@ type Data = {
   evals: { cases: EvalCase[]; runs: EvalRun[] };
 };
 
-const when = (ms: number) => new Date(ms).toLocaleString();
 const score = (e: EvalRun) => (e.status === "done" ? `${e.passed}/${e.total}` : `running, ${e.results?.filter((r) => r.case_passed !== null).length ?? 0}/${e.case_ids.length} done`);
 
 export function Improvement() {
@@ -51,10 +50,10 @@ export function Improvement() {
     await load();
   };
 
-  if (!d) return <p className="muted pad">{error || "Loading…"}</p>;
+  if (!d) return <Loading error={error} />;
   return (
     <div className="improve">
-      {error && <p className="error" role="alert">{error}</p>}
+      <Alert error={error} />
       <Lessons data={d.lessons} act={act} />
       <Prompts data={d.prompts} runs={d.evals.runs} act={act} />
       <Evals data={d.evals} act={act} />
@@ -191,6 +190,7 @@ function NewVersion({ body, max, close, save }: { body: string; max: number; clo
 
 function Evals({ data, act }: { data: Data["evals"]; act: Act }) {
   const [shown, setShown] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<EvalCase | null>(null);
   const all = data.runs.flatMap((e) => e.results ?? []);
   const run = all.find((r) => r.id === shown);
   return (
@@ -207,7 +207,7 @@ function Evals({ data, act }: { data: Data["evals"]; act: Act }) {
             {data.cases.map((c) => (
               <tr key={c.id}>
                 <td><span className="mono">{c.key}</span> {c.title}</td><td className="mono">{c.base_sha.slice(0, 8)}</td><td className="mono">{c.test_command}</td>
-                <td><button className="link" onClick={() => act(() => api(`/api/evals/cases/${c.id}`, "DELETE"))}>Remove</button></td>
+                <td><button className="btn danger" aria-label={`Remove ${c.key} from evals`} onClick={() => setRemoving(c)}>Remove</button></td>
               </tr>
             ))}
             {data.cases.length === 0 && <tr><td colSpan={4} className="muted">No eval cases yet.</td></tr>}
@@ -234,6 +234,11 @@ function Evals({ data, act }: { data: Data["evals"]; act: Act }) {
         </table>
       </div>
       {run && <Transcript key={run.id} run={run} onFinish={() => {}} />}
+      {removing && (
+        <Confirm title="Remove eval case?" action="Remove" onConfirm={() => (setRemoving(null), act(() => api(`/api/evals/cases/${removing.id}`, "DELETE")))} onClose={() => setRemoving(null)}>
+          {removing.key} is no longer replayed by evals. Past eval runs keep their results; the ticket is not changed.
+        </Confirm>
+      )}
     </section>
   );
 }

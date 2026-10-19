@@ -11,7 +11,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Dialog, api, useTheme, type Ticket, type Theme } from "./ui.tsx";
+import { Alert, Dialog, Loading, api, errorText, useTheme, type Ticket, type Theme } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -41,7 +41,7 @@ function AuthForm() {
       mode === "up"
         ? await authClient.signUp.email({ name: f.name, email: f.email, password: f.password })
         : await authClient.signIn.email({ email: f.email, password: f.password });
-    setError(error?.message ?? "");
+    setError(error ? errorText(error, error.status) : ""); // e.g. "Sign-up is closed: this Polaris already has an owner (…)"
   }
 
   return (
@@ -65,8 +65,8 @@ function AuthForm() {
           autoComplete={mode === "in" ? "current-password" : "new-password"}
         />
       </label>
-      {error && <p className="error" role="alert">{error}</p>}
-      <button>{mode === "in" ? "Sign in" : "Create account"}</button>
+      <Alert error={error} />
+      <button className="btn primary">{mode === "in" ? "Sign in" : "Create account"}</button>
       <button
         type="button"
         className="link"
@@ -88,7 +88,7 @@ function CreateWorkspace() {
     const { name } = fields(e);
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const { error } = await authClient.organization.create({ name, slug });
-    setError(error?.message ?? "");
+    setError(error ? errorText(error, error.status) : "");
   }
 
   return (
@@ -98,8 +98,8 @@ function CreateWorkspace() {
       <label>
         Name <input name="name" required autoFocus />
       </label>
-      {error && <p className="error" role="alert">{error}</p>}
-      <button>Create</button>
+      <Alert error={error} />
+      <button className="btn primary">Create</button>
     </form>
   );
 }
@@ -124,6 +124,11 @@ function useTickets() {
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
   const reload = useCallback(() => api<Ticket[]>("/api/tickets").then(setTickets, () => {}), []);
   useEffect(() => void reload(), [reload]);
+  // Changes made elsewhere (another tab, the CLI) show up when the window is back in front.
+  useEffect(() => {
+    addEventListener("focus", reload);
+    return () => removeEventListener("focus", reload);
+  }, [reload]);
   const anyRunning = tickets?.some((t) => t.status === "running");
   useEffect(() => {
     if (!anyRunning) return;
@@ -162,6 +167,7 @@ function Dashboard({ email }: { email: string }) {
   const search = q < 0 ? "" : loc.slice(q + 1);
   const [, section = "", sub] = path.split("/");
   useEffect(reloadTracker, [path]); // pickers pick up labels/projects/cycles made elsewhere (e.g. by a planner)
+  useEffect(() => void (tracker && reload()), [tracker]); // a renamed or deleted label, project or cycle shows on the cards
   const number = section === "t" ? sub : undefined;
   const ticket = number ? tickets?.find((t) => t.number === Number(number)) : undefined;
   const page = PAGES.find(([p]) => p === section)?.[1];
@@ -220,7 +226,7 @@ function Dashboard({ email }: { email: string }) {
           ) : section === "projects" ? (
             sub ? <ProjectPage id={sub} go={go} open={open} tick={tickets} /> : <Projects go={go} />
           ) : section === "cycles" ? (
-            sub ? <CyclePage id={sub} open={open} tick={tickets} /> : <Cycles go={go} />
+            sub ? <CyclePage id={sub} go={go} open={open} tick={tickets} /> : <Cycles go={go} />
           ) : section === "views" ? (
             <Views go={go} />
           ) : number ? (
@@ -229,7 +235,7 @@ function Dashboard({ email }: { email: string }) {
                 <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={open} />
                 <Properties ticket={ticket} tickets={tickets ?? []} reload={reload} />
               </div>
-            ) : <p className="muted pad">{tickets ? "Ticket not found." : "Loading…"}</p>
+            ) : tickets ? <p className="muted pad">Ticket not found.</p> : <Loading />
           ) : (
             <Issues search={search} go={go} all={tickets} open={open} />
           )}
@@ -320,7 +326,7 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
             ))}
           </fieldset>
         )}
-        {error && <p className="error" role="alert">{error}</p>}
+        <Alert error={error} />
         <div className="row end">
           <button type="button" className="btn" onClick={close}>Cancel</button>
           <button className="btn primary">Create ticket</button>
