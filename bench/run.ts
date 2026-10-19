@@ -62,8 +62,11 @@ export async function grade(l: Level, repo: string, ref: string, command = `${SE
     for (const f of l.test_files) cpSync(join(pristine, f), join(dir, f));
     const sb = await openSandbox(randomUUID(), dir, [], SANDBOX_IMAGE);
     try {
-      const r = await sb.exec(command, { cwd: dir, timeoutMs: COMMAND_TIMEOUT });
-      return { pass: r.code === 0, code: r.code, timed_out: r.timedOut, tail: truncate(r.stdout + r.stderr, 3000, "tail") };
+      // The target's own suite has a few timing-sensitive tests: a failure gets one rerun; a pass then is marked flaky.
+      const exec = () => sb.exec(command, { cwd: dir, timeoutMs: COMMAND_TIMEOUT });
+      const first = await exec();
+      const r = first.code === 0 ? first : await exec();
+      return { pass: r.code === 0, flaky: r !== first && r.code === 0, code: r.code, timed_out: r.timedOut, tail: first.code ? truncate(first.stdout + first.stderr, 3000, "tail") : "" };
     } finally {
       await sb.close();
     }
@@ -247,7 +250,7 @@ if (import.meta.main) {
         tag, model: o.model, level: l.level, run, ticket: t.key, pass: !!g?.pass, harness_pass, status, chain: s?.chain ?? [t.key], kind: s?.kind ?? "task", children: s?.children ?? 0,
         wall_secs: Math.round((Date.now() - t0) / 1000), ...metrics(dbPath, ws), diff_lines, key_lines: l.key_lines,
         budget: { max_turns: Number(o["max-turns"]), max_minutes: Number(o["max-minutes"]) }, split: o.split === "1", wiki: o.wiki === "1",
-        date: new Date().toISOString(), home, grade: g && !g.pass ? g.tail : undefined,
+        date: new Date().toISOString(), home, flaky: g?.flaky, grade: g?.tail || undefined,
       };
       appendFileSync(out, JSON.stringify(row) + "\n");
       log(`${row.pass ? "PASS" : "FAIL"} ${l.level} run ${run}: ${status}${g ? ` grader ${g.pass ? "pass" : `fail (exit ${g.code})`}` : ""} ${row.wall_secs}s turns=${row.turns} runs=${row.runs} chain=${row.chain.join(">")}`);

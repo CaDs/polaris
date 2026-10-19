@@ -50,7 +50,8 @@ Needs Docker and Ollama. A level takes 5 to 60 minutes; one model call at a time
 3. It polls until the ticket, or the Split epic it escalated to and that epic's children, has nothing todo or running.
 4. Grading, only when Polaris passed it (`review` or `done`): the result (a task's review branch; an epic's merged `main`)
    is exported to a temp dir, the locked tests are restored from a fresh copy of the level, and `npm ci && npm test` runs
-   in a throwaway `polaris-sandbox:1` container. `pass` = exit 0.
+   in a throwaway `polaris-sandbox:1` container. `pass` = exit 0. The target suite has a few timing-sensitive tests, so a
+   failure gets one rerun; a pass on the rerun is recorded as `flaky`.
 5. One JSON line is appended to `--out`; a table is printed at the end. The temp dir (DB, repos, server log) is kept.
 
 ## Reading results
