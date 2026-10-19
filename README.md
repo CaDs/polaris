@@ -1,5 +1,26 @@
 # Polaris
 
+```text
+      *                     .                  .
+               .            :                       *
+                            |
+                .           |           .
+  .                .        |        .
+                      .     |     .
+                         \  |  /
+   .  - -- --- ----=====<{  *  }>=====---- --- -- -  .
+                         /  |  \
+                      .     |     .               .
+                   .        |        .
+                .           |           .
+     *                      |
+                            :
+                            .               *
+
+                P   O   L   A   R   I   S
+           tickets in  ·  reviewed commits out
+```
+
 Polaris is a self-hosted coding-agent harness with a web dashboard. You file tickets; AI agents work them in isolated
 sandboxes; tests and a model reviewer check every change before you see it; you approve and it merges. It runs on
 hosted models (Anthropic, OpenAI) or entirely on your own machine with local models through Ollama.
@@ -55,11 +76,11 @@ cost per run, and replay any transcript.
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
 | **Test gate** | Your test command must pass. A failure is re-run once (flaky tests don't fail good work), then fed back into the same conversation for a fix, then retried fresh (up to 3 attempts). |
 | **Model review** | After the tests pass, the same model (or a reviewer model you pick per workspace) reviews the change with read-only tools and returns findings, which go back to the worker to fix (up to 3 reviews, so 2 fix rounds, per attempt). Any file the reviewer writes is undone. Its budget scales with the size of the diff. |
-| **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. |
+| **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. Monthly spending caps per workspace and caps per epic or ticket (cost or tokens). A stuck monitor nudges, then ends an attempt that repeats itself or stops making progress. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
 | **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage with a decision model. |
 | **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
-| **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
+| **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). Failure mining: per-run metrics, failure classes and draft improvement tickets. A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
 | **Tracker** | Labels, priority (the run queue starts urgent tickets first), assignee, estimate, due date, projects with milestones, cycles (sprints), filters as shareable URLs, full-text search, saved views, command palette (Cmd/Ctrl+K), keyboard shortcuts, comments, a notification bell (runs to review, failures, comments) and a live board over a workspace event stream. |
 
 ## Getting started
@@ -203,23 +224,23 @@ an Apple M4 Max:
 
 - **Prove splitting on real failures.** Splitting is built and tested with scripted models, but not yet measured on the
   levels a real model fails (Ornith L4–L6).
-- **Benchmark in the repository.** Move the ladder (tickets, locked tests, answer keys, runner) into this repo, with 3 runs
-  per level and a held-out set, so results are trustworthy and reproducible.
-- **Failure mining.** Per-run metrics (tool errors, repeated reads, stuck score, budget use), failure classes, and draft
-  improvement tickets generated from them.
+- **Benchmark results.** The ladder is in `bench/` (tickets, locked tests, answer keys, runner, grader). Still missing: a
+  held-out set, and committed results with 3 runs per level, so the findings above can be reproduced.
 - **Candidate-harness pipeline and nightly loop.** Polaris proposes changes to itself, runs the benchmark on the candidate,
-  and queues winners for human promotion with rollback: the recursive self-improvement loop.
-- **Stuck monitor.** A small decision model (System One style) checks every few turns whether the agent is stuck. An
-  offline replay separated stuck runs from healthy ones cleanly; it is not wired in yet.
+  and queues winners for human promotion with rollback: the recursive self-improvement loop. Today only worker prompts
+  (evals) and memory (wiki, lessons) improve; failure mining drafts harness tickets but nothing evaluates them.
+- **Stuck monitor, model-based.** The heuristic monitor (repeated calls or errors, no progress) is wired in. A small
+  decision model (System One style) checking every few turns is not; an offline replay separated stuck runs from healthy
+  ones cleanly.
 - **Smaller items:**
   - the 2M token cap is per agent session, not per attempt;
   - inviting members and switching workspaces in the UI;
-  - a separate reviewer model per workspace;
-  - ticket comments and notifications;
   - formatted dates.
 - **Hardening:**
   - containers have network access;
-  - no spending caps per epic or workspace;
+  - spending caps are checked between agent sessions, so a session in flight can overshoot a cap;
+  - a reviewer that errors is skipped (fail-open) and the change still goes to human review;
+  - the CLI (`npm run agent`) runs on the host with no sandbox, test gate or spending cap;
   - the Anthropic and OpenAI APIs and the ChatGPT sign-in are tested only against mocks, not with real keys.
 - **Not in scope yet:** multi-user deployment, hosting, backups.
 

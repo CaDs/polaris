@@ -23,7 +23,7 @@ React board, node:test suite). Each level adds a locked acceptance test the agen
 - `target/`: the target repo template. `levels/L<n>.patch` turns it into level n's starting point (adds the locked
   test; for L2, whose test is already in the template, removes the code it asks for).
 - `keys/L<n>.patch`: the reference solution. Used only by `--check` and the grader's unit test; never in a target repo.
-- `run.ts`: the runner and grader. `report.ts`: side-by-side table of results files. `results/`: committed results.
+- `run.ts`: the runner and grader. `report.ts`: side-by-side table of results files. `results/`: where results go (none committed yet).
 
 ## Run
 
