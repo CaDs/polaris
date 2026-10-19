@@ -112,7 +112,8 @@
 
 ## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
 - [x] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
-- [ ] One turn and token budget per attempt (today both apply per agent session: up to 4 × max turns with fix rounds)
+- [x] One turn budget per attempt: fix rounds get what is left (at least 10 turns)
+- [ ] The 2M token cap per attempt, not per agent session
 - [ ] Invite members and switch workspaces in the UI
 - [ ] Benchmark in the repo: the complexity ladder (tickets, locked tests, answer keys, runner) with 3 runs per level and a held-out set
 - [ ] Measure automatic splitting on levels a real model fails at the fair budget

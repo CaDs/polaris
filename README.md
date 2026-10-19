@@ -55,7 +55,7 @@ cost per run, and replay any transcript.
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
 | **Test gate** | Your test command must pass. A failure is re-run once (flaky tests don't fail good work), then fed back into the same conversation for a fix, then retried fresh (up to 3 attempts). |
 | **Model review** | After the tests pass, the same model reviews the change with read-only tools and returns findings, which go back to the worker to fix (up to 3 reviews, so 2 fix rounds, per attempt). Any file the reviewer writes is undone. Its budget scales with the size of the diff. |
-| **Budgets** | Max turns per agent session (default 120; each fix round gets as many again) and max minutes per attempt (default 60, fix rounds included), with a "wrap up" note near either limit. |
+| **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
 | **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage with a decision model. |
 | **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
@@ -139,7 +139,7 @@ Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARI
 
 Repository and commands, protected paths, sandbox image, compaction cap, model review (on), automatic splitting (on),
 child size hint for the planner, triage model (off), auto-approve child tickets (off), project wiki (on),
-max turns per agent session and max minutes per attempt, labels. Saving merges: a field left out keeps its value, `null`
+max turns and max minutes per attempt, labels. Saving merges: a field left out keeps its value, `null`
 resets it to the default.
 
 ### In your repository
@@ -208,8 +208,7 @@ an Apple M4 Max:
 - **Stuck monitor.** A small decision model (System One style) checks every few turns whether the agent is stuck. An
   offline replay separated stuck runs from healthy ones cleanly; it is not wired in yet.
 - **Smaller items:**
-  - one turn and token budget per attempt (today both apply per agent session, so an attempt with fix rounds can use
-    up to 4 × max turns);
+  - the 2M token cap is per agent session, not per attempt;
   - inviting members and switching workspaces in the UI;
   - a separate reviewer model per workspace;
   - ticket comments and notifications;

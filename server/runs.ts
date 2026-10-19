@@ -38,6 +38,8 @@ export const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki a
 // review findings. One that ends without finishing (budget, provider) fails the attempt as "<why>; the fix round ended:
 // <reason>", retried fresh like a gate failure while attempts remain; its provider/environment errors are never split.
 const GATE_FIX_ROUNDS = 1;
+// max_turns is per attempt: a fix round gets what the attempt has left, but at least this many (a one-test fix needs a few).
+const FIX_ROUND_MIN_TURNS = 10;
 // A reviewer reads the whole change and a few callers: its turns grow with the changed lines (it once used 25 on a 10-line diff).
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
@@ -137,7 +139,7 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
       `- Test command: ${info.test.trim() ? `\`${info.test}\`. The harness runs it after you finish and it must exit 0` : "none (the harness runs no tests)"}`,
       ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
       "- git is read-only: status, diff and log work; commit and other writes fail. The harness commits your change after the tests pass",
-      `- Budget: ${info.budget.turns} turns (a fix round after failed tests or a review gets as many again) and ${info.budget.minutes} minutes for this attempt; a [harness] note tells you when 2 turns or little time are left`,
+      `- Budget: ${info.budget.turns} turns and ${info.budget.minutes} minutes for this attempt (fix rounds after failed tests or a review use what is left); a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
   ];
   if (info.skills.length) parts.push(skillsText(info.skills));
@@ -525,7 +527,7 @@ async function execute(runId: string) {
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
-    // Turns count per agent call (initial run, each fix round); the minutes run from the attempt's start, across all of them.
+    // Turns and minutes are per attempt: fix rounds get what is left (turns: at least FIX_ROUND_MIN_TURNS).
     const limits = ev || !s ? EVAL_WORKER : s;
     const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
@@ -558,7 +560,7 @@ async function execute(runId: string) {
     };
     // A fix round (FIX_ROUNDS): resumes the worker's own conversation with `message`; false = it ended the attempt.
     const fixRound = async (why: string, message: string) => {
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: { ...workerBudget, maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - res.turns) }, finishHint: WORKER_FINISH });
       addUsage(res.usage, a.usage);
       res.turns += a.turns;
       reply = finalText(a.messages);

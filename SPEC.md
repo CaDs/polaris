@@ -34,8 +34,8 @@ loop: resp = provider.stream(messages, tools) → append → no tool calls? done
 
 Worker budget: workspace settings `max_turns` (10..500, default 120) and `max_minutes` (5..600, default 60). `max_minutes`
 is one wall-clock deadline for the whole attempt (counted from the run's start; the first run, gate fix rounds and review
-fix rounds share it); `max_turns` applies per agent call (the first run and each fix round count separately, so an attempt
-can use up to 4 × `max_turns`), and so does the 2M token cap. The Settings label for max turns still says "per attempt". The loop
+fix rounds share it); `max_turns` is also per attempt: a fix round gets what is left, but at least `FIX_ROUND_MIN_TURNS` (10),
+so a short fix is still possible. The 2M token cap applies per agent call. The loop
 checks `budget.deadline` (epoch ms) at the top of each turn and ends with `time budget exhausted (<n> min)`. The
 `finishHint` fires once, when 2 turns are left or less than max(2 min, 10% of the call's window) remains, whichever
 comes first. Planner (50 turns), reviewer, wiki and CLI runs keep their own budgets. Eval case runs use the frozen
@@ -248,7 +248,7 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
 - **Environment.** The first message says the repository is at `/work` in the sandbox, also every shell command's working
   directory; tool paths are relative to it (absolute `/work/...` is accepted). It names the gate's test command (the
   ticket's, else the workspace's; an eval case's frozen one), the read-only paths, that git is read-only (status, diff and
-  log work; the harness commits), and the budget (max turns per agent session, max minutes for the attempt).
+  log work; the harness commits), and the budget (max turns and max minutes for the attempt).
 - **Tool input errors.** `InvalidArguments` about a tool's input shape (missing or mistyped field) ends with
   `Expected input: {command: string, timeout?: number}`, derived from the tool's schema. Path errors do not.
 - **Per-ticket test command.** The ticket view and New ticket dialog edit `tickets.test_command` (empty = workspace default).

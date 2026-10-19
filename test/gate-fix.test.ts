@@ -112,3 +112,10 @@ test("reviewer budget: clamp(6 + ceil(lines / 8), 8, 25) from the change's size"
   assert.deepEqual(await budgetFor("seq 1 40 > big.txt"), [12, 41]);
   assert.deepEqual(await budgetFor("seq 1 500 > big.txt"), [25, 501]);
 });
+
+test("max_turns is per attempt: a fix round gets the turns the worker left, not a fresh budget", async () => {
+  await settings({ max_turns: 20 }); // the worker uses 4, so the stalling fix round gets 16
+  const t = await ticketRun("GATE-FIX-STALL change");
+  await settings({ max_turns: 120 });
+  assert.match(events(t.runs[0].id, "run_finished")[0].reason, /the fix round ended: turn budget exhausted \(16\)/);
+});
