@@ -505,6 +505,21 @@ export function notify(ws: string, ticketId: string, kind: "review" | "failed" |
   const id = randomUUID();
   db.prepare("INSERT INTO notifications (id, workspace_id, ticket_id, kind, text, actor_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, ws, ticketId, kind, text.slice(0, 300), actorId);
   touch(ws, { type: "notification", id });
+  if (kind !== "comment") slack(ticketId, text);
+}
+
+// POLARIS_SLACK_WEBHOOK (a Slack incoming webhook): runs to review and failures, with a link to the ticket. Comments
+// stay in the bell; a delivery failure is logged, never thrown.
+// ponytail: one webhook per server, a workspace setting when more than one workspace needs its own channel.
+function slack(ticketId: string, text: string) {
+  const hook = process.env.POLARIS_SLACK_WEBHOOK;
+  if (!hook) return;
+  const { number } = db.prepare("SELECT number FROM tickets WHERE id = ?").get(ticketId) as { number: number };
+  const url = `${process.env.WEB_ORIGIN ?? "http://localhost:5173"}/t/${number}`;
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }) })
+    .then((r) => r.ok || console.error(`slack webhook: HTTP ${r.status}`))
+    .catch((e) => console.error(`slack webhook: ${e.message}`));
 }
 
 const ticketOf = (c: Context<Env>) =>
