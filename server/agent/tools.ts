@@ -37,16 +37,48 @@ export function spill(ctx: ToolContext, text: string) {
 
 // Harness writes into the run root (spilled outputs, history): the agent may have planted symlinks there, so the dir must
 // resolve inside root and the file is opened without following one.
-// ponytail: check, then open; a dir swapped in between (by a process still running in the sandbox) wins. openat if that matters.
 export function writeScratch(root: string, rel: string, text: string, append = false) {
-  const dir = resolveIn(root, dirname(rel));
-  mkdirSync(dir, { recursive: true });
-  const { O_WRONLY, O_CREAT, O_NOFOLLOW, O_APPEND, O_TRUNC } = constants;
-  const fd = openSync(join(dir, basename(rel)), O_WRONLY | O_CREAT | O_NOFOLLOW | (append ? O_APPEND : O_TRUNC), 0o644);
+  writeAt(join(resolveIn(root, dirname(rel)), basename(rel)), text, append ? constants.O_APPEND : constants.O_TRUNC);
+}
+
+// Files at a resolveIn path are opened once, by descriptor, never following a final symlink: one planted after the check
+// (by a process still running in the sandbox) fails instead of redirecting the read or write outside root. null: no file.
+// ponytail: a parent dir swapped for a symlink between resolveIn and open still wins; openat if that matters.
+function openAt(file: string, flags: number) {
+  try {
+    return openSync(file, flags | constants.O_NOFOLLOW, 0o644);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    if (code === "ELOOP") throw new AgentError("InvalidArguments", `refusing to follow a symlink: ${file}`);
+    if (code === "EEXIST") throw new AgentError("InvalidArguments", `already exists: ${file}`);
+    throw e;
+  }
+}
+export function readAt(file: string) {
+  const fd = openAt(file, constants.O_RDONLY);
+  if (fd === null) return null;
+  try {
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+export function writeAt(file: string, text: string, mode: number = constants.O_TRUNC) {
+  mkdirSync(dirname(file), { recursive: true });
+  const fd = openAt(file, constants.O_WRONLY | constants.O_CREAT | mode)!;
   try {
     writeFileSync(fd, text);
   } finally {
     closeSync(fd);
+  }
+}
+function unlinkAt(file: string, p: string) {
+  try {
+    unlinkSync(file); // unlink never follows a symlink: it removes the link
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new AgentError("InvalidArguments", `file not found: ${p}`);
+    throw e;
   }
 }
 
@@ -185,8 +217,8 @@ const readFile: Tool = {
   async run(input, { root, reads, turn }) {
     const p = str(input, "path")!;
     const file = resolveIn(root, p);
-    if (!existsSync(file)) throw new AgentError("InvalidArguments", `file not found: ${p}`);
-    const buf = readFileSync(file);
+    const buf = readAt(file);
+    if (!buf) throw new AgentError("InvalidArguments", `file not found: ${p}`);
     if (buf.subarray(0, 8000).includes(0)) throw new AgentError("InvalidArguments", `${p} is a binary file; inspect it with shell (file, xxd, ...)`); // git's heuristic
     if (!buf.length) return "(empty file)";
     const lines = buf.toString("utf8").split("\n");
@@ -226,22 +258,20 @@ const editFile: Tool = {
     const oldS = str(input, "old_string")!;
     const newS = str(input, "new_string")!;
     const file = writable(root, p, protectedPaths);
-    const exists = existsSync(file);
+    const text = readAt(file)?.toString("utf8");
     if (oldS === "") {
-      if (exists) throw new AgentError("InvalidArguments", `${p} already exists; old_string must be non-empty to edit it`);
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, newS);
+      if (text !== undefined) throw new AgentError("InvalidArguments", `${p} already exists; old_string must be non-empty to edit it`);
+      writeAt(file, newS, constants.O_EXCL);
       return `created ${p}`;
     }
-    if (!exists) throw new AgentError("InvalidArguments", `file not found: ${p}`);
-    const text = readFileSync(file, "utf8");
+    if (text === undefined) throw new AgentError("InvalidArguments", `file not found: ${p}`);
     const occurs = (s: string) => text.split(s).length - 1;
     // read_file shows a CRLF file's line breaks as \n: match them, and write new_string's, as \r\n.
     const [o, n] = !occurs(oldS) && text.includes("\r\n") ? [oldS, newS].map((s) => s.replace(/\r?\n/g, "\r\n")) : [oldS, newS];
     const count = occurs(o);
     if (count === 0) throw new AgentError("InvalidArguments", `old_string not found in ${p} (it must match the file exactly, without read_file's line-number prefix)`);
     if (count > 1) throw new AgentError("InvalidArguments", `old_string occurs ${count} times in ${p}; include more context to make it unique`);
-    writeFileSync(file, text.replace(o, () => n));
+    writeAt(file, text.replace(o, () => n));
     return `edited ${p}`;
   },
 };
@@ -256,8 +286,7 @@ const deleteFile: Tool = {
   async run(input, { root, protectedPaths = [] }) {
     const p = str(input, "path")!;
     const file = writable(root, p, protectedPaths);
-    if (!existsSync(file)) throw new AgentError("InvalidArguments", `file not found: ${p}`);
-    unlinkSync(file);
+    unlinkAt(file, p);
     return `deleted ${p}`;
   },
 };
@@ -308,7 +337,7 @@ const applyPatch: Tool = {
     if (lines[0]?.trim() !== "*** Begin Patch" || lines.at(-1)?.trim() !== "*** End Patch") throw new AgentError("InvalidArguments", `patch must start with '*** Begin Patch' and end with '*** End Patch'. ${PATCH_HELP}`);
     // Virtual file state, so later operations see earlier ones; null = deleted.
     const state = new Map<string, string | null>();
-    const read = (file: string) => (state.has(file) ? state.get(file)! : existsSync(file) ? readFileSync(file, "utf8") : null);
+    const read = (file: string) => (state.has(file) ? state.get(file)! : readAt(file)?.toString("utf8") ?? null);
     const out: string[] = [];
     for (let i = 1; i < lines.length - 1; ) {
       const m = /^\*\*\* (Add|Delete|Update) File: (.+)$/.exec(lines[i].trim());
@@ -347,8 +376,8 @@ const applyPatch: Tool = {
     }
     if (!out.length) throw new AgentError("InvalidArguments", `patch contains no operations. ${PATCH_HELP}`);
     for (const [file, text] of state) {
-      if (text === null) unlinkSync(file);
-      else (mkdirSync(dirname(file), { recursive: true }), writeFileSync(file, text));
+      if (text === null) unlinkAt(file, file);
+      else writeAt(file, text);
     }
     return out.join("\n");
   },

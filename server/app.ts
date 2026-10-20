@@ -93,6 +93,8 @@ const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
 
 // The run r's latest run_metrics payload (M12), null before it finished.
 const METRICS = "SELECT payload FROM events WHERE run_id = r.id AND seq = (SELECT MAX(seq) FROM events WHERE run_id = r.id AND type = 'run_metrics')";
+// The run r's latest event of a type: its last model review (findings) and how it finished (status, reason).
+const LAST = (type: string) => `SELECT payload FROM events WHERE run_id = r.id AND type = '${type}' ORDER BY seq DESC LIMIT 1`;
 
 // Runs are only reachable through a ticket in the caller's workspace.
 const runIn = (c: Context<Env>) =>
@@ -215,8 +217,12 @@ app.post("/api/chats/proposals/:id/file", async (c) => {
 app.get("/api/tickets/:id", (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
-  const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
-    WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({ ...r, metrics: r.metrics && JSON.parse(r.metrics), usage: attributedUsage("run_id", r.id, false), background_usage: attributedUsage("run_id", r.id, true) }));
+  const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics, (${LAST("model_review")}) AS last_review, (${LAST("run_finished")}) AS finished
+    FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
+    WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({
+    ...r, metrics: r.metrics && JSON.parse(r.metrics), last_review: r.last_review && JSON.parse(r.last_review), finished: r.finished && JSON.parse(r.finished),
+    usage: attributedUsage("run_id", r.id, false), background_usage: attributedUsage("run_id", r.id, true),
+  }));
   if (t.kind !== "epic") return c.json({ ...t, runs, usage: attributedUsage("ticket_id", t.id), background_usage: attributedUsage("ticket_id", t.id, true) });
   const tree = db.prepare(`${TREE} ${TICKETS} WHERE t.workspace_id = ? AND t.id IN (SELECT id FROM d) AND t.id <> ? ORDER BY t.number`).all(t.id, c.get("workspaceId"), t.id).map((r) => hydrate(r)) as any[];
   return c.json({ ...t, runs, usage: treeUsage(t.id), background_usage: treeUsage(t.id, true), children: withStates(tree), spent: treeSpend(t.id) }); // totals and caps include the whole epic tree

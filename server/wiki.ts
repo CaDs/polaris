@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -235,7 +235,8 @@ function readTree(dir: string, rel = "", out: Tree = {}) {
 async function snapshotTo(ws: string, dest: string) {
   const dir = await ensureWiki(ws);
   mkdirSync(dest, { recursive: true });
-  await execFileP("sh", ["-c", 'git -C "$1" archive HEAD | tar -x -C "$2"', "sh", dir, dest]);
+  const { stdout } = await execFileP("git", ["-C", dir, "archive", "HEAD"], { encoding: "buffer", maxBuffer: 1 << 30 });
+  execFileSync("tar", ["-x", "-C", dest], { input: stdout });
 }
 
 // Exports the wiki's HEAD to <worktree>/.polaris/wiki and returns its content: wikiTampered compares against it at the gate
@@ -289,8 +290,14 @@ export function editPage(ws: string, path: string, body: string, email: string, 
     try {
       await openCopy(ws, tmp);
       const file = safe(tmp, path);
-      if (path === "log.md" || !existsSync(file)) throw new AgentError("InvalidArguments", path === "log.md" ? "log.md is maintained by the harness" : `no such page: ${path}`);
-      if (o.base !== undefined && readFileSync(file, "utf8").trimEnd() !== o.base.trimEnd()) throw new AgentError("InvalidArguments", `${path} changed since you opened it: reload it and edit again`);
+      if (path === "log.md") throw new AgentError("InvalidArguments", "log.md is maintained by the harness");
+      let cur: string;
+      try {
+        cur = readFileSync(file, "utf8");
+      } catch {
+        throw new AgentError("InvalidArguments", `no such page: ${path}`);
+      }
+      if (o.base !== undefined && cur.trimEnd() !== o.base.trimEnd()) throw new AgentError("InvalidArguments", `${path} changed since you opened it: reload it and edit again`);
       writeFileSync(file, body.endsWith("\n") ? body : `${body}\n`);
       return await finishCopy(ws, tmp, `edit ${path} by ${email}`, `## [${today()}] edit | ${path} by ${email}`, o.repo);
     } finally {

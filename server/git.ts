@@ -60,7 +60,10 @@ export const scratchPathspec = POLARIS_SCRATCH.map((p) => `:(exclude)${p}`);
 // Adds them to the repo's shared info/exclude (read by every worktree), so status/add/ls-files skip them.
 export async function excludeScratch(repo: string) {
   const file = await git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]);
-  const cur = existsSync(file) ? readFileSync(file, "utf8") : "";
+  let cur = "";
+  try {
+    cur = readFileSync(file, "utf8");
+  } catch {}
   const missing = POLARIS_SCRATCH.map((p) => `/${p}/`).filter((l) => !cur.split("\n").includes(l));
   if (!missing.length) return;
   mkdirSync(dirname(file), { recursive: true });

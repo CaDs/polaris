@@ -1,0 +1,3 @@
+# bench/target is a frozen snapshot of an older Polaris: the benchmark's fixture, never run or shipped.
+paths-ignore:
+  - bench/target
