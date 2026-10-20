@@ -173,6 +173,9 @@ never changed mid-conversation either (cache prefix, model behaviour).
   `read_file` when relevant. Tool definitions are *not* loaded on demand: changing the tool list mid-conversation busts the
   cache prefix, so tools stay static per run and only the (cheap, append-only) text of skills is lazy. Same idea as
   Cursor's lazy loading, without touching the prefix.
+  M14: an optional `phases:` frontmatter line (`worker`, `planner`, `reviewer`, `chat`; comma-separated or `[a, b]`)
+  offers the skill only to those agents; without it the worker and the planner see it, as before. The reviewer gets its
+  list at the top of its task, the chat in its first turn's message. The wiki maintainer gets none.
 - **Provider retries.** HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to 4 times with
   exponential backoff (1 s base, ×2, ≤ 30 s) plus jitter, or the `retry-after` header when present. Each retry is an
   `error` event with `retrying: true`. Never after output started streaming.
@@ -344,6 +347,12 @@ workspace names a reviewer: `review_provider_id` / `review_model` (migration 019
 {provider_id, model}`, both null = the run's own; Settings → Models → Reviewer model). The reviewer's choice resolves like a
 run's (a deleted provider leaves the model on the environment provider). `model_review_started.model` names it; its
 tokens count in the run's totals and caps, priced at the reviewer model's rates (`recordCost` splits the usage).
+
+M14: the planner, chat and wiki phases have the same kind of setting: `{planner,chat,wiki}_provider_id` / `_model`
+(migration 022, `PUT /api/settings/<phase>-provider`, Settings → Models → Models per phase). Null falls back: the planner
+and chat to the workspace default, the wiki to the model of the run it documents (as before). An epic's round 1 resolves
+explicit choice → ticket → planner setting → workspace default; later rounds keep round 1's model. Worker runs and the
+reviewer are unchanged (ticket/default, `review_*`). Triage keeps `triage_model`; reflection uses the run's model.
 
 - **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:

@@ -204,6 +204,8 @@ the default. Theme and sign-out are in the account menu at the foot of the sideb
 ### In your repository
 
 - `.polaris/skills/<name>.md` with `name` and `description` frontmatter: agents see the list and read the skills they need.
+  Add `phases: worker, reviewer` (any of worker, planner, reviewer, chat) to offer a skill only to those agents; without it,
+  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat and wiki their own model.
 - Polaris also creates `.polaris/outputs/`, `.polaris/history/` and `.polaris/wiki/` inside its worktrees. They are
   git-excluded and never committed.
 

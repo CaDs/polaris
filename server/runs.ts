@@ -43,7 +43,12 @@ type Settings = {
   default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
-};
+} & Record<`${ModelPhase}_provider_id` | `${ModelPhase}_model`, string | null>;
+// Phases with their own model setting (M14); the reviewer's is review_provider_id/review_model, the worker's the default.
+export const MODEL_PHASES = ["planner", "wiki", "chat"] as const;
+export type ModelPhase = (typeof MODEL_PHASES)[number];
+const phaseModel = (s: Settings, p: ModelPhase): Choice | undefined =>
+  s[`${p}_provider_id`] || s[`${p}_model`] ? { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] } : undefined;
 // The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
 export const SETTINGS_DEFAULTS = {
   repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
@@ -208,9 +213,10 @@ function queue(t: TicketRow, model: string, attempt: number, providerId: string 
 
 export type Choice = { provider_id?: string | null; model?: string | null };
 
-// Provider + model for a new run: the first of explicit choice → ticket → workspace default that sets either; none → env.
-function choose(t: TicketRow, s: Settings, pick?: Choice): { provider_id: string | null; model: string } {
-  const level = [pick, t, { provider_id: s.default_provider_id, model: s.default_model }].find((l) => l && (l.provider_id || l.model));
+// Provider + model for a new run: the first of explicit choice → ticket → the phase's setting → workspace default that
+// sets either; none → env.
+function choose(t: TicketRow, s: Settings, pick?: Choice, phase?: Choice): { provider_id: string | null; model: string } {
+  const level = [pick, t, phase, { provider_id: s.default_provider_id, model: s.default_model }].find((l) => l && (l.provider_id || l.model));
   if (!level?.provider_id) return { provider_id: null, model: providerConfig({ model: level?.model ?? undefined }).model };
   const p = providerById(level.provider_id);
   if (!p || p.workspace_id !== t.workspace_id) throw new Error("the chosen provider no longer exists. Pick another one.");
@@ -219,10 +225,11 @@ function choose(t: TicketRow, s: Settings, pick?: Choice): { provider_id: string
   return { provider_id: p.id, model };
 }
 
-// Provider + model for a prompt proposal: the workspace default, else env. Throws a user-facing message.
-export function metaProvider(ws: string) {
+// Provider + model for a prompt proposal (or a phase's own setting, e.g. chat): the workspace default, else env. Throws a
+// user-facing message.
+export function metaProvider(ws: string, phase?: ModelPhase) {
   const s = settingsFor(ws) ?? ({ default_provider_id: null, default_model: null } as Settings);
-  const c = choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
+  const c = choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s, undefined, phase && phaseModel(s, phase));
   return { model: c.model, provider: c.provider_id ? adapterFor(providerById(c.provider_id)!) : providerConfig({ model: c.model, workspaceId: ws }).provider("") };
 }
 
@@ -238,7 +245,7 @@ export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: Even
   if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
   let chosen: ReturnType<typeof choose>;
   try {
-    chosen = choose(t, s, pick);
+    chosen = choose(t, s, pick, t.kind === "epic" ? phaseModel(s, "planner") : undefined); // later rounds keep round 1's
   } catch (e) {
     return { error: (e as Error).message, status: 400 };
   }
@@ -567,7 +574,7 @@ async function execute(runId: string) {
 
     const env = await sh("uname -sm; node --version 2>/dev/null; true");
     abortCheck();
-    const skills = listSkills(worktree);
+    const skills = listSkills(worktree, "worker");
     if (skills.length) log({ type: "setup", payload: { step: "skills", skills } });
     // Ticket runs get the lessons active now; eval case runs the version frozen at eval start.
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
@@ -651,7 +658,7 @@ async function execute(runId: string) {
     for (let round = 1; reviewer; round++) {
       cap();
       const out: { review?: Review } = {};
-      const rtask = reviewTask(t, { base_sha, test: testCommand, wiki });
+      const rtask = reviewTask(t, { base_sha, test: testCommand, wiki, skills: listSkills(worktree, "reviewer") });
       const lines = await changedLines(worktree, base_sha);
       const budget = reviewBudget(lines);
       log({ type: "model_review_started", payload: { round, budget: budget.maxTurns, lines, model: reviewer.model } });
@@ -737,7 +744,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     await addDetached(s.repo_path, base_sha, worktree);
     db.prepare("UPDATE runs SET worktree = ?, base_sha = ? WHERE id = ?").run(worktree, base_sha, runId);
     log({ type: "setup", payload: { step: "worktree", branch: "", base_sha } });
-    const skills = listSkills(worktree);
+    const skills = listSkills(worktree, "planner");
     if (skills.length) log({ type: "setup", payload: { step: "skills", skills } });
     let wiki = "";
     if (s.wiki)
@@ -899,7 +906,9 @@ export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint
   let chosen: ReturnType<typeof choose>;
   try {
     const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
-    chosen = prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s);
+    // The wiki's own model when set; else the model of the run it documents; else the workspace default.
+    const own = phaseModel(s, "wiki");
+    chosen = !own && prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s, undefined, own);
   } catch (e) {
     return { error: (e as Error).message, status: 400 };
   }
@@ -1110,7 +1119,7 @@ export function startRun(ticketId: string, opts: StartOptions) {
   const ac = new AbortController();
   controllers.set(runId, ac);
   const log = eventLog(runId);
-  const skills = listSkills(root);
+  const skills = listSkills(root, "worker");
   const task = [skillsText(skills), ticket.spec ? `# ${ticket.title}\n\n${ticket.spec}` : ticket.title].filter(Boolean).join("\n\n");
   // Best effort: the root may not be a git repo.
   const done = excludeScratch(root).catch(() => {}).then(() => withUsage({ workspaceId: ticket.workspace_id, ticketId, runId, purpose: "worker", uncapped: true }, () => runAgent({

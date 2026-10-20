@@ -85,7 +85,7 @@ test(".polaris/outputs and history never reach the commit, the diff or the prote
 
 test("skills: frontmatter parsed, sorted, listed by name, description and path only", () => {
   const root = mkdtempSync(join(tmpdir(), "skills-"));
-  assert.deepEqual(listSkills(root), []);
+  assert.deepEqual(listSkills(root, "worker"), []);
   assert.equal(skillsText([]), "");
   mkdirSync(join(root, ".polaris/skills"), { recursive: true });
   const w = (f: string, body: string) => writeFileSync(join(root, ".polaris/skills", f), body);
@@ -93,7 +93,7 @@ test("skills: frontmatter parsed, sorted, listed by name, description and path o
   w("a-lint.md", "---\ndescription: Run the linter\n---\nbody\n");
   w("c-plain.md", "no frontmatter\n");
   w("deploy.sh", "#!/bin/sh\n");
-  const skills = listSkills(root);
+  const skills = listSkills(root, "worker");
   assert.deepEqual(skills, [
     { name: "a-lint", description: "Run the linter", path: ".polaris/skills/a-lint.md" },
     { name: "release", description: "Cut a release", path: ".polaris/skills/b-release.md" },
@@ -102,6 +102,15 @@ test("skills: frontmatter parsed, sorted, listed by name, description and path o
   const t = skillsText(skills);
   assert.match(t, /- release — Cut a release — \.polaris\/skills\/b-release\.md/);
   assert.doesNotMatch(t, /SECRET-BODY/);
+
+  // phases: only those agents see the skill; none listed = the worker and the planner.
+  w("d-review.md", "---\nname: review-checklist\nphases: [reviewer, \"chat\"]\n---\n");
+  w("e-both.md", "---\nname: migrations\nphases: Worker, reviewer\n---\n");
+  const names = (p: Parameters<typeof listSkills>[1]) => listSkills(root, p).map((s) => s.name).join(",");
+  assert.equal(names("worker"), "a-lint,release,c-plain,migrations");
+  assert.equal(names("planner"), "a-lint,release,c-plain");
+  assert.equal(names("reviewer"), "review-checklist,migrations");
+  assert.equal(names("chat"), "review-checklist");
 });
 
 test("compaction: history file, fresh conversation, append-only requests, budget continues", async () => {

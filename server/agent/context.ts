@@ -6,15 +6,21 @@ import type { Msg } from "./types.ts";
 // Skills: markdown files with `name`/`description` frontmatter in <root>/.polaris/skills/ (committed by humans, with
 // optional scripts next to them). Only name, description and path are offered, in the first user message; the model
 // reads the full file with read_file when it is relevant. Sorted by file name so the message is stable.
+// `phases: worker, reviewer` (or `[worker, reviewer]`) offers a skill only to those agents; without it, the worker and
+// the planner see it (as before phases existed).
 export type Skill = { name: string; description: string; path: string };
+export const PHASES = ["worker", "planner", "reviewer", "chat"] as const;
+export type Phase = (typeof PHASES)[number];
 
-export function listSkills(root: string): Skill[] {
+export function listSkills(root: string, phase: Phase): Skill[] {
   const dir = join(root, ".polaris/skills");
   if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().map((f) => {
+  return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().flatMap((f) => {
     const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(join(dir, f), "utf8"))?.[1] ?? "";
     const get = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(fm)?.[1].trim().replace(/^(["'])(.*)\1$/, "$2") ?? "";
-    return { name: get("name") || f.slice(0, -3), description: get("description"), path: `.polaris/skills/${f}` };
+    const phases = get("phases").replace(/^\[|\]$/g, "").split(",").map((p) => p.trim().replace(/^(["'])(.*)\1$/, "$2").toLowerCase()).filter(Boolean);
+    if (!(phases.length ? phases : ["worker", "planner"]).includes(phase)) return [];
+    return [{ name: get("name") || f.slice(0, -3), description: get("description"), path: `.polaris/skills/${f}` }];
   });
 }
 

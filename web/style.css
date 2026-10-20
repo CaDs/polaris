@@ -515,3 +515,6 @@ nav a.sub.active { color: var(--text); }
   .shell.chat-open { grid-template-columns: minmax(0, 1fr); }
   .chat { position: fixed; inset: 0; z-index: 9; border-left: 0; }
 }
+
+/* M14: model per phase (Settings → Models) */
+.phase-name { min-width: 64px; }

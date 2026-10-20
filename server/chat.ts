@@ -11,6 +11,7 @@ import { OWN_RUNS } from "./planner.ts";
 import { ESTIMATES, KINDS, ticketKey, trackerHeader } from "./tracker.ts";
 import { withUsage } from "./usage.ts";
 import { materialize, wikiSection } from "./wiki.ts";
+import { listSkills, skillsText } from "./agent/context.ts";
 import { runAgent } from "./agent/loop.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type Msg } from "./agent/types.ts";
@@ -231,8 +232,8 @@ async function turn(chat: Chat, message: string, signal: AbortSignal) {
       } catch (e) {
         append(chat.id, "error", { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` });
       }
-    const task = prior.length ? firstText(prior[0]) : [environment(s, sha), wiki, message].filter(Boolean).join("\n\n");
-    const { provider, model } = metaProvider(ws);
+    const task = prior.length ? firstText(prior[0]) : [environment(s, sha), skillsText(listSkills(worktree, "chat")), wiki, message].filter(Boolean).join("\n\n");
+    const { provider, model } = metaProvider(ws, "chat");
     const a = await withUsage({ workspaceId: ws, purpose: "chat", background: true }, () =>
       runAgent({
         provider, model, system: CHAT_PROMPT, task, resume: prior.length ? { messages: prior, message } : undefined,

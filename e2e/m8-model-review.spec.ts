@@ -14,6 +14,9 @@ test("M8: the model review asks for a fix, the worker fixes it in the same run, 
   await expect(page.getByRole("heading", { name: "Reviewer model" })).toBeVisible();
   await expect(page.getByLabel("Reviewer Provider")).toHaveValue("");
   expect((await page.request.put("/api/settings/review-provider", { data: { model: "demo-reviewer" } })).ok()).toBe(true);
+  // M14: each phase's model sits under it, "Default" until picked (server-side behavior: test/phase-models.test.ts).
+  await expect(page.getByRole("heading", { name: "Models per phase" })).toBeVisible();
+  for (const p of ["Planner", "Chat", "Wiki"]) await expect(page.getByLabel(`${p} Provider`)).toHaveValue("");
 
   await page.getByRole("link", { name: "Board" }).click();
   await newTicket(page, "Reviewed change", "REVIEW-ONCE: write the notes");

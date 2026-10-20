@@ -120,6 +120,13 @@
 - [x] Mock OAuth/provider, accounting and browser acceptance; live Ollama protected-test/review/approval smoke test
 - [x] Live ChatGPT (`gpt-6.1-sol`) and Ollama (`qwen3.8:27b-mlx`) protected-test/review/approval smoke tests in separate disposable repositories, with reconciled execution/background usage
 
+## M14 — Specialized phases
+- [x] Skills scoped by phase: `phases:` frontmatter (worker, planner, reviewer, chat); the reviewer and chat get skills too
+- [x] A model per phase: planner, chat and wiki settings beside the reviewer's (migration 022); Settings → Models
+- [ ] Test author phase: writes the locked acceptance test before the worker (see M13's test-first proposals)
+- [ ] Lessons tagged by phase, once a workspace has enough of them to crowd the planner's context
+- [ ] Measure each phase change on `bench/` with the local model before keeping it
+
 ## M13 — Chat
 - [x] Chat panel (Cmd/Ctrl+J): private chats per member, resumed conversations, streamed replies (migration 021, `server/chat.ts`)
 - [x] Page context (ticket, project, cycle) and `@KEY` mentions resolved server-side into a `# Context` block

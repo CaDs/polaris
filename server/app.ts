@@ -10,7 +10,7 @@ import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, moveTicket, monthSpend, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, TREE, withStates } from "./planner.ts";
 import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -304,17 +304,18 @@ const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1
 
 app.get("/api/settings", (c) => {
   const s = settingsFor(c.get("workspaceId"));
-  return c.json({ ...SETTINGS_DEFAULTS, default_provider_id: null, default_model: null, review_provider_id: null, review_model: null, ...s, configured: !!s });
+  const models = Object.fromEntries(["default", "review", ...MODEL_PHASES].flatMap((p) => [[`${p}_provider_id`, null], [`${p}_model`, null]]));
+  return c.json({ ...SETTINGS_DEFAULTS, ...models, ...s, configured: !!s });
 });
 
-// Workspace default provider/model (null = env fallback) and the reviewer's (null = the run's own). Both live on the
-// settings row, so the repository must be saved first.
-app.on("PUT", ["/api/settings/default-provider", "/api/settings/review-provider"], async (c) => {
+// Workspace default provider/model (null = env fallback), the reviewer's (null = the run's own) and each phase's (M14;
+// null = its fallback). All live on the settings row, so the repository must be saved first.
+app.on("PUT", ["default", "review", ...MODEL_PHASES].map((p) => `/api/settings/${p}-provider`), async (c) => {
   const b = await c.req.json().catch(() => null);
   const m = b && typeof b === "object" ? pick(c, b) : { error: "body must be a JSON object" };
   if ("error" in m) return c.json(m, 400);
   if (!settingsFor(c.get("workspaceId"))) return c.json({ error: "Save the repository settings first." }, 400);
-  const col = c.req.path.endsWith("/review-provider") ? "review" : "default";
+  const col = c.req.path.split("/").pop()!.replace(/-provider$/, ""); // one of the listed names: safe in the SQL below
   db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
     m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
   );
