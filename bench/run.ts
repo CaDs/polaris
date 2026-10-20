@@ -24,7 +24,6 @@ export const SETUP = "npm ci --no-audit --no-fund";
 export const TEST = "npm test";
 const PROTECTED = "test/,e2e/"; // covers every level's locked test (and the rest of the target's suite)
 
-const sh = (cwd: string, cmd: string, ...args: string[]) => execFileSync("sh", ["-c", cmd, "sh", ...args], { cwd, encoding: "utf8" }).trim();
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=bench", "-c", "user.email=bench@localhost", ...args], { encoding: "utf8" }).trim();
 const level = (id: string) => LEVELS.find((l) => l.level === id.toUpperCase() || l.level === `L${id}`) ?? die(`unknown level ${id}`);
 function die(msg: string): never {
@@ -58,7 +57,7 @@ export async function grade(l: Level, repo: string, ref: string, command = `${SE
   const dir = realpathSync(mkdtempSync(join(tmpdir(), `polaris-bench-grade-`)));
   const pristine = prepare(l);
   try {
-    sh(repo, 'git archive "$1" | tar -x -C "$2"', ref, dir);
+    execFileSync("tar", ["-x", "-C", dir], { input: execFileSync("git", ["-C", repo, "archive", ref], { maxBuffer: 1 << 30 }) });
     for (const f of l.test_files) cpSync(join(pristine, f), join(dir, f));
     const sb = await openSandbox(randomUUID(), dir, [], SANDBOX_IMAGE);
     try {
@@ -205,7 +204,7 @@ if (import.meta.main) {
   if (o.check) await check(levels);
   if (!o.model) die("--model is required (an Ollama model name)");
   const serverDir = resolve(o["server-dir"]);
-  const tag = o.tag ?? sh(serverDir, "git rev-parse --short HEAD");
+  const tag = o.tag ?? git(serverDir, "rev-parse", "--short", "HEAD");
   const out = resolve(o.out);
   mkdirSync(dirname(out), { recursive: true });
   const { base, child } = await startServer(serverDir, home);
