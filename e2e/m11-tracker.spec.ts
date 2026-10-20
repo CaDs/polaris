@@ -140,7 +140,8 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   const onPatch = (r: { method(): string; url(): string; postData(): string | null }) => r.method() === "PATCH" && r.url().includes("/api/tickets/") && patches.push(r.postData() ?? "");
   page.on("request", onPatch);
   await page.getByLabel("Due date").focus();
-  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowUp"); // each step is a valid date (an input event)
+  // Two steps from 2026-11-30: each is a valid date (an input event) whether the first segment is the month or the year.
+  for (let i = 0; i < 2; i++) await page.keyboard.press("ArrowUp");
   const due = await page.getByLabel("Due date").inputValue();
   expect(due).not.toBe("2026-11-30");
   expect(patches).toEqual([]);
