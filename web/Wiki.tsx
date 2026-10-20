@@ -22,11 +22,13 @@ function Markdown({ path, text, open }: { path: string; text: string; open: (pat
   const inline = (s: string): ReactNode[] =>
     s.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/).map((t, i) => {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(t);
+      const web = link && /^(https?):\/\/(.*)$/.exec(link[2]);
       if (t.startsWith("`") && t.endsWith("`") && t.length > 1) return <code key={i}>{t.slice(1, -1)}</code>;
       if (t.startsWith("**") && t.endsWith("**") && t.length > 4) return <strong key={i}>{t.slice(2, -2)}</strong>;
       if (!link) return t;
-      return /^https?:\/\//.test(link[2])
-        ? <a key={i} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>
+      // href is rebuilt behind a fixed scheme, so page text can never become a javascript: URL.
+      return web
+        ? <a key={i} href={`${web[1] === "https" ? "https" : "http"}://${web[2]}`} target="_blank" rel="noreferrer">{link[1]}</a>
         : <button key={i} className="link" onClick={() => open(resolvePath(path, link[2]))}>{link[1]}</button>;
     });
   const out: ReactNode[] = [];

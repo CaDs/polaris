@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostExec, isProtected, runTool, spill, tools, toolsFor } from "../server/agent/tools.ts";
+import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
 import { addWorktree, changedPaths, commitAll, git } from "../server/git.ts";
@@ -87,6 +87,20 @@ test("spill refuses a planted symlink (dir or file) and writes nothing outside",
   symlinkSync(join(outside, "f.txt"), join(r2, ".polaris/outputs/1-shell-c.txt"));
   assert.throws(() => spill({ root: r2, exec: hostExec, turn: 1, tool: "shell", callId: "c" }, big));
   assert.deepEqual(readdirSync(outside), []);
+});
+
+// The swap race: a symlink planted after resolveIn checked the path (resolveIn returned the real, link-free path).
+test("file tools never follow a symlink swapped in after the path was checked", () => {
+  const outside = tmp("sec-out-");
+  writeFileSync(join(outside, "secret.txt"), "secret");
+  const r = tmp("sec-swap-");
+  symlinkSync(join(outside, "secret.txt"), join(r, "a.txt"));
+  symlinkSync(join(outside, "new.txt"), join(r, "b.txt"));
+  assert.throws(() => readAt(join(r, "a.txt")), /symlink/);
+  assert.throws(() => writeAt(join(r, "a.txt"), "pwned"), /symlink/);
+  assert.throws(() => writeAt(join(r, "b.txt"), "pwned"), /symlink/);
+  assert.deepEqual(readdirSync(outside), ["secret.txt"]);
+  assert.equal(readAt(join(outside, "secret.txt"))!.toString(), "secret");
 });
 
 test("compaction refuses a planted .polaris/history symlink and writes nothing outside", async () => {

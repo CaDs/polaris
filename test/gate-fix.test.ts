@@ -131,5 +131,5 @@ test("a worker stopped as stuck is retried fresh (unlike a budget failure), with
   assert.deepEqual(events(a1.id, "stuck").map((e) => [e.turn, e.action]), [[3, "nudge"], [6, "stop"]]);
   assert.deepEqual(a1.metrics.stuck, { turn: 6, signal: "repeat_call", action: "stop" });
   assert.deepEqual([a1.metrics.files_changed, a2.metrics.files_changed, a2.metrics.stuck], [0, 2, null]); // notes.txt, ok.txt
-  assert.match(events(a2.id, "run_started")[0].task, new RegExp(`Previous attempt was stopped because it repeated ${detail.replace(/[{}()]/g, "\\$&")}\\. Do not repeat that`));
+  assert.match(events(a2.id, "run_started")[0].task, new RegExp(`Previous attempt was stopped because it repeated ${detail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\. Do not repeat that`));
 });
