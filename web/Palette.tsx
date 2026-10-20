@@ -4,6 +4,14 @@ import { Dialog, StatusIcon, type Ticket } from "./ui.tsx";
 // Cmd/Ctrl+K: jump to a ticket by key or title, create a ticket, go to a page. Arrow keys move, Enter runs, Esc closes.
 type Item = { id: string; name: string; hint?: string; ticket?: Ticket; run: () => void };
 
+// Key prefix matches first ("ABC-1" → ABC-1, ABC-12 …), then titles; no query: the 5 newest. Also the chat's @-mentions.
+export const matchTickets = (tickets: Ticket[], q: string, max = 8) => {
+  const s = q.trim().toLowerCase();
+  return (s
+    ? [...tickets.filter((t) => t.key.toLowerCase().startsWith(s)), ...tickets.filter((t) => !t.key.toLowerCase().startsWith(s) && t.title.toLowerCase().includes(s))]
+    : tickets.slice(-5).reverse()).slice(0, max);
+};
+
 export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go: (to: string) => void; create: () => void; close: () => void }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
@@ -14,11 +22,7 @@ export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go:
       ([name, to]): Item => ({ id: to, name: `Go to ${name}`, run: () => go(to) }),
     ),
   ].filter((c) => c.name.toLowerCase().includes(s));
-  // Key prefix matches first ("ABC-1" → ABC-1, ABC-12 …), then titles.
-  const found = s
-    ? [...tickets.filter((t) => t.key.toLowerCase().startsWith(s)), ...tickets.filter((t) => !t.key.toLowerCase().startsWith(s) && t.title.toLowerCase().includes(s))]
-    : tickets.slice(-5).reverse();
-  const items = [...found.slice(0, 8).map((t): Item => ({ id: t.id, name: t.title, ticket: t, run: () => go(`/t/${t.number}`) })), ...commands];
+  const items = [...matchTickets(tickets, s).map((t): Item => ({ id: t.id, name: t.title, ticket: t, run: () => go(`/t/${t.number}`) })), ...commands];
   const at = Math.min(sel, items.length - 1);
   useEffect(() => setSel(0), [s]);
 

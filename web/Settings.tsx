@@ -9,7 +9,15 @@ type WorkspaceSettings = {
   compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
   auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
-};
+} & Record<`${Phase}_provider_id` | `${Phase}_model`, string | null>;
+
+// M14: phases with their own model; "Default" is the fallback named here.
+const PHASES = [
+  ["planner", "Planner", "Plans epics into child tickets. Default: the workspace default."],
+  ["chat", "Chat", "Answers in the chat panel and proposes tickets. Default: the workspace default."],
+  ["wiki", "Wiki", "Keeps the project wiki up to date after each approval. Default: the model of the run it documents."],
+] as const;
+type Phase = (typeof PHASES)[number][0];
 
 // One page per concern, in setup order: the repository first (every other tab needs it saved), then models.
 const TABS = [["general", "General"], ["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"]] as const;
@@ -129,7 +137,11 @@ function ModelsTab({ s, saved }: Tab) {
   const [pick, setPick] = useState({ provider_id: s.default_provider_id, model: s.default_model });
   const [reviewer, setReviewer] = useState({ provider_id: s.review_provider_id, model: s.review_model });
   const [review, setReview] = useState(!!s.model_review);
-  const also = () => Promise.all([api("/api/settings/default-provider", "PUT", pick), api("/api/settings/review-provider", "PUT", reviewer)]);
+  const [phases, setPhases] = useState(() => Object.fromEntries(PHASES.map(([p]) => [p, { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] }])));
+  const also = () => Promise.all([
+    api("/api/settings/default-provider", "PUT", pick), api("/api/settings/review-provider", "PUT", reviewer),
+    ...PHASES.map(([p]) => api(`/api/settings/${p}-provider`, "PUT", phases[p])),
+  ]);
   return (
     <>
       <Providers providers={providers} reload={reload} />
@@ -153,6 +165,14 @@ function ModelsTab({ s, saved }: Tab) {
               <div className="row">{providers && <ModelPicker providers={providers} prefix="Reviewer " {...reviewer} onChange={setReviewer} />}</div>
             </>
           )}
+          <h2>Models per phase</h2>
+          <p className="muted">Give a phase its own model, e.g. a smaller local model for chat and the wiki and your strongest one for the worker.</p>
+          {PHASES.map(([p, name, hint]) => (
+            <div key={p}>
+              <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
+              <span className="hint">{hint}</span>
+            </div>
+          ))}
         </Form>
       )}
     </>

@@ -120,6 +120,23 @@
 - [x] Mock OAuth/provider, accounting and browser acceptance; live Ollama protected-test/review/approval smoke test
 - [x] Live ChatGPT (`gpt-6.1-sol`) and Ollama (`qwen3.8:27b-mlx`) protected-test/review/approval smoke tests in separate disposable repositories, with reconciled execution/background usage
 
+## M14 — Specialized phases
+- [x] Skills scoped by phase: `phases:` frontmatter (worker, planner, reviewer, chat); the reviewer and chat get skills too
+- [x] A model per phase: planner, chat and wiki settings beside the reviewer's (migration 022); Settings → Models
+- [ ] Test author phase: writes the locked acceptance test before the worker (see M13's test-first proposals)
+- [ ] Lessons tagged by phase, once a workspace has enough of them to crowd the planner's context
+- [ ] Measure each phase change on `bench/` with the local model before keeping it
+
+## M13 — Chat
+- [x] Chat panel (Cmd/Ctrl+J): private chats per member, resumed conversations, streamed replies (migration 021, `server/chat.ts`)
+- [x] Page context (ticket, project, cycle) and `@KEY` mentions resolved server-side into a `# Context` block
+- [x] Read-only checkout of the base branch per turn, wiki materialized; `list_tickets`, `read_ticket`, `propose_ticket`
+- [x] Proposal cards: File, File and run, Edit, Dismiss; filing validates like New ticket (shared `insertTicket`), once
+- [x] Chat usage metered as background, purpose `chat`; demo chat script; API tests and `e2e/m13-chat.spec.ts`
+- [ ] Test-first proposals: the agent drafts the acceptance test, checked to fail at the base commit, locked as a protected path for the ticket
+- [ ] Wiki page context (the open page is not in the URL yet)
+- [ ] Rename and delete chats in the panel (the API has DELETE)
+
 ## M12 — Next (open; `npm run seed-tasks` turns these into tickets)
 - [x] Wiki index lists pages with their full `.polaris/wiki/` path so agents don't mistake a wiki page for a code file
 - [x] One turn budget per attempt: fix rounds get what is left (at least 10 turns)

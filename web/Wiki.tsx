@@ -17,8 +17,9 @@ const resolvePath = (from: string, to: string) => {
   return parts.join("/");
 };
 
-// A small markdown subset (headings, bullets, code fences, `code`, **bold**, links): internal .md links open the page.
-function Markdown({ path, text, open }: { path: string; text: string; open: (path: string) => void }) {
+// A small markdown subset (headings, bullets, code fences, `code`, **bold**, links): internal .md links open the page
+// (without open, e.g. chat replies, they show as text).
+export function Markdown({ path = "", text, open }: { path?: string; text: string; open?: (path: string) => void }) {
   const inline = (s: string): ReactNode[] =>
     s.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/).map((t, i) => {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(t);
@@ -29,7 +30,7 @@ function Markdown({ path, text, open }: { path: string; text: string; open: (pat
       // Only a parsed http(s) URL becomes an href: page text can never be a javascript: URL.
       return web && (web.protocol === "https:" || web.protocol === "http:")
         ? <a key={i} href={web.href} target="_blank" rel="noreferrer">{link[1]}</a>
-        : <button key={i} className="link" onClick={() => open(resolvePath(path, link[2]))}>{link[1]}</button>;
+        : open ? <button key={i} className="link" onClick={() => open(resolvePath(path, link[2]))}>{link[1]}</button> : link[1];
     });
   const out: ReactNode[] = [];
   let list: string[] = [];

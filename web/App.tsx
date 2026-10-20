@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { authClient } from "./auth-client.ts";
+import { Chat, type ChatContext } from "./Chat.tsx";
 import { CyclePage, Cycles } from "./Cycles.tsx";
 import { Issues, Popover } from "./Filters.tsx";
 import { Improvement } from "./Improvement.tsx";
@@ -256,11 +257,25 @@ function Dashboard({ email }: { email: string }) {
   const [tickets, reload] = useTickets();
   const [creating, setCreating] = useState(false);
   const [palette, setPalette] = useState(false);
+  const [chat, setChat] = useState(() => {
+    try {
+      return localStorage.getItem("chat-open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("chat-open", chat ? "1" : "0");
+    } catch {}
+  }, [chat]);
 
-  // "C" opens the new-ticket dialog unless the user is typing or a dialog is open; Cmd/Ctrl+K the command palette, anywhere.
+  // "C" opens the new-ticket dialog unless the user is typing or a dialog is open; Cmd/Ctrl+K the command palette and
+  // Cmd/Ctrl+J the chat panel (Notion's AI shortcut), anywhere.
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") return e.preventDefault(), setPalette((p) => !p);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") return e.preventDefault(), setChat((c) => !c);
       const t = e.target as HTMLElement;
       if (e.key.toLowerCase() !== "c" || e.metaKey || e.ctrlKey || e.altKey || t.closest("input, textarea, select, [contenteditable], [role=dialog]")) return;
       e.preventDefault();
@@ -284,12 +299,18 @@ function Dashboard({ email }: { email: string }) {
   const current = tracker?.cycles.find((c) => c.state === "current");
   // New tickets made on a project or cycle page start in it.
   const defaults = { project_id: section === "projects" ? sub : undefined, cycle_id: section === "cycles" ? (sub === "current" ? current?.id : sub) : undefined };
+  // What the chat knows you're looking at: the ticket, project or cycle page.
+  const cycleId = section === "cycles" ? (sub === "current" ? current?.id : sub) : undefined;
+  const project = section === "projects" && sub ? tracker?.projects.find((p) => p.id === sub) : undefined;
+  const cycle = cycleId ? tracker?.cycles.find((c) => c.id === cycleId) : undefined;
+  const chatContext: ChatContext = ticket ? { ticket: ticket.key } : project ? { project: project.id } : cycle ? { cycle: cycle.id } : {};
+  const chatLabel = ticket ? ticket.key : project ? project.name : cycle ? cycleName(cycle) : null;
   const link = (to: string, label: string, active: boolean, cls = "") => (
     <a key={to} href={to} className={`${cls}${active ? " active" : ""}`.trim()} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>
   );
 
   return (
-    <div className="shell">
+    <div className={`shell${chat ? " chat-open" : ""}`}>
       <aside>
         <header className="ws">
           <Mark />
@@ -315,6 +336,7 @@ function Dashboard({ email }: { email: string }) {
           <h1>{number ? (ticket?.key ?? "Ticket") : sub && section === "projects" ? "Project" : sub && section === "cycles" ? (sub === "current" ? "Current cycle" : "Cycle") : (page ?? "Board")}</h1>
           <span className="grow" />
           <Bell open={open} />
+          {!chat && <button className="btn" onClick={() => setChat(true)} title="⌘J">Ask Polaris</button>}
           <button className="btn primary" onClick={() => setCreating(true)}>New ticket</button>
         </div>
         <main>
@@ -347,6 +369,7 @@ function Dashboard({ email }: { email: string }) {
           )}
         </main>
       </div>
+      {chat && <Chat context={chatContext} label={chatLabel} tickets={tickets ?? []} go={go} filed={reload} close={() => setChat(false)} />}
       {creating && <NewTicket tickets={tickets ?? []} defaults={defaults} close={() => setCreating(false)} created={() => (reload(), setCreating(false))} />}
       {palette && <Palette tickets={tickets ?? []} go={go} create={() => setCreating(true)} close={() => setPalette(false)} />}
     </div>
