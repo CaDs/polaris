@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export type TokenSummary = { tokens_total: number; tokens_in: number; input_uncached: number; tokens_out: number; tokens_cached: number; tokens_cache_write: number; partial: number; unavailable: number; cost_usd: number; unknown_price: number; subscription_calls: number; local_calls: number };
 
@@ -124,25 +124,49 @@ export function StatusIcon({ status, label = false }: { status: string; label?: 
 }
 
 export type Theme = "system" | "light" | "dark";
-export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(() => {
-    try {
-      const t = localStorage.getItem("theme");
-      return t === "light" || t === "dark" ? t : "system";
-    } catch {
-      return "system";
-    }
-  });
-  useEffect(() => {
-    if (theme === "system") document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.dataset.theme = theme;
-    try {
-      if (theme === "system") localStorage.removeItem("theme");
-      else localStorage.setItem("theme", theme);
-    } catch {}
-  }, [theme]);
-  return [theme, setTheme] as const;
+// The palettes in web/style.css, default first; GET/PUT /api/me/preferences validates the same ids.
+export const PALETTES = [
+  { id: "black", name: "Black + Blue", hint: "True black, neutral greys, one steel blue. The default." },
+  { id: "graphite", name: "Graphite", hint: "Linear-style monochrome: color only for status." },
+  { id: "stone", name: "Stone & Ink", hint: "Warm monochrome, paper and ink." },
+  { id: "polar", name: "Polar Night", hint: "Navy ink with a north-blue accent." },
+  { id: "ember", name: "Ember", hint: "Warm charcoal with an orange accent." },
+  { id: "teal", name: "Deep Teal", hint: "Black pearl and Boston blue." },
+] as const;
+type Appearance = { mode: Theme; palette: string };
+
+// Applies an appearance to the page and keeps a copy for the next load (index.html applies it before first paint).
+function apply(a: Appearance) {
+  const root = document.documentElement;
+  if (a.mode === "system") root.removeAttribute("data-theme");
+  else root.dataset.theme = a.mode;
+  if (a.palette === PALETTES[0].id) root.removeAttribute("data-palette");
+  else root.dataset.palette = a.palette;
+  try {
+    if (a.mode === "system") localStorage.removeItem("theme");
+    else localStorage.setItem("theme", a.mode);
+    localStorage.setItem("palette", a.palette);
+  } catch {}
 }
+
+// The signed-in user's appearance, saved on the server (the same in every browser); the page shows the local copy until
+// it loads. set() applies at once and saves.
+const AppearanceCtx = createContext<{ appearance: Appearance; set: (a: Partial<Appearance>) => void } | null>(null);
+export function AppearanceProvider({ children }: { children: React.ReactNode }) {
+  const [appearance, setAppearance] = useState<Appearance>(() => {
+    const root = document.documentElement;
+    return { mode: (root.dataset.theme as Theme | undefined) ?? "system", palette: root.dataset.palette ?? PALETTES[0].id };
+  });
+  useEffect(() => void api<Appearance>("/api/me/preferences").then((a) => (apply(a), setAppearance(a)), () => {}), []);
+  const set = (change: Partial<Appearance>) => {
+    const next = { ...appearance, ...change };
+    apply(next);
+    setAppearance(next);
+    api("/api/me/preferences", "PUT", change).catch(() => {}); // ponytail: a failed save keeps the local choice; the next load shows the saved one
+  };
+  return <AppearanceCtx.Provider value={{ appearance, set }}>{children}</AppearanceCtx.Provider>;
+}
+export const useAppearance = () => useContext(AppearanceCtx)!;
 
 // The one modal: Esc or a click on the backdrop closes it; focus goes back to where it was. heading=false: the title is only its label.
 export function Dialog({ title, onClose, children, className = "", heading = true }: { title: string; onClose: () => void; children: React.ReactNode; className?: string; heading?: boolean }) {

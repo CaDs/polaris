@@ -13,7 +13,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Alert, DateInput, Dialog, Icon, Loading, api, errorText, useTheme, useWorkspaceEvents, type Ticket } from "./ui.tsx";
+import { Alert, AppearanceProvider, DateInput, Dialog, Icon, Loading, api, errorText, useAppearance, useWorkspaceEvents, type Ticket } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -22,9 +22,11 @@ export function App() {
   if (!session) return <AuthForm />;
   if (!session.session.activeOrganizationId) return <CreateWorkspace />;
   return (
-    <TrackerProvider>
-      <Dashboard email={session.user.email} />
-    </TrackerProvider>
+    <AppearanceProvider>
+      <TrackerProvider>
+        <Dashboard email={session.user.email} />
+      </TrackerProvider>
+    </AppearanceProvider>
   );
 }
 
@@ -33,20 +35,13 @@ function fields(e: FormEvent<HTMLFormElement>) {
   return Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
 }
 
-// The north-star mark: long cardinal rays, short diagonals, on a north-blue tile. Inline so it needs no asset.
+// The north-star mark: long cardinal rays, short diagonals, on a tile in the palette's accent. Inline so it needs no asset.
 function Mark() {
   return (
     <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
-      <defs>
-        {/* ponytail: fixed id, only one Mark is ever on screen (landing or sidebar) */}
-        <linearGradient id="polaris-mark" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#5b86ff" />
-          <stop offset="1" stopColor="#2f5bea" />
-        </linearGradient>
-      </defs>
-      <rect width="32" height="32" rx="8" fill="url(#polaris-mark)" />
-      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--star)" opacity=".55" transform="rotate(45 16 16)" />
-      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--star)" />
+      <rect width="32" height="32" rx="8" fill="var(--accent)" />
+      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--on-accent)" opacity=".55" transform="rotate(45 16 16)" />
+      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--on-accent)" />
     </svg>
   );
 }
@@ -206,7 +201,7 @@ function Bell({ open }: { open: (key: string) => void }) {
 
 // Personal preferences and sign-out: one menu at the foot of the sidebar instead of always-on controls.
 function Account({ email }: { email: string }) {
-  const [theme, setTheme] = useTheme();
+  const { appearance, set } = useAppearance();
   const [shown, setShown] = useState(false);
   return (
     <span className="menu-anchor account">
@@ -221,7 +216,7 @@ function Account({ email }: { email: string }) {
             Theme <span className="grow" />
             <span className="seg" role="group" aria-label="Theme">
               {(["system", "light", "dark"] as const).map((t) => (
-                <button key={t} aria-pressed={theme === t} onClick={() => (setTheme(t), setShown(false))}>{t[0].toUpperCase() + t.slice(1)}</button>
+                <button key={t} aria-pressed={appearance.mode === t} onClick={() => (set({ mode: t }), setShown(false))}>{t[0].toUpperCase() + t.slice(1)}</button>
               ))}
             </span>
           </div>
