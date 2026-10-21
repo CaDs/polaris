@@ -8,8 +8,9 @@ process.env.POLARIS_PROVIDER = "fake";
 const { call, listen, project, user, fileTicket, wsOf, until } = await import("./helpers.ts");
 const { notify } = await import("../server/tracker.ts");
 
-test("every bare fetch in oauth.ts, providers.ts and tracker.ts says redirect: \"error\" and has a timeout", () => {
-  for (const f of ["oauth", "providers", "tracker"]) {
+test("every bare fetch in oauth.ts and tracker.ts says redirect: \"error\" and has a timeout; providers.ts has none (providerFetch)", () => {
+  assert.equal([...readFileSync(new URL("../server/providers.ts", import.meta.url), "utf8").matchAll(/(?<![\w.])fetch\(/g)].length, 0);
+  for (const f of ["oauth", "tracker"]) {
     const src = readFileSync(new URL(`../server/${f}.ts`, import.meta.url), "utf8");
     const calls = [...src.matchAll(/(?<![\w.])fetch\(/g)];
     assert.ok(calls.length > 0, f);
