@@ -48,7 +48,9 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
     // The epic links back, its planner splits the work into two children with their own gates.
     await expect(page.getByLabel("Title")).toHaveValue("Split: Big change");
     await expect(page.getByText("Split from")).toBeVisible();
-    await expect(page.getByLabel("Spec")).toHaveValue(/## Previous direct attempt[\s\S]*Attempt 3: failed \(`test -f part1\.txt && test -f part2\.txt` exited with code 1\)/);
+    const spec = page.getByRole("region", { name: "Spec" });
+    await expect(spec.getByRole("heading", { name: "Previous direct attempt" })).toBeVisible();
+    await expect(spec).toContainText("Attempt 3: failed (test -f part1.txt && test -f part2.txt exited with code 1)");
     const kids = page.getByRole("list", { name: "Children" });
     await expect(kids.getByRole("listitem", { name: "APP-3", exact: true })).toContainText("Create part1.txt", { timeout: 60_000 });
     await expect(kids.getByRole("listitem", { name: "APP-4", exact: true })).toContainText("Create part2.txt");
