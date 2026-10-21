@@ -218,7 +218,7 @@ function Composer({ draft, setDraft, send, tickets, busy, stop, chip, tools }: {
       {found.length > 0 && (
         <ul className="chat-mentions" role="listbox" aria-label="Tickets">
           {found.map((t, i) => (
-            <li key={t.id} role="option" aria-selected={i === sel} onMouseEnter={() => setSel(i)} onMouseDown={(e) => (e.preventDefault(), mention(t))}>
+            <li key={t.id} role="option" aria-selected={i === sel} onMouseMove={() => i !== sel && setSel(i)} onMouseDown={(e) => (e.preventDefault(), mention(t))}>
               <StatusIcon status={t.status} label /><span className="mono muted">{t.key}</span><span className="grow">{t.title}</span>
             </li>
           ))}

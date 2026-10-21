@@ -3,6 +3,8 @@ import { Dialog, StatusIcon, type Ticket } from "./ui.tsx";
 import { useTracker } from "./tracker.tsx";
 
 // Cmd/Ctrl+K: jump to a ticket by key or title, create a ticket, go to a page. Arrow keys move, Enter runs, Esc closes.
+// The mouse selects on move, not on enter: a list that renders under a resting pointer must not move the selection (Enter
+// on "views" once ran Go to Reviews, the row the pointer was left over).
 type Item = { id: string; name: string; hint?: string; ticket?: Ticket; run: () => void };
 
 // Key prefix matches first ("ABC-1" → ABC-1, ABC-12 …), then titles; no query: the 5 newest. Also the chat's @-mentions.
@@ -47,7 +49,7 @@ export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go:
         role="combobox" aria-expanded="true" aria-controls="palette-list" aria-activedescendant={items[at] ? `pi-${items[at].id}` : undefined} />
       <ul id="palette-list" role="listbox" aria-label="Results">
         {items.map((it, i) => (
-          <li key={it.id} id={`pi-${it.id}`} role="option" aria-selected={i === at} onMouseEnter={() => setSel(i)} onMouseDown={(e) => (e.preventDefault(), close(), it.run())}>
+          <li key={it.id} id={`pi-${it.id}`} role="option" aria-selected={i === at} onMouseMove={() => i !== at && setSel(i)} onMouseDown={(e) => (e.preventDefault(), close(), it.run())}>
             {it.ticket ? <><StatusIcon status={it.ticket.status} label /><span className="mono muted">{it.ticket.key}</span></> : <span className="muted">›</span>}
             <span className="grow">{it.name}</span>
             {it.hint && <kbd>{it.hint}</kbd>}
