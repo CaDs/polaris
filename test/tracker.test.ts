@@ -246,7 +246,7 @@ test("projects: key and repository checked, ordered milestones, progress by stat
   await call("PATCH", `/api/tickets/${a.id}`, w, { status: "done" });
   const got = (await call("GET", `/api/projects/${p.id}`, w)).body;
   assert.deepEqual([got.progress.total, got.progress.done, got.progress.points, got.progress.points_done], [3, 1, 5, 3]);
-  assert.deepEqual(got.progress.by_status, { todo: 2, running: 0, review: 0, done: 1, failed: 0 });
+  assert.deepEqual(got.progress.by_status, { todo: 2, running: 0, review: 0, done: 1, failed: 0, wont_do: 0 });
   assert.deepEqual(got.milestones.map((m: any) => [m.name, m.progress.done, m.progress.total]), [["GA", 0, 1], ["Alpha", 1, 2], ["Beta", 0, 0]]);
 
   // Fields, the repository and the key change; a new key renames the project's tickets.

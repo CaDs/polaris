@@ -129,7 +129,7 @@ Code: `server/failures.ts`; migration 017.
   first), mined: {id, key, status} | null}], rows: [{day, class, runs}]}`, classes by runs, then name. Runs of tickets
   labelled `mined` never count (mining its own drafts would feed on itself).
 - **`POST /api/failures/mine`** (Learning page, "Mine failures"; manual only): for each class with ≥ 2 runs in the
-  last 30 days, no open mined ticket (`mined_class` = the class, status not done/failed) and not `cancelled` (a person's
+  last 30 days, no open mined ticket (`mined_class` = the class, status not done/failed/wont_do) and not `cancelled` (a person's
   choice), one call with the workspace default model (as Propose improvement): system prompt `MINE_SYSTEM`, a dossier
   (class + description, counts, the examples' run digests as reflection sees them: outcome, tool errors, setup/gate output
   tails, plus the review note for `human_rejected`; the current lessons), and one declared tool `submit_mined_ticket
@@ -416,11 +416,15 @@ A turn, minute or token budget running out and a `stuck:` stop are retried the s
   gate failure while attempts remain, else the ticket fails (a child hands off). An interrupted planner round is re-run
   once (a round is stateless), then fails its epic. A task left `running` with no active run gets its latest run's
   outcome.
-- **Manual status.** `PATCH /api/tickets/:id {status}` (the Status select) moves only between `todo`, `done` and
-  `failed`, or `review` back to `todo` (its branch is dropped), never while a run is active; anything else is a 409
+- **Manual status.** `PATCH /api/tickets/:id {status}` (the Status select) moves only between `todo`, `done`,
+  `failed` and `wont_do`, or `review` back to `todo` (its branch is dropped), never while a run is active; anything else is a 409
   `{error: "invalid_transition", from, to}`. It goes through the same transition as the pipeline: a child marked done
   starts its dependents and wakes its planner; a child put back in `todo` under a running epic starts once its
   dependencies are done.
+- **Won't do** (`wont_do`, migration 013): a ticket a person closed without doing it, set only by hand. It has its own
+  board column, leaves project, milestone and cycle progress totals, is not carried into the next cycle, and is not open
+  for chat or failure mining. Under an epic it is closed for the planner ("won't do; don't redo it"): its dependents are
+  blocked, and it wakes the planner like a failed child.
 
 - **Flaky re-run.** A failure that is a non-zero exit or a timeout, with no protected path touched, is run once more at
   once (the epic gate too). If that passes, the gate passes: `test_result` (`epic_gate`) gets `flaky: true` and

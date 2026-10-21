@@ -93,7 +93,7 @@ function ticketText(t: Record<string, any>) {
 
 const openTickets = (ws: string, where: string, id: string) =>
   (db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.title FROM tickets t
-    WHERE t.workspace_id = ? AND t.${where} = ? AND t.status <> 'done' AND t.hidden = 0 ORDER BY t.number`).all(ws, id) as Record<string, string>[]).map((t) => `- ${t.key} [${t.status}] ${t.title}`);
+    WHERE t.workspace_id = ? AND t.${where} = ? AND t.status NOT IN ('done', 'wont_do') AND t.hidden = 0 ORDER BY t.number`).all(ws, id) as Record<string, string>[]).map((t) => `- ${t.key} [${t.status}] ${t.title}`);
 
 // The "# Context" block ahead of a message ("" when there is none). Unknown ids and keys are left out.
 export function contextText(chat: Chat, text: string, ctx: PageContext = {}) {

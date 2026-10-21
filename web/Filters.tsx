@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Board } from "./Board.tsx";
 import { GROUPS, List, type Group } from "./List.tsx";
-import { Alert, COLUMNS, DateInput, Dialog, Icon, api, type Ticket } from "./ui.tsx";
+import { Alert, COLUMNS, statusName, DateInput, Dialog, Icon, api, type Ticket } from "./ui.tsx";
 import { cycleName, PRIORITIES, useTracker, type Tracker } from "./tracker.tsx";
 import type { View } from "./Views.tsx";
 
@@ -10,7 +10,7 @@ import type { View } from "./Views.tsx";
 // always adds (a project board: project=<id>), so `all` is already scoped and a saved view keeps it.
 type Field = { key: string; name: string; options?: (t: Tracker, tickets: Ticket[]) => [string, string][]; date?: boolean };
 const FIELDS: Field[] = [
-  { key: "status", name: "Status", options: () => COLUMNS.map((s) => [s, s]) },
+  { key: "status", name: "Status", options: () => COLUMNS.map((s) => [s, statusName(s)]) },
   { key: "priority", name: "Priority", options: () => [1, 2, 3, 4, 0].map((p) => [String(p), PRIORITIES[p]]) },
   { key: "label", name: "Labels", options: (t) => t.labels.map((l) => [l.id, l.name]) },
   { key: "assignee", name: "Assignee", options: (t) => [["me", "Me"], ["none", "No assignee"], ...t.members.map((m): [string, string] => [m.id, m.name])] },

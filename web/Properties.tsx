@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Popover } from "./Filters.tsx";
-import { Alert, DateField, api, type Status, type Ticket } from "./ui.tsx";
+import { Alert, DateField, api, statusName, type Status, type Ticket } from "./ui.tsx";
 import { COLORS, cycleName, ESTIMATES, LabelChip, PRIORITIES, PRIORITY_ORDER, useTracker } from "./tracker.tsx";
 
-const MANUAL: string[] = ["todo", "done", "failed"];
+const MANUAL: string[] = ["todo", "done", "failed", "wont_do"];
 
 // The ticket's properties sidebar. Native selects keep it keyboard-friendly; on the ticket page s / p / a open status,
 // priority and assignee, l the label picker. The agent run controls stay in TicketView.
@@ -43,7 +43,7 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
   }
 
   const t = tracker;
-  // The moves the server allows by hand (moveTicket in runs.ts): between todo, done and failed, and review back to todo; none
+  // The moves the server allows by hand (moveTicket in runs.ts): between todo, done, failed and won't do, and review back to todo; none
   // while a run is queued or running. Running and review otherwise belong to Run, Cancel, Approve and Reject.
   const active = ticket.run_status === "queued" || ticket.run_status === "running";
   const moves = active ? [] : ticket.status === "review" ? ["todo"] : MANUAL.includes(ticket.status) ? MANUAL.filter((s) => s !== ticket.status) : [];
@@ -63,7 +63,7 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
       {prop("Status", (
         <select ref={status} aria-label="Status" value={ticket.status} disabled={!moves.length} title={moves.length ? undefined : "Set by its runs: Run, Cancel, Approve or Reject"}
           onChange={(e) => patch({ status: e.target.value as Status })}>
-          {[ticket.status, ...moves].map((s) => <option key={s}>{s}</option>)}
+          {[ticket.status, ...moves].map((s) => <option key={s} value={s}>{statusName(s)}</option>)}
         </select>
       ), "s")}
       {prop("Priority", (
