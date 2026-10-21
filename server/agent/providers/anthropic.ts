@@ -1,6 +1,6 @@
 import { AgentError, stable, type Block, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, withRetry } from "./retry.ts";
-import { cappedText, EgressError, providerFetch } from "../../egress.ts";
+import { httpError, responseBudget, retryable, streamIndex, withRetry } from "./retry.ts";
+import { cappedText, EgressError, providerFetch, scrub } from "../../egress.ts";
 
 // Anthropic Messages API over fetch + SSE. The same adapter talks to Ollama's
 // Anthropic-compatible endpoint (baseUrl http://localhost:11434, any api key).
@@ -44,6 +44,7 @@ export function requestBody(req: ProviderRequest) {
 }
 
 export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeoutMs?: number }): Provider {
+  const secrets = opts.apiKey === "ollama" ? [] : [opts.apiKey]; // "ollama" is a placeholder, not a secret
   const url = `${(opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "")}/v1/messages`;
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void) {
     let raw: Record<string, number> = {};
@@ -73,6 +74,7 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
     const json: string[] = [];
     let stopReason = "";
     const handle = (e: ApiBlock) => {
+      if (e.index !== undefined) streamIndex(e.index);
       switch (e.type) {
         case "message_start":
           raw = { ...e.message.usage };
@@ -115,7 +117,7 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
         case "message_stop":
           break;
         case "error": {
-          const err = new AgentError("ProviderError", `${e.error?.type}: ${e.error?.message}`);
+          const err = new AgentError("ProviderError", `${e.error?.type}: ${scrub(String(e.error?.message), secrets)}`);
           throw e.error?.type === "overloaded_error" || e.error?.type === "api_error" ? retryable(err) : err;
         }
       }
@@ -123,7 +125,9 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
 
     try {
       let buf = "";
+      const budget = responseBudget();
       for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        budget(chunk);
         buf += chunk.replace(/\r\n/g, "\n");
         for (let i; (i = buf.indexOf("\n\n")) >= 0; ) {
           const data = buf.slice(0, i).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
@@ -149,5 +153,5 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
       throw e;
     }
 }
-  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on), req.metering) };
+  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on), req.metering, secrets) };
 }

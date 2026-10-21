@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 
 // Provider egress (server/egress.ts): where a key may be sent, no redirects, a header deadline, capped error bodies,
 // and secrets scrubbed from text.
-const { cappedText, checkEndpoint, checkUrl, EgressError, providerFetch, scrub } = await import("../server/egress.ts");
+const { cappedText, checkUrl, EgressError, guardedLookup, providerFetch, scrub } = await import("../server/egress.ts");
 
 const refused = (url: string, re: RegExp) => assert.throws(() => checkUrl(url), (e: Error) => e instanceof EgressError && re.test(e.message), url);
 
@@ -32,9 +32,33 @@ test("base URLs: https anywhere; http only to this machine or a private network;
   }
 });
 
-test("checkEndpoint resolves names: localhost passes, an unresolvable name fails", async () => {
-  assert.equal((await checkEndpoint("http://localhost:1/x")).hostname, "localhost");
-  await assert.rejects(checkEndpoint("https://no-such-host.invalid"), /cannot resolve/);
+test("providerFetch resolves names through the guarded lookup: localhost passes, an unresolvable name fails", async () => {
+  await assert.rejects(providerFetch("http://localhost:1/x"), (e: Error) => !(e instanceof EgressError)); // refused connection, not policy
+  await assert.rejects(providerFetch("https://no-such-host.invalid"), (e: Error) => e instanceof EgressError && /cannot resolve/.test(e.message));
+});
+
+test("the dialled address is judged, not an earlier answer: public first, metadata second fails before connecting (POL-13)", async () => {
+  const answers = ["93.184.216.34", "169.254.169.254"];
+  const resolve = ((_h: string, _o: unknown, cb: (e: null, l: unknown) => void) => cb(null, [{ address: answers.shift()!, family: 4 }])) as any;
+  const look = guardedLookup("https:", resolve);
+  const dial = (all?: boolean) => new Promise<unknown>((ok, no) => look("rebind.example", { all }, (e, a) => (e ? no(e) : ok(a))));
+  assert.equal(await dial(), "93.184.216.34");
+  await assert.rejects(dial(), (e: Error) => e instanceof EgressError && /169\.254\.169\.254/.test(e.message));
+  // plain http to a name that now resolves to a public address is refused too
+  const pub = guardedLookup("http:", ((_h: string, _o: unknown, cb: any) => cb(null, [{ address: "93.184.216.34", family: 4 }])) as any);
+  await assert.rejects(new Promise((ok, no) => pub("x.example", {}, (e) => (e ? no(e) : ok(0)))), /public address/);
+});
+
+test("IPv6 forms of blocked addresses are refused (POL-13)", () => {
+  for (const h of ["[64:ff9b::a9fe:a9fe]", "[2002:a9fe:a9fe::]", "[::a9fe:a9fe]", "[::ffff:a9fe:a9fe]", "[fd20:ce::254]", "[fec0::1]", "192.0.0.8", "168.63.129.16"])
+    refused(`https://${h}/`, /metadata/);
+  assert.doesNotThrow(() => checkUrl("http://[::1]:4000")); // ::/96 must not catch loopback
+  assert.doesNotThrow(() => checkUrl("https://[2001:db8::1]/"));
+  assert.doesNotThrow(() => checkUrl("https://[64:ff9b::808:808]/")); // NAT64 to a public IPv4
+});
+
+test("base URLs with a query string, fragment or userinfo are refused (POL-12)", () => {
+  for (const u of ["http://10.0.0.5:8080/admin?x=", "https://api.example.com/v1?", "https://api.example.com/v1#x"]) refused(u, /query string or fragment/);
 });
 
 test("providerFetch refuses redirects (the key would follow) and gives up on silent servers; error bodies are capped", async () => {

@@ -52,7 +52,7 @@ async function server(replies: { status?: number; headers?: Record<string, strin
   });
   await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
   const baseUrl = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  return { provider: anthropic({ apiKey: "k", baseUrl }), requests, close: () => srv.close() };
+  return { provider: anthropic({ apiKey: "k", baseUrl }), baseUrl, requests, close: () => srv.close() };
 }
 
 const tools: ToolDef[] = [
@@ -151,6 +151,25 @@ test("retries 529 twice then succeeds, announcing each retry; retry-after is hon
   assert.deepEqual(seen.filter((e) => e.type === "retry").map((e: any) => e.attempt), [1, 2, 3]);
   assert.ok(Date.now() - t0 >= 240, "waited for retry-after");
   s.close();
+});
+
+test("retry events and stream errors never carry the key, even in a shape the generic patterns miss (POL-24)", async () => {
+  const key = "gw-custom-9f8e7d6c5b4a";
+  const bad = sse([{ type: "error", error: { type: "overloaded_error", message: `overloaded for key ${key}` } }]);
+  const s = await server([{ body: bad }, { body: turn2 }]);
+  const seen: StreamEvent[] = [];
+  const p = anthropic({ apiKey: key, baseUrl: s.baseUrl });
+  await p.stream(goReq, (e) => seen.push(e));
+  const retries = seen.filter((e) => e.type === "retry");
+  assert.equal(retries.length, 1);
+  assert.ok(!JSON.stringify(seen).includes(key));
+  assert.match((retries[0] as any).message, /overloaded for key \[redacted\]/);
+  s.close();
+  const t = await server([{ status: 529, body: `overloaded: bad key ${key}` }, { body: turn2 }]);
+  const seen2: StreamEvent[] = [];
+  await anthropic({ apiKey: key, baseUrl: t.baseUrl }).stream(goReq, (e) => seen2.push(e));
+  assert.ok(!JSON.stringify(seen2).includes(key));
+  t.close();
 });
 
 test("gives up after 4 retries; non-retryable statuses are not retried", async () => {

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 process.env.POLARIS_RETRY_BASE_MS = "1"; // a dead provider is retried 4 times: don't wait seconds
 process.env.POLARIS_CONCURRENCY = "2";
 const { configure, fileTicket, call, db, listen, reply, tempRepo, until, user } = await import("./helpers.ts");
+const { createCipheriv, randomBytes } = await import("node:crypto");
 const { encrypt, decrypt, SecretKeyError } = await import("../server/secrets.ts");
 
 const alice = await user("alice");
@@ -30,22 +31,54 @@ const { srv, url: mock } = await listen(async (req, res) => {
 });
 
 test("encryption round-trips and detects tampering, wrong keys and a missing key", () => {
-  const c = encrypt("sk-secret-1234");
-  assert.ok(!c.includes("secret"));
-  assert.notEqual(c, encrypt("sk-secret-1234")); // fresh IV each time
-  assert.equal(decrypt(c), "sk-secret-1234");
+  const c = encrypt("sk-secret-1234", "providers:p1");
+  assert.ok(c.startsWith("v2:") && !c.includes("secret"));
+  assert.notEqual(c, encrypt("sk-secret-1234", "providers:p1")); // fresh IV each time
+  assert.equal(decrypt(c, "providers:p1"), "sk-secret-1234");
   const raw = Buffer.from(c.slice(3), "base64");
   for (const at of [0, 13, raw.length - 1]) {
     const bad = Buffer.from(raw);
     bad[at] ^= 1;
-    assert.throws(() => decrypt("v1:" + bad.toString("base64")), `byte ${at}`);
+    assert.throws(() => decrypt("v2:" + bad.toString("base64"), "providers:p1"), `byte ${at}`);
   }
   const key = process.env.POLARIS_SECRET_KEY;
   process.env.POLARIS_SECRET_KEY = "ff".repeat(32);
-  assert.throws(() => decrypt(c));
+  assert.throws(() => decrypt(c, "providers:p1"));
   delete process.env.POLARIS_SECRET_KEY;
-  assert.throws(() => encrypt("x"), SecretKeyError);
+  assert.throws(() => encrypt("x", "providers:p1"), SecretKeyError);
   process.env.POLARIS_SECRET_KEY = key;
+});
+
+test("a truncated tag throws; a v2 blob moved to another row fails; a v1 blob from before row binding still decrypts (POL-27)", () => {
+  const c = encrypt("sk-secret-1234", "providers:p1");
+  const raw = Buffer.from(c.slice(3), "base64");
+  // iv | tag | ct with the tag cut to 4 bytes (Node accepts that unless authTagLength is pinned)
+  const short = Buffer.concat([raw.subarray(0, 12), raw.subarray(12, 16), raw.subarray(28)]);
+  assert.throws(() => decrypt("v2:" + short.toString("base64"), "providers:p1"));
+  assert.throws(() => decrypt("v2:" + raw.subarray(0, 20).toString("base64"), "providers:p1"), /truncated/);
+  assert.throws(() => decrypt(c, "providers:p2"));
+  assert.throws(() => decrypt(c, "other:p1"));
+  // a v1 blob exactly as the old encrypt() wrote it: no authTagLength, no AAD
+  const iv = randomBytes(12);
+  const k = createCipheriv("aes-256-gcm", Buffer.from(process.env.POLARIS_SECRET_KEY!, "hex"), iv);
+  const ct = Buffer.concat([k.update("old-key-value", "utf8"), k.final()]);
+  const v1 = "v1:" + Buffer.concat([iv, k.getAuthTag(), ct]).toString("base64");
+  assert.equal(decrypt(v1, "providers:anything"), "old-key-value");
+});
+
+test("a provider key written before row binding (v1) keeps working and is rewritten as v2 on the next write (POL-27)", async () => {
+  const id = (await call("POST", "/api/providers", alice, { name: "Old", kind: "anthropic", api_key: "sk-ant-legacy-key-5678" })).body.id;
+  const iv = randomBytes(12);
+  const k = createCipheriv("aes-256-gcm", Buffer.from(process.env.POLARIS_SECRET_KEY!, "hex"), iv);
+  const ct = Buffer.concat([k.update("sk-ant-legacy-key-5678", "utf8"), k.final()]);
+  const stored = () => (db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret as string;
+  db.prepare("UPDATE providers SET encrypted_secret = ? WHERE id = ?").run("v1:" + Buffer.concat([iv, k.getAuthTag(), ct]).toString("base64"), id);
+  const view = (await call("GET", "/api/providers", alice)).body.find((p: any) => p.id === id);
+  assert.deepEqual([view.has_secret, view.secret_last4], [true, "5678"]);
+  assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { name: "Old 2" })).status, 200);
+  assert.ok(stored().startsWith("v2:"));
+  assert.equal(decrypt(stored(), `providers:${id}`), "sk-ant-legacy-key-5678");
+  await call("DELETE", `/api/providers/${id}`, alice);
 });
 
 test("provider API never returns secrets, validates input, and is isolated per workspace", async () => {
@@ -56,12 +89,12 @@ test("provider API never returns secrets, validates input, and is isolated per w
   assert.equal(made.body.secret_last4, "wxyz");
   const id = made.body.id;
   const stored = (db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret;
-  assert.ok(!stored.includes("SUPERSECRET") && decrypt(stored) === key);
+  assert.ok(!stored.includes("SUPERSECRET") && decrypt(stored, `providers:${id}`) === key);
 
   const every = [made.text, (await call("GET", "/api/providers", alice)).text, (await call("PATCH", `/api/providers/${id}`, alice, { name: "Claude 2" })).text];
   for (const t of every) assert.ok(!t.includes("SUPERSECRET") && !t.includes("encrypted"), t);
   // Patch without api_key keeps the secret; with one replaces it.
-  assert.equal(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret), key);
+  assert.equal(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret, `providers:${id}`), key);
   assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { api_key: "new-key-abcd-0000" })).body.secret_last4, "0000");
 
   for (const bad of [{}, { name: "x", kind: "bogus" }, { name: "x", kind: "ollama", auth_type: "api_key" }, { name: "x", kind: "anthropic", base_url: "ftp://x" }, { name: "", kind: "ollama" }, { name: "x", kind: "ollama", api_key: "k" }])
@@ -114,6 +147,24 @@ test("models and the tool-calling smoke test", async () => {
   assert.equal(bad.ok, false);
   assert.match(bad.error, /request failed/);
   assert.equal((await call("GET", `/api/providers/${dead}/models`, alice)).status, 502);
+});
+
+test("Test and the model list never reflect an upstream body; a base URL with ? or # is a 400 (POL-12)", async () => {
+  const { srv: internal, url } = await listen((_req, res) => void res.writeHead(404).end("SECRET-BODY"));
+  try {
+    for (const kind of ["ollama", "litellm", "anthropic"] as const) {
+      const id = (await call("POST", "/api/providers", alice, { name: `Int ${kind}`, kind, base_url: url, ...(kind === "anthropic" ? { api_key: "k-1234" } : {}) })).body.id;
+      const t = await call("POST", `/api/providers/${id}/test`, alice, { model: "m" });
+      const l = await call("GET", `/api/providers/${id}/models`, alice);
+      for (const r of [t, l]) assert.ok(!JSON.stringify(r.body).includes("SECRET-BODY"), kind);
+      if (kind === "ollama") assert.match(t.body.error, /HTTP 404/);
+    }
+  } finally {
+    internal.closeAllConnections();
+    internal.close();
+  }
+  for (const base_url of [`${mock}/admin?x=`, `${mock}/#frag`])
+    assert.equal((await call("POST", "/api/providers", alice, { name: "Q", kind: "litellm", base_url })).status, 400, base_url);
 });
 
 test("runs record the chosen provider/model; retry-with picks another; gate retries keep it", async () => {

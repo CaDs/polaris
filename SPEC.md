@@ -243,21 +243,31 @@ summaries. Encrypted-only reasoning shows nothing.
   `X-Title: Polaris`. Context window left at the default (128000): each model's `context_length` from the catalog.
 - **LiteLLM.** Models: the proxy's `/v1/models` (its `model_list` aliases the key may use). Cost: unknown (priced from the
   table when the model is in it).
+- **Env fallback.** A workspace with no provider uses `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` only when it is one of the first account's
+  workspaces or is listed in `POLARIS_ENV_PROVIDER_WORKSPACES` (comma-separated ids); any other workspace gets 400 "add a provider in Settings → Models"
+  (open sign-up must not let a registrant spend the operator's key).
 - **Provider egress** (`server/egress.ts`, every provider call including model lists and Ollama's window detection):
   `providerFetch` checks the URL first: http(s) only, no `user:pass@`; never link-local, unspecified or multicast addresses
-  (cloud metadata: 169.254.0.0/16, fe80::/10, `fd00:ec2::254`, also as IPv4-mapped IPv6); plain http only when every address
-  the host resolves to is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7), checked again at request
-  time (cached a minute per origin) because a name can point anywhere; `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
+  (cloud metadata: 169.254.0.0/16, 192.0.0.0/24, 168.63.129.16, fe80::/10, fec0::/10, `fd00:ec2::254`, `fd20:ce::254`, also as
+  IPv4-mapped, NAT64 `64:ff9b::/96`, 6to4 `2002::/16` or IPv4-compatible `::/96` IPv6); plain http only when every address
+  the host resolves to is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); the address rules run in
+  the connection's own DNS lookup, on the address actually dialled (no check-then-connect gap for a name to rebind in); `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
   never the metadata one. A saved base URL gets the same checks without DNS (a single-label, `.local`, `.internal`, `.lan`
   name counts as local). Redirects are refused (a key never follows one), no response headers within 120 s (model lists
   10–15 s; a local model, Ollama or a LiteLLM proxy on this network, 10 minutes: it may be swapping a model in or
   prefilling a long prompt) fails the call, and a one-off request (reflection, mining) to a local model gets the same
-  10 minutes, and error bodies are read up to 64 KiB. Policy failures are not retried.
+  10 minutes, and error bodies are read up to 64 KiB. Policy failures are not retried. A response is bounded: at most 32 MB of stream (then `ProviderError`), block/tool indexes 0 to 1000, and a
+  reported cost counts only when finite and non-negative, capped at $100 per request (else the table price, or unknown). A base URL has no query string, fragment
+  or userinfo (a `?` would swallow the path Polaris appends). Test and the model list answer with the HTTP status and a fixed
+  reason, never the upstream body (it goes to the server log): a base URL must not turn them into a reader of internal services.
 - **Secrets.** Keys must be printable without spaces (a key is a header value: no header injection), at most 500 chars.
-  `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()`: the provider's own key and common key
+  `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()` (retry events inside `withRetry` and the Anthropic stream `error` included): the provider's own key and common key
   and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses
   to start with `NODE_TLS_REJECT_UNAUTHORIZED=0` unless `POLARIS_ALLOW_INSECURE_TLS=1` (a private CA goes in
-  `NODE_EXTRA_CA_CERTS`).
+  `NODE_EXTRA_CA_CERTS`). Stored secrets are AES-256-GCM with a 16-byte tag, `v2:` blobs bound to their row (additional data
+  `providers:<id>`: a ciphertext copied to another row does not open); older `v1:` blobs still decrypt and are rewritten as
+  v2 on the next write. OAuth, plan-model and Slack webhook requests (the calls that do not use `providerFetch`) refuse
+  redirects and give up after 10 s; a token response whose `access_token` (or `refresh_token`) is not a string is refused.
 - **Migrations** run with foreign keys off and `PRAGMA foreign_key_check` before each commit, so one can rebuild a table
   (003 widens the `kind` CHECK) without the drop cascading.
 

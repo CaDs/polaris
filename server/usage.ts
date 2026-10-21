@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
+import { reportedCost } from "./agent/providers/retry.ts";
 import { AgentError, noUsage, type Provider, type RequestUsage, type Usage } from "./agent/types.ts";
 
 export type BillingMode = "local" | "subscription" | "api_key" | "unknown";
@@ -31,7 +32,7 @@ export const normalized = (u: Partial<Usage> = {}): Usage => Object.fromEntries(
 
 export function recordUsage(c: UsageContext, p: UsageProvider, model: string, request: RequestUsage, historical = false, costOverride?: number) {
   const u = normalized(request.usage);
-  const usd = costOverride ?? request.cost_usd ?? usageCost(model, u, p.billing);
+  const usd = costOverride ?? reportedCost(request.cost_usd) ?? usageCost(model, u, p.billing); // never trust a reported cost unclamped
   db.exec("SAVEPOINT usage_record");
   let added = false;
   try {
