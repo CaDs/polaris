@@ -4,17 +4,18 @@ import { Markdown } from "./Wiki.tsx";
 import { PRIORITIES, useTracker, type ProjectRef } from "./tracker.tsx";
 import { Popover } from "./Filters.tsx";
 import { SkillDialog } from "./Skills.tsx";
-import { Alert, Icon, StatusIcon, api, type IconName, type Ticket } from "./ui.tsx";
+import { Alert, Confirm, Icon, Mark, StatusIcon, api, when, type IconName, type Ticket } from "./ui.tsx";
 
 // M13: the chat (Cmd/Ctrl+J panel, or the full-width Agent page: variant "page"). Talks with a project's agent about the
 // page you're on; the agent proposes tickets as cards and you file them into that project. A new chat starts in the page's
 // project (or the one picked). Skills (M17) can be attached to a message: their full text goes with it. One chat at a time is open; its stored events replay over SSE, then live ones and the
-// reply's text as it streams.
+// reply's text as it streams. Which chat is open is the caller's: the page's URL (/agent/<id>), or the panel's remembered one.
+// Past chats are listed in the sidebar (recent ones) and on the Chats page (all of them).
 export type ChatContext = { ticket?: string; project?: string; cycle?: string };
 type Ev = { seq: number; type: string; payload: any };
 type Draft = { title: string; spec: string; kind: string; test_command: string | null; priority: number; estimate: number | null };
 type Proposal = { id: string; number: number; status: "open" | "filed" | "dismissed" | "superseded"; payload: Draft; ticket_key: string | null };
-type ChatInfo = { id: string; title: string; project_key?: string };
+export type ChatInfo = { id: string; title: string; project_key?: string; updated_at?: number };
 type SkillRef = { id: string; name: string };
 // The Agent page's starting points: they fill the composer, the member finishes the sentence.
 const EXAMPLES: { icon: IconName; title: string; text: string; prompt: string }[] = [
@@ -22,20 +23,6 @@ const EXAMPLES: { icon: IconName; title: string; text: string; prompt: string }[
   { icon: "code", title: "Explain the code", text: "How a part of the repository works", prompt: "How does … work in this repository? Point me to the files." },
   { icon: "layers", title: "Groom the backlog", text: "Stale, duplicated or oversized tickets", prompt: "Which open tickets look stale, duplicated or too large to finish in one run? Suggest what to split or close." },
 ];
-
-const remembered = () => {
-  try {
-    return localStorage.getItem("chat") ?? null;
-  } catch {
-    return null;
-  }
-};
-const remember = (id: string | null) => {
-  try {
-    if (id) localStorage.setItem("chat", id);
-    else localStorage.removeItem("chat");
-  } catch {}
-};
 
 // Read-only tool calls become the turn's "sources": what the agent looked at to answer.
 const SOURCE: Record<string, (i: any) => string> = {
@@ -45,15 +32,14 @@ const SOURCE: Record<string, (i: any) => string> = {
   list_tickets: (i) => `tickets${i.status ? ` (${i.status})` : ""}${i.query ? ` “${i.query}”` : ""}`,
 };
 
-export function Chat({ context, label, project, tickets, go, filed, close, variant = "panel" }: {
+export function Chat({ id, pick, chats, listed, context, label, project, tickets, go, filed, close, variant = "panel" }: {
+  id: string | null; pick: (id: string | null) => void; chats: ChatInfo[]; listed: () => void;
   context: ChatContext; label: string | null; project: ProjectRef | undefined; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close?: () => void;
   variant?: "panel" | "page";
 }) {
   const { tracker } = useTracker();
   const [picked, setPicked] = useState<string | null>(null); // a project chosen for the next new chat
   const projectId = picked ?? project?.id;
-  const [chats, setChats] = useState<ChatInfo[]>([]);
-  const [id, setId] = useState<string | null>(remembered);
   const [events, setEvents] = useState<Ev[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [busy, setBusy] = useState(false);
@@ -65,14 +51,10 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
   const [skills, setSkills] = useState<SkillRef[]>([]); // attached to the next message
   const end = useRef<HTMLDivElement>(null);
 
-  const list = () => api<ChatInfo[]>("/api/chats").then(setChats, (e) => setError(e.message));
   const load = (chat = id) =>
     chat
       ? api<{ busy: boolean; proposals: Proposal[]; project_id: string }>(`/api/chats/${chat}`).then((c) => (setProposals(c.proposals), setBusy(c.busy), setChatProject(c.project_id)), () => pick(null))
       : Promise.resolve();
-  const pick = (chat: string | null) => (remember(chat), setId(chat));
-
-  useEffect(() => void list(), []);
   useEffect(() => setUseContext(true), [label]); // a new page is new context
   useEffect(() => {
     setEvents([]), setProposals([]), setStreaming(""), setBusy(false);
@@ -87,7 +69,7 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
       setEvents((all) => [...all, e]);
       if (e.type === "user_message") setBusy(true);
       if (e.type === "assistant_message" || e.type === "turn_finished") setStreaming("");
-      if (e.type === "turn_finished") setBusy(false), void list();
+      if (e.type === "turn_finished") setBusy(false), listed();
       if (e.type === "proposal") void load(id);
     };
     es.addEventListener("delta", (m) => setStreaming((s) => s + JSON.parse((m as MessageEvent).data).text));
@@ -105,7 +87,7 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
       else {
         const c = await api<ChatInfo>("/api/chats", "POST", body);
         pick(c.id);
-        void list();
+        listed();
       }
       setDraft("");
       setSkills([]);
@@ -118,19 +100,16 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
 
   return (
     <section className={`chat chat-${variant}`} aria-label="Chat">
-      <header className="chat-head">
-        <select aria-label="Conversation" value={id ?? ""} onChange={(e) => pick(e.target.value || null)}>
-          <option value="">New chat</option>
-          {chats.map((c) => <option key={c.id} value={c.id}>{c.project_key} · {c.title}</option>)}
-        </select>
-        {!id && (
-          <select aria-label="Project" value={projectId ?? ""} onChange={(e) => setPicked(e.target.value)}>
-            {tracker?.projects.map((p) => <option key={p.id} value={p.id}>{p.key}</option>)}
+      {variant === "panel" && (
+        <header className="chat-head">
+          <select aria-label="Conversation" value={id ?? ""} onChange={(e) => pick(e.target.value || null)}>
+            <option value="">New chat</option>
+            {chats.map((c) => <option key={c.id} value={c.id}>{c.project_key} · {c.title}</option>)}
           </select>
-        )}
-        <button className="icon-btn" aria-label="New chat" title="New chat" onClick={() => pick(null)}><Icon name="plus" /></button>
-        {close && <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>}
-      </header>
+          <button className="icon-btn" aria-label="New chat" title="New chat" onClick={() => pick(null)}><Icon name="plus" /></button>
+          {close && <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>}
+        </header>
+      )}
       <div className="chat-log" role="log" aria-label="Messages">
         {!id && (
           <div className="chat-empty muted">
@@ -149,13 +128,20 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
           </div>
         )}
         {render(events, proposals, (p) => <ProposalCard key={p.id} p={p} go={go} changed={() => (void load(), filed())} />)}
-        {busy && (streaming ? <div className="chat-model"><Markdown text={streaming} /></div> : <p className="chat-thinking muted">Thinking…</p>)}
+        {busy && (streaming ? <div className="chat-model working"><Mark /><Markdown text={streaming} /></div> : <p className="chat-model chat-thinking working muted"><Mark />Thinking…</p>)}
         <div ref={end} />
       </div>
       <Alert error={error} />
       <Composer draft={draft} setDraft={setDraft} send={send} tickets={tickets} busy={busy} stop={stop}
         chip={label && useContext ? <span className="chip">On {label}<button aria-label={`Leave out ${label}`} onClick={() => setUseContext(false)}><Icon name="x" size={12} /></button></span> : null}
-        tools={(id ? chatProject : projectId) ? <SkillPicker projectId={(id ? chatProject : projectId)!} selected={skills} setSelected={setSkills} /> : null} />
+        tools={<>
+          {!id && tracker && tracker.projects.length > 1 && (
+            <select aria-label="Project" title="The project a new chat is about" value={projectId ?? ""} onChange={(e) => setPicked(e.target.value)}>
+              {tracker.projects.map((p) => <option key={p.id} value={p.id}>{p.key}</option>)}
+            </select>
+          )}
+          {(id ? chatProject : projectId) && <SkillPicker projectId={(id ? chatProject : projectId)!} selected={skills} setSelected={setSkills} />}
+        </>} />
     </section>
   );
 }
@@ -185,7 +171,7 @@ function render(events: Ev[], proposals: Proposal[], card: (p: Proposal) => Reac
       );
     else if (e.type === "assistant_message") {
       const text = (e.payload.message.content as any[]).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-      if (text) out.push(<div key={e.seq} className="chat-model"><Markdown text={text} /></div>);
+      if (text) out.push(<div key={e.seq} className="chat-model"><Mark /><Markdown text={text} /></div>);
     } else if (e.type === "proposal") {
       const p = proposals.find((x) => x.id === e.payload.proposal_id);
       if (p) out.push(card(p));
@@ -352,5 +338,38 @@ function ProposalCard({ p, go, changed }: { p: Proposal; go: (to: string) => voi
         <p className="muted">Filed as <a href={`/t/${p.ticket_key}`} onClick={(e) => (e.preventDefault(), go(`/t/${p.ticket_key}`))}>{p.ticket_key}</a></p>
       ) : null}
     </article>
+  );
+}
+
+// The Chats page: every past chat (newest first), searchable by title; open one on the Agent page, or delete it.
+export function ChatsPage({ chats, listed, go }: { chats: ChatInfo[]; listed: () => void; go: (to: string) => void }) {
+  const [q, setQ] = useState("");
+  const [deleting, setDeleting] = useState<ChatInfo | null>(null);
+  const [error, setError] = useState("");
+  const shown = chats.filter((c) => c.title.toLowerCase().includes(q.trim().toLowerCase()));
+  return (
+    <section className="chats-page" aria-label="Chats">
+      <div className="row">
+        <input type="search" className="grow" aria-label="Search chats" placeholder="Search chats" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button className="btn primary with-icon" onClick={() => go("/agent")}><Icon name="plus" size={14} /> New chat</button>
+      </div>
+      <Alert error={error} />
+      <ul className="plist">
+        {shown.map((c) => (
+          <li key={c.id} className="row">
+            <a href={`/agent/${c.id}`} className="grow" onClick={(e) => (e.preventDefault(), go(`/agent/${c.id}`))}>{c.title}</a>
+            <span className="mono muted">{c.project_key}</span>
+            {c.updated_at && <span className="muted">{when(c.updated_at)}</span>}
+            <button className="icon-btn" aria-label={`Delete ${c.title}`} title="Delete" onClick={() => setDeleting(c)}><Icon name="trash" size={14} /></button>
+          </li>
+        ))}
+        {!shown.length && <li className="muted">{chats.length ? "No chat matches." : "No chats yet. Ask Polaris something and it shows up here."}</li>}
+      </ul>
+      {deleting && (
+        <Confirm title="Delete chat?" onConfirm={() => api(`/api/chats/${deleting.id}`, "DELETE").then(listed, (e) => setError(e.message)).finally(() => setDeleting(null))} onClose={() => setDeleting(null)}>
+          “{deleting.title}” and its proposals are deleted. Tickets already filed from it stay.
+        </Confirm>
+      )}
+    </section>
   );
 }

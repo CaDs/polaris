@@ -57,5 +57,6 @@ favicon is the same mark in white on a black rounded tile, so it reads on light 
 ## Gradient rule
 
 Inside the app a gradient means "a model is working": the 2px top hairline on a running board card and the 2px left rule on
-the model's own transcript and chat text (`--flow-a → --flow-b`). Buttons and the mark are flat. The landing panel is the
+the model's own transcript in a run (`--flow-a → --flow-b`). Chat replies carry no rule: they sit in a gutter behind the
+mark (16px, muted), which takes the accent while the reply is still coming. Buttons and the mark are flat. The landing panel is the
 palette's night with a soft accent glow and stars. Never on page, card, table or sidebar backgrounds, or on text.

@@ -68,6 +68,15 @@ test("Agent page: example, a skill created and attached from the composer, the r
   await expect(log.locator(".chat-user .chip", { hasText: "Point to files" })).toBeVisible();
   await expect(log.locator(".chat-model").first()).toBeVisible();
   await expect(chat.locator(".chat-compose .chip", { hasText: "Point to files" })).toHaveCount(0); // attached once, then cleared
+  // The chat has its own URL and shows under Agent in the sidebar; All chats lists it, and a new chat starts empty.
+  await expect(page).toHaveURL(/\/agent\/[0-9a-f-]{36}$/);
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link", { name: /where does the board live/ })).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "New chat" }).click();
+  await expect(chat.getByRole("button", { name: /Explain the code/ })).toBeVisible();
+  await nav.getByRole("link", { name: "All chats" }).click();
+  await page.getByRole("region", { name: "Chats" }).getByRole("link", { name: /where does the board live/ }).click();
+  await expect(log.locator(".chat-user .chip", { hasText: "Point to files" })).toBeVisible();
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByRole("link", { name: "Skills", exact: true }).click();
   await expect(page.getByRole("region", { name: "Skills" })).toContainText("Point to files");

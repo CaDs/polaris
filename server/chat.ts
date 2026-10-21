@@ -305,9 +305,10 @@ const proposalsOf = (chatId: string) =>
     FROM chat_proposals p LEFT JOIN tickets t ON t.id = p.ticket_id WHERE p.chat_id = ? ORDER BY p.number`).all(chatId) as Record<string, any>[])
     .map((p) => ({ ...p, payload: JSON.parse(p.payload) }));
 
+// ponytail: the whole history in one list; page it when members keep more than 500 chats.
 chatRoutes.get("/", (c) =>
   c.json(db.prepare(`SELECT c.id, c.title, c.project_id, p.key AS project_key, p.name AS project_name, c.created_at, c.updated_at FROM chats c JOIN projects p ON p.id = c.project_id
-    WHERE c.workspace_id = ? AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT 50`).all(c.get("workspaceId"), c.get("userId"))));
+    WHERE c.workspace_id = ? AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT 500`).all(c.get("workspaceId"), c.get("userId"))));
 
 // {message, context?, project_id}: the project the chat talks about, for good.
 chatRoutes.post("/", async (c) => {

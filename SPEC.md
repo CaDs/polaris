@@ -563,19 +563,24 @@ until the member files it. Migration 021, server in `server/chat.ts`, prompt `se
   `POST /api/tickets` (shared `insertTicket`); the spec gets a last line `From chat: <title>`; `run: true` also queues
   the first run (a refused run returns the ticket with `run_error`). A proposal is filed once (409 after that, also for
   dismiss).
-- **Routes** (`/api/chats`, the caller's own chats in the active workspace; others 404): `GET /` (newest first, 50),
+- **Routes** (`/api/chats`, the caller's own chats in the active workspace; others 404): `GET /` (newest first, 500),
   `POST / {message, context?}` (creates the chat and starts its turn, 201), `GET /:id` (`busy`, `events`, `proposals`),
   `POST /:id/messages {message, context?}` (202; 409 while a turn runs), `POST /:id/cancel`, `DELETE /:id`,
   `POST /proposals/:id/dismiss`, and `GET /:id/stream`: SSE that replays the stored events, then live ones (de-duped by
   seq), plus `event: delta {text}` with the reply's text as it streams (never stored); stays open across turns.
 - **Panel** (`web/Chat.tsx`): a third grid column (full screen under 720 px); a conversation picker; user messages,
-  replies, a "Looked at …" line for each run of read-only calls, proposal cards, errors;
+  replies (behind the mark, accent while streaming), a "Looked at …" line for each run of read-only calls, proposal cards, errors;
   the streamed reply while a turn runs, Stop. The composer sends on Enter (Shift+Enter: new line); `@` opens a ticket
   picker (the palette's matching); **Skills** attaches skills (M17). The open state and the current chat are remembered
   in localStorage.
 - **Agent page** (`/agent`, sidebar **Agent**): the same chats at full width: the conversation in a 780 px column, the
   composer at the bottom, and on a new chat three starting points (Plan a feature, Explain the code, Groom the backlog)
-  that fill the composer. It has no page context (pick the project in the header); the panel stays closed there.
+  that fill the composer. It has no page context (a new chat's project is picked in the composer); the panel stays closed
+  there. The open chat is in the URL (`/agent/<id>`; a new one pushes its URL once created) and becomes the panel's too;
+  the topbar shows its title and **New chat**.
+- **History**: the sidebar lists the five most recent chats under **Agent**, then **All chats** (`/chats`): every chat,
+  newest first, filtered by title, each with its project, last activity and Delete (its proposals go with it; filed
+  tickets stay).
 - **Markdown** (replies, streamed text, wiki pages; `Markdown` in `web/Wiki.tsx`): `react-markdown` + GFM (tables, task
   lists, strikethrough) with no raw HTML, after `normalizeMarkdown` (`web/markdown.ts`) evens out model dialects: `•`/`–`
   bullets, `1)` numbering, `##Heading`, a list, table or quote glued to a paragraph, CRLF, runs of blank lines, and an

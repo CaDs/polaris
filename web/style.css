@@ -531,6 +531,12 @@ h2.cycle-title { font-size: 16px; margin: 0; text-transform: none; }
 nav a.sub { padding-left: 20px; font-size: 12px; color: var(--muted); }
 nav a.sub.active { color: var(--text); }
 nav a.sub2 { padding-left: 32px; }
+nav a.recent { padding-left: 31px; }
+.ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chats-page { width: min(780px, calc(100% - 32px)); margin: 16px auto; }
+.chats-page input[type="search"] { margin: 0; }
+.chats-page .plist { margin-top: 12px; }
+.chats-page .plist a { color: var(--text); }
 nav a .count { margin-left: auto; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; line-height: 16px; text-align: center; background: var(--hover); color: var(--muted); }
 /* Collapsible groups (More, each project): native <details>. */
 nav details > summary { padding: 4px 8px; border-radius: 6px; cursor: pointer; list-style: none; }
@@ -624,7 +630,10 @@ nav details > summary:hover { background: var(--hover); }
 .chat-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .chat-empty p { margin: 0 0 8px; }
 .chat-user { align-self: flex-end; max-width: 90%; padding: 6px 10px; border-radius: 10px 10px 2px 10px; background: var(--hover); white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-model { padding-left: 8px; border-left: 2px solid; border-image: linear-gradient(180deg, var(--flow-a), var(--flow-b)) 1; overflow-wrap: anywhere; }
+/* A reply sits in a gutter behind the Polaris mark; the mark takes the accent while the reply is still coming. */
+.chat-model { position: relative; padding-left: 26px; overflow-wrap: anywhere; }
+.chat-model > .mark { position: absolute; left: 0; top: 2px; width: 16px; height: 16px; color: var(--muted); }
+.chat-model.working > .mark { color: var(--accent-text); }
 .chat-sources, .chat-thinking { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
 .chat .note { margin: 0; }
 .proposal { margin: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }

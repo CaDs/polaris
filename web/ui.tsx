@@ -114,6 +114,7 @@ const GLYPHS = {
   bolt: "M13 2 3 14h9l-1 8 10-12h-9Z",
   list: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
   code: "m16 18 6-6-6-6M8 6l-6 6 6 6",
+  trash: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6",
   gear: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
 };
 export type IconName = keyof typeof GLYPHS;
@@ -125,6 +126,18 @@ export const Icon = ({ name, size = 16 }: { name: IconName; size?: number }) => 
 
 // Small status glyphs, all static: circle = todo, half-filled circle = running, ring with dot = review, check = done, x = failed.
 // label: the glyph is the only place the status shows (list rows, palette), so screen readers get it as an image.
+// The Polaris mark, "circumpolar": a fixed point with two star trails turning around it (Polaris holds still while the
+// agents work). One stroke weight on a 32-unit grid, drawn in currentColor: monochrome, no tile, no glow (DESIGN.md).
+export function Mark() {
+  return (
+    <svg className="mark" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" aria-hidden="true">
+      <path d="M9.42 18.39A7 7 0 0 1 22.06 12.5" />
+      <path d="M27.75 20.28A12.5 12.5 0 1 1 11.72 4.25" />
+      <circle cx="16" cy="16" r="2.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function StatusIcon({ status, label = false }: { status: string; label?: boolean }) {
   const c = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
   return (
