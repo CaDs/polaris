@@ -239,7 +239,7 @@ You don't have to sit in the dashboard. Polaris is also an MCP server, so you ca
 tickets from the conversation where the work was discussed:
 
 ```sh
-npm run token        # prints an API token (valid 365 days; --email to pick the account, --days to change it)
+npm run token        # prints an API token (valid 30 days; --email to pick the account, --days to change it, --name to label it in Settings > Account, where it can be revoked)
 claude mcp add polaris -s user -e POLARIS_TOKEN=<token> -- node "$PWD/server/mcp.ts"
 ```
 

@@ -3,6 +3,9 @@ import { getMigrations } from "better-auth/db/migration";
 import { bearer, organization } from "better-auth/plugins";
 import { db } from "./db.ts";
 
+// A session minted by `npm run token` carries this prefix plus its name in userAgent; Settings lists those as API tokens.
+export const TOKEN_UA = "polaris-token: ";
+
 // Workspaces are Better Auth organizations; users join them through `member` rows.
 const options = {
   database: db,

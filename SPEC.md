@@ -776,7 +776,9 @@ A workspace holds projects; a **project is one git repository** with its own boa
   sign-ups a minute, 100 other auth calls, stored in the database; `POLARIS_RATE_LIMIT=0` turns it off (tests). Every response
   has `Content-Security-Policy` (own scripts, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `nosniff` and
   `Referrer-Policy: no-referrer`; a `Host` that is not loopback, the host of `BETTER_AUTH_URL`/`WEB_ORIGIN` or in
-  `POLARIS_ALLOWED_HOSTS` gets 421. Changing a
+  `POLARIS_ALLOWED_HOSTS` gets 421. API tokens (`npm run token`) are sessions that last 30 days unless `--days` says
+  otherwise, labelled with `--name`; Settings > Account lists the account's sessions and tokens and revokes them
+  (`/api/me/sessions`). Changing a
   provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it. Provider calls follow the
   egress policy (Providers): https off-network, no metadata addresses, no redirects, scrubbed errors, TLS checks on.
 - The harness never edits its running code; changes land through the review queue.

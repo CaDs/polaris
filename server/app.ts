@@ -5,7 +5,7 @@ import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { streamSSE } from "hono/streaming";
-import { auth } from "./auth.ts";
+import { auth, TOKEN_UA } from "./auth.ts";
 import { db, migrate } from "./db.ts";
 import { subscribe, subscribeWorkspace, touch, type Change, type LiveEvent, type StoredEvent } from "./agent/events.ts";
 import { git, MergeError, scratchPathspec } from "./git.ts";
@@ -395,6 +395,18 @@ const PALETTES = ["black", "graphite", "stone", "polar", "ember", "teal"];
 const MODES = ["system", "light", "dark"];
 const preferences = (userId: string) =>
   ({ palette: "black", mode: "system", ...(db.prepare("SELECT palette, mode FROM user_preferences WHERE user_id = ?").get(userId) as object | undefined) });
+// The account's live sessions: browser sign-ins and API tokens (npm run token --name, stored in userAgent). Revoking one signs it out.
+app.get("/api/me/sessions", async (c) => {
+  const current = (await auth.api.getSession({ headers: c.req.raw.headers }))?.session.id;
+  return c.json(
+    (db.prepare("SELECT id, userAgent, createdAt, updatedAt, expiresAt FROM session WHERE userId = ? ORDER BY createdAt DESC").all(c.get("userId")) as Record<string, any>[])
+      .filter((r) => new Date(r.expiresAt).getTime() > Date.now())
+      .map(({ userAgent: ua, ...r }) => ({ ...r, token: !!ua?.startsWith(TOKEN_UA), name: ua?.startsWith(TOKEN_UA) ? ua.slice(TOKEN_UA.length) : ua ?? "", current: r.id === current })),
+  );
+});
+app.delete("/api/me/sessions/:id", (c) =>
+  db.prepare("DELETE FROM session WHERE id = ? AND userId = ?").run(c.req.param("id"), c.get("userId")).changes ? c.json({ ok: true }) : c.json({ error: "session not found" }, 404));
+
 app.get("/api/me/preferences", (c) => c.json(preferences(c.get("userId"))));
 // Merges: an omitted field keeps its value.
 app.put("/api/me/preferences", async (c) => {

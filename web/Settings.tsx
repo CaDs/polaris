@@ -3,7 +3,7 @@ import { Providers } from "./Providers.tsx";
 import { SkillsTab } from "./Skills.tsx";
 import { LabelSettings } from "./tracker.tsx";
 import { Caps, type Usage } from "./Usage.tsx";
-import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useProviders } from "./ui.tsx";
+import { Alert, Loading, ModelPicker, PALETTES, api, when, useApi, useAppearance, useProviders } from "./ui.tsx";
 
 type WorkspaceSettings = {
   compact_at_tokens: number; updated_at?: number; default_provider_id: string | null; default_model: string | null;
@@ -21,7 +21,7 @@ type Phase = (typeof PHASES)[number][0];
 
 // One page per concern, in setup order; Appearance is the caller's own. A project's repository and commands are on its
 // Overview page.
-const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["skills", "Skills"], ["appearance", "Appearance"]] as const;
+const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["skills", "Skills"], ["appearance", "Appearance"], ["account", "Account"]] as const;
 
 export function Settings({ tab = "models", go }: { tab?: string; go: (to: string) => void }) {
   const [s, setS] = useState<WorkspaceSettings | null>(null);
@@ -47,6 +47,8 @@ export function Settings({ tab = "models", go }: { tab?: string; go: (to: string
           <SkillsTab />
         ) : tab === "appearance" ? (
           <AppearanceTab />
+        ) : tab === "account" ? (
+          <AccountTab />
         ) : null}
       </div>
     </div>
@@ -233,6 +235,39 @@ function LimitsTab({ s, saved, go }: Tab & { go: (to: string) => void }) {
 
 // Yours alone, in every workspace and browser: saved on the server the moment you pick. Each card previews its palette
 // (data-palette scopes the tokens to the card) in the current light or dark mode.
+// Your sign-ins and API tokens (npm run token -- --name x). Revoking one signs it out at once.
+type SessionRow = { id: string; token: boolean; name: string; current: boolean; createdAt: string; updatedAt: string; expiresAt: string };
+function AccountTab() {
+  const [rows, setRows] = useState<SessionRow[] | null>(null);
+  const [error, setError] = useState("");
+  const load = () => api<SessionRow[]>("/api/me/sessions").then(setRows, (e) => setError(e.message));
+  useEffect(() => void load(), []);
+  if (!rows) return <Loading error={error} />;
+  return (
+    <section aria-label="Sessions and tokens">
+      <h2>Sessions and API tokens</h2>
+      <p className="muted">Tokens come from <code>npm run token -- --name claude-code</code> and last 30 days by default. Revoke one you no longer use or that may have leaked.</p>
+      <Alert error={error} />
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th /></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.token ? r.name : "Browser sign-in"}{r.current && " (this one)"}</td>
+                <td>{when(r.createdAt)}</td>
+                <td>{when(r.updatedAt)}</td>
+                <td>{when(r.expiresAt)}</td>
+                <td><button className="btn danger" aria-label={`Revoke ${r.token ? r.name : "browser sign-in"}`} onClick={() => api(`/api/me/sessions/${r.id}`, "DELETE").then(load, (e) => setError(e.message))}>Revoke</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function AppearanceTab() {
   const { appearance, set } = useAppearance();
   return (
