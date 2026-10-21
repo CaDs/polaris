@@ -9,13 +9,12 @@ const signIn = (password: string) => call("POST", "/api/auth/sign-in/email", "",
 test("reset-password sets a new password and signs the account out everywhere", async () => {
   const old = await user("rosa");
   assert.equal((await call("GET", "/api/tracker", old)).status, 200);
-  const fresh = await resetPassword("ROSA@x.dev"); // emails match whatever the case
-  assert.ok(fresh.length >= 16);
+  await resetPassword("ROSA@x.dev", "fresh-password"); // emails match whatever the case
   assert.equal((await call("GET", "/api/tracker", old)).status, 401); // the old session is gone
   assert.equal((await signIn("password-123")).status, 401);
-  assert.equal((await signIn(fresh)).status, 200);
+  assert.equal((await signIn("fresh-password")).status, 200);
   await resetPassword("rosa@x.dev", "chosen-password");
   assert.equal((await signIn("chosen-password")).status, 200);
   await assert.rejects(resetPassword("rosa@x.dev", "short"), /at least 8/);
-  await assert.rejects(resetPassword("nobody@x.dev"), /no account/);
+  await assert.rejects(resetPassword("nobody@x.dev", "fresh-password"), /no account/);
 });

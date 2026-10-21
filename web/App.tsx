@@ -104,7 +104,7 @@ function AuthForm() {
         {mode === "in" && (forgot ? (
           // Polaris runs on your machine and sends no email: whoever can run commands where it runs resets the password.
           <p className="forgot muted" role="status">
-            On the machine running Polaris, in its folder, run <code>npm run reset-password -- {email || "you@example.com"}</code>. It prints a new
+            On the machine running Polaris, in its folder, run <code>npm run reset-password -- {email || "you@example.com"}</code>. It asks for a new
             password and signs that account out everywhere.
           </p>
         ) : <button type="button" className="link" onClick={() => setForgot(true)}>Forgot your password?</button>)}

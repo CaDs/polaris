@@ -261,7 +261,7 @@ from Slack itself is not built yet.
 npm run agent -- --task "text" --root DIR             # one-off agent run directly on DIR (no sandbox or gate)
 npm run agent -- <ticket-id> --root DIR               # run an existing ticket the same way
 npm run seed-tasks -- --workspace <slug> --project <KEY> [--file tasks.md]   # one ticket per open "- [ ]" item under "## Mn" headings
-npm run reset-password -- you@example.com [--password <new>]                  # forgot it: prints a new one, signs the account out everywhere
+npm run reset-password -- you@example.com                                     # forgot it: asks for a new one (hidden), signs the account out everywhere
 ```
 
 Polaris sends no email, so a forgotten password is reset from the machine it runs on: anyone who can run commands
