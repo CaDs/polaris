@@ -173,10 +173,12 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 
 | Variable | Purpose |
 |---|---|
-| `BETTER_AUTH_SECRET` | Session signing secret (required, 32+ characters) |
+| `BETTER_AUTH_SECRET` | Session signing secret (required: the server exits without 32+ characters or with the `.env.example` placeholder) |
 | `BETTER_AUTH_URL` | Public URL of the API (default `http://localhost:3000`) |
 | `WEB_ORIGIN` | Origin of the dashboard (default `http://localhost:5173` in dev) |
 | `POLARIS_SECRET_KEY` | 64 hex characters; encrypts provider API keys and OAuth tokens at rest |
+| `POLARIS_TRUST_PROXY=1` | Take the client address for sign-in rate limiting from the last `X-Forwarded-For` entry (only behind a proxy that sets it) |
+| `POLARIS_ALLOWED_HOSTS` | Extra host names the server answers to (comma-separated), e.g. a LAN name when `HOST=0.0.0.0`; loopback names and the hosts of `BETTER_AUTH_URL`/`WEB_ORIGIN` always work, other `Host` headers get 421 |
 | `PORT` | API port (default 3000) |
 | `HOST` | Interface the API listens on (default `127.0.0.1`; `0.0.0.0` exposes it to your network) |
 | `POLARIS_OPEN_SIGNUP=1` | Allow sign-ups after the first account (by default the first account is the owner and sign-up then closes) |
@@ -238,7 +240,7 @@ You don't have to sit in the dashboard. Polaris is also an MCP server, so you ca
 tickets from the conversation where the work was discussed:
 
 ```sh
-npm run token        # prints an API token (valid 365 days; --email to pick the account, --days to change it)
+npm run token        # prints an API token (valid 30 days; --email to pick the account, --days to change it, --name to label it in Settings > Account, where it can be revoked)
 claude mcp add polaris -s user -e POLARIS_TOKEN=<token> -- node "$PWD/server/mcp.ts"
 ```
 
@@ -335,7 +337,14 @@ tasks.md          milestone checklist
 - **Server.** Listens on `127.0.0.1` unless `HOST` says otherwise. The first account is the owner; sign-up then closes
   (`POLARIS_OPEN_SIGNUP=1` reopens it). Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` requests must come from a
   trusted origin (`BETTER_AUTH_URL`, `WEB_ORIGIN` or the API's own host). The ChatGPT sign-in callback listens on
-  `127.0.0.1` only.
+  `127.0.0.1` only. Sign-in and sign-up are limited to 5 a minute per client address (stored in the database, so a restart
+  doesn't reset it). Behind a reverse proxy every client shares the proxy's address: set `POLARIS_TRUST_PROXY=1` and make
+  the proxy set `X-Forwarded-For` itself (Polaris uses the last entry); otherwise leave it unset. Every response carries a
+  CSP (own scripts only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`,
+  so no page can frame the dashboard; requests with an unknown `Host` header get 421 (DNS rebinding).
+- **Roles.** A workspace's creator is its `owner`; other members are `member` unless an owner makes them `admin`. Only owners
+  and admins change providers, workspace settings, prompts and lessons, a project's repository and commands, a ticket's test
+  command and caps, and approve (merge); members read, file and edit tickets, comment, run, reject and chat.
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.

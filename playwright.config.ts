@@ -37,6 +37,7 @@ export default defineConfig({
       ...(realModel ? {} : { POLARIS_PROVIDER: "fake" }), // the real-model spec adds an Ollama provider through the UI
       POLARIS_CONCURRENCY: "1",
       POLARIS_OPEN_SIGNUP: "1", // every spec signs up its own user
+      POLARIS_RATE_LIMIT: "0", // ...from one address, faster than the sign-in limit allows
       POLARIS_SECRET_KEY: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", // test key only
       POLARIS_DATA_DIR: join(tmpdir(), `polaris-e2e-runs-${Date.now()}`),
       BETTER_AUTH_SECRET: "e2e-secret-e2e-secret-e2e-secret-e2e",

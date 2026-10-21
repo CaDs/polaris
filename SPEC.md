@@ -800,7 +800,18 @@ A workspace holds projects; a **project is one git repository** with its own boa
 - Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
   non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or
-  `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Changing a
+  `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Auth routes are rate
+  limited per client address (the socket's; with `POLARIS_TRUST_PROXY=1` the last `x-forwarded-for` entry): 5 sign-ins and 5
+  sign-ups a minute, 100 other auth calls, stored in the database; `POLARIS_RATE_LIMIT=0` turns it off (tests). Every response
+  has `Content-Security-Policy` (own scripts, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `nosniff` and
+  `Referrer-Policy: no-referrer`; a `Host` that is not loopback, the host of `BETTER_AUTH_URL`/`WEB_ORIGIN` or in
+  `POLARIS_ALLOWED_HOSTS` gets 421. API tokens (`npm run token`) are sessions that last 30 days unless `--days` says
+  otherwise, labelled with `--name`; Settings > Account lists the account's sessions and tokens and revokes them
+  (`/api/me/sessions`). Workspace roles are Better Auth's `member.role` (the workspace's creator is its `owner`): only
+  `owner` and `admin` change providers (and Test/OAuth), workspace settings, lessons and prompts, create or delete projects,
+  change a project's repository, base branch, setup/test commands, image, protected paths or sandbox size, change a
+  ticket's `test_command` or caps, approve, and delete eval cases (403 otherwise); a `member` keeps reads, tickets, comments,
+  runs, reject and chat. Changing a
   provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it. Provider calls follow the
   egress policy (Providers): https off-network, no metadata addresses, no redirects, scrubbed errors, TLS checks on.
 - The harness never edits its running code; changes land through the review queue.

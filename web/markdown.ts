@@ -32,3 +32,11 @@ export function normalizeMarkdown(src: string) {
   if (fence) out.push(fence); // still streaming, or the model forgot: close the block instead of swallowing the rest
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
+
+// Whether a link's visible text hides where it goes: true unless the text is the address itself (autolinks, bare URLs).
+// The renderer then appends the host, so "[Re-authenticate Polaris](https://evil.example)" shows "(evil.example)".
+export function linkHost(children: unknown, url: URL): boolean {
+  const text = (Array.isArray(children) ? children : [children]).every((c) => typeof c === "string") ? [children].flat().join("") : null;
+  const bare = (u: string) => u.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  return text === null || (bare(text) !== bare(url.href));
+}

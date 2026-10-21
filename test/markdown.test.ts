@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeMarkdown } from "../web/markdown.ts";
+import { linkHost, normalizeMarkdown } from "../web/markdown.ts";
 
 // The model-markdown normalizer (web/markdown.ts): one dialect for every model's reply.
 test("normalizeMarkdown evens out model dialects and leaves code alone", () => {
@@ -14,4 +14,14 @@ test("normalizeMarkdown evens out model dialects and leaves code alone", () => {
   assert.equal(normalizeMarkdown("Partial:\n```ts\nconst x = 1;"), "Partial:\n\n```ts\nconst x = 1;\n```"); // streaming: an open fence is closed
   assert.equal(normalizeMarkdown("- a\n  - nested\n- b"), "- a\n  - nested\n- b"); // already fine: untouched
   assert.equal(normalizeMarkdown("## Title\n- item"), "## Title\n- item");
+});
+
+test("linkHost flags links whose text is not their address", () => {
+  const u = new URL("https://evil.example/x");
+  assert.equal(linkHost("Login", u), true);
+  assert.equal(linkHost(["Login ", "now"], u), true);
+  assert.equal(linkHost("https://evil.example/x", u), false); // autolink
+  assert.equal(linkHost("evil.example/x", u), false);
+  assert.equal(linkHost("https://evil.example.attacker.test", new URL("https://evil.example")), true);
+  assert.equal(linkHost([{ type: "code" }], u), true); // non-text children
 });

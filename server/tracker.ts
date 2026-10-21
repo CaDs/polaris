@@ -9,6 +9,7 @@ import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
 import { IMAGE_REF, NETWORKS, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
+import { requireRole } from "./roles.ts";
 
 // Projects whose repository is the checkout this server runs from. A server started with --watch there restarts on every
 // merge or edit in it, and a restart fails every running run (server/index.ts warns; README "Working on Polaris with Polaris").
@@ -408,6 +409,7 @@ trackerRoutes.get("/projects", (c) => {
   return c.json(ids.map((p) => project(ws, p.id)));
 });
 trackerRoutes.post("/projects", async (c) => {
+  requireRole(c);
   const v = await projectBody(c.get("workspaceId"), await body(c));
   const projectId = randomUUID();
   insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), ...v });
@@ -421,11 +423,15 @@ trackerRoutes.get("/projects/:id", (c) => {
 trackerRoutes.patch("/projects/:id", async (c) => {
   const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
-  update("projects", cur.id, { ...(await projectBody(c.get("workspaceId"), await body(c), cur)), updated_at: Date.now() });
+  const b = await body(c);
+  // The repository, its commands, image, protected paths and sandbox size decide what code runs where: owners and admins only.
+  if (["repo_path", "base_branch", ...Object.keys(PROJECT_DEFAULTS), ...Object.keys(PROJECT_RESOURCES)].some((k) => b[k] !== undefined && String(b[k] ?? "").trim() !== String(cur[k] ?? ""))) requireRole(c); // resending the current value is not a change
+  update("projects", cur.id, { ...(await projectBody(c.get("workspaceId"), b, cur)), updated_at: Date.now() });
   return c.json(project(c.get("workspaceId"), cur.id));
 });
 // Only an empty project goes (its tickets' branches and runs would go with it): move on by deleting its tickets first.
 trackerRoutes.delete("/projects/:id", (c) => {
+  requireRole(c);
   const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
   if (db.prepare("SELECT 1 FROM tickets WHERE project_id = ? AND hidden = 0").get(cur.id)) fail("delete the project's tickets first");

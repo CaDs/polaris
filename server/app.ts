@@ -1,9 +1,11 @@
 import { attributedUsage, backfillUsage, treeUsage, usageSummary } from "./usage.ts";
 import { randomUUID } from "node:crypto";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { secureHeaders } from "hono/secure-headers";
 import { streamSSE } from "hono/streaming";
-import { auth } from "./auth.ts";
+import { auth, TOKEN_UA } from "./auth.ts";
 import { db, migrate } from "./db.ts";
 import { subscribe, subscribeWorkspace, touch, type Change, type LiveEvent, type StoredEvent } from "./agent/events.ts";
 import { git, MergeError, scratchPathspec } from "./git.ts";
@@ -17,6 +19,7 @@ import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery
 import { AgentError } from "./agent/types.ts";
 import { chatRoutes, proposalIn } from "./chat.ts";
 import { skillRoutes } from "./skills.ts";
+import { requireRole } from "./roles.ts";
 
 migrate();
 backfillUsage();
@@ -35,7 +38,39 @@ app.onError((e, c) => {
   return c.json({ error: "internal error" }, 500);
 });
 
-app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+// The limiter's client address: the socket's, or with POLARIS_TRUST_PROXY=1 the last x-forwarded-for entry (the one a reverse
+// proxy appended, which a client can't forge). Always overwritten, so a client can't pick its own bucket; requests without a
+// socket (tests) keep the header they came with. ponytail: one bucket per address, no per-account lockout.
+// DNS rebinding: a page on another name that resolves to this machine would pass the same-host Origin check below, so only
+// loopback names, the configured public hosts (BETTER_AUTH_URL, WEB_ORIGIN) and POLARIS_ALLOWED_HOSTS (comma-separated names,
+// for reaching a HOST=0.0.0.0 server by its LAN name) are served, else 421. No Host header (tests) passes.
+app.use("*", async (c, next) => {
+  const host = c.req.header("host");
+  const name = host && URL.parse(`http://${host}`)?.hostname;
+  const ok = new Set(["localhost", "127.0.0.1", "[::1]", ...(process.env.POLARIS_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim())]);
+  for (const u of [process.env.BETTER_AUTH_URL, process.env.WEB_ORIGIN]) if (u && URL.canParse(u)) ok.add(new URL(u).hostname);
+  return host && (!name || !ok.has(name)) ? c.json({ error: "bad_host" }, 421) : next();
+});
+
+// Everything, static files and API: no framing (clickjacking Approve), no sniffing, no referrer, and a CSP that only allows our own scripts.
+app.use("*", secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"], connectSrc: ["'self'"],
+    objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'self'"],
+  },
+  xFrameOptions: "DENY",
+  referrerPolicy: "no-referrer",
+}));
+
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
+  const req = new Request(c.req.raw);
+  const socket = (c.env as { incoming?: unknown } | undefined)?.incoming;
+  const proxied = process.env.POLARIS_TRUST_PROXY === "1" ? c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() : undefined;
+  const ip = proxied || (socket ? getConnInfo(c).remote.address : undefined);
+  if (ip) req.headers.set("x-polaris-client-ip", ip);
+  else if (socket) req.headers.delete("x-polaris-client-ip");
+  return auth.handler(req);
+});
 
 // CSRF: cookie-authenticated mutations must come from a trusted origin (BETTER_AUTH_URL, WEB_ORIGIN) or this host.
 // No Origin and no Sec-Fetch-Site means a non-browser client (curl, CLI): allowed only without a cookie.
@@ -61,6 +96,15 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+// Owners and admins only (server/roles.ts): workspace settings (caps, auto-approve, review, default models), lessons and prompts.
+app.use("/api/settings/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/settings", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.delete("/api/evals/cases/:id", (c, next) => (requireRole(c), next()));
+app.post("/api/tickets/:id/approve", (c, next) => (requireRole(c), next()));
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects (each a repository), milestones, cycles, views, members
 app.route("/api", skillRoutes); // M17: workspace skills, and each project's skills for the chat composer
@@ -136,6 +180,8 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
   const raw = await c.req.json().catch(() => null);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "body must be a JSON object" };
   const b = { ...raw, ...force };
+  // A command the sandbox runs and spending limits: owners and admins only. A form that resends the current value is not a change.
+  if (["test_command", "cap_usd", "cap_tokens"].some((k) => b[k] !== undefined && String(b[k] ?? "") !== String(cur?.[k] ?? ""))) requireRole(c);
   const m = pick(c, b);
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };
@@ -361,6 +407,18 @@ const PALETTES = ["black", "graphite", "stone", "polar", "ember", "teal"];
 const MODES = ["system", "light", "dark"];
 const preferences = (userId: string) =>
   ({ palette: "black", mode: "system", ...(db.prepare("SELECT palette, mode FROM user_preferences WHERE user_id = ?").get(userId) as object | undefined) });
+// The account's live sessions: browser sign-ins and API tokens (npm run token --name, stored in userAgent). Revoking one signs it out.
+app.get("/api/me/sessions", async (c) => {
+  const current = (await auth.api.getSession({ headers: c.req.raw.headers }))?.session.id;
+  return c.json(
+    (db.prepare("SELECT id, userAgent, createdAt, updatedAt, expiresAt FROM session WHERE userId = ? ORDER BY createdAt DESC").all(c.get("userId")) as Record<string, any>[])
+      .filter((r) => new Date(r.expiresAt).getTime() > Date.now())
+      .map(({ userAgent: ua, ...r }) => ({ ...r, token: !!ua?.startsWith(TOKEN_UA), name: ua?.startsWith(TOKEN_UA) ? ua.slice(TOKEN_UA.length) : ua ?? "", current: r.id === current })),
+  );
+});
+app.delete("/api/me/sessions/:id", (c) =>
+  db.prepare("DELETE FROM session WHERE id = ? AND userId = ?").run(c.req.param("id"), c.get("userId")).changes ? c.json({ ok: true }) : c.json({ error: "session not found" }, 404));
+
 app.get("/api/me/preferences", (c) => c.json(preferences(c.get("userId"))));
 // Merges: an omitted field keeps its value.
 app.put("/api/me/preferences", async (c) => {

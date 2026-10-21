@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import { requireRole } from "./roles.ts";
 import { db } from "./db.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { openai } from "./agent/providers/openai.ts";
@@ -299,6 +300,9 @@ async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow
   } else if (cur && (auth_type !== cur.auth_type || (base_url || null) !== cur.base_url)) secret = null; // a new auth type or endpoint drops the old credential (it would be sent there)
   return { v: { name: name.trim(), kind, auth_type, base_url: base_url || null, context_window: context_window as number, secret, options: JSON.stringify(options) } };
 }
+
+// Providers hold keys and endpoints: only owners and admins change them (reads stay open for the model pickers).
+providerRoutes.use("*", async (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
 
 providerRoutes.post("/", async (c) => {
   const p = await parse(c);

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { normalizeMarkdown } from "./markdown.ts";
+import { linkHost, normalizeMarkdown } from "./markdown.ts";
 import { Transcript } from "./TicketView.tsx";
 import { Alert, Icon, Loading, api, when, type Run } from "./ui.tsx";
 import type { ProjectRef } from "./tracker.tsx";
@@ -28,7 +28,7 @@ export function Markdown({ path = "", text, open }: { path?: string; text: strin
   const components: Components = {
     a: ({ href = "", children }) => {
       const web = URL.parse(href);
-      if (web && (web.protocol === "https:" || web.protocol === "http:")) return <a href={web.href} target="_blank" rel="noreferrer">{children}</a>;
+      if (web && (web.protocol === "https:" || web.protocol === "http:")) return <a href={web.href} target="_blank" rel="noreferrer">{children}{linkHost(children, web) && <span className="muted"> ({web.host})</span>}</a>;
       return open && /\.md(#.*)?$/.test(href) ? <button className="link" onClick={() => open(resolvePath(path, href.replace(/#.*$/, "")))}>{children}</button> : <>{children}</>;
     },
     img: ({ alt }) => <>{alt}</>, // no remote images: a reply must not make the browser fetch anything

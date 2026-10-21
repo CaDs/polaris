@@ -10,6 +10,7 @@ import { join } from "node:path";
 // (POLARIS_PROVIDER, POLARIS_CONCURRENCY, ...): it loads the server. Each test file runs in its own process
 // (DB_PATH=:memory:), so nothing here is shared between files.
 process.env.POLARIS_SANDBOX ??= "host"; // docker is covered by docker.test.ts
+process.env.POLARIS_RATE_LIMIT ??= "0"; // the suites sign up many users from one address; security-api.test.ts turns the limits on
 process.env.POLARIS_DATA_DIR ??= mkdtempSync(join(tmpdir(), "polaris-data-"));
 export const { app } = await import("../server/app.ts");
 export const { db } = await import("../server/db.ts");
@@ -36,7 +37,7 @@ export async function call(method: string, path: string, cookie = "", body?: unk
   try {
     json = JSON.parse(text);
   } catch {}
-  return { status: res.status, text, body: json, cookie: set || cookie };
+  return { status: res.status, text, body: json, cookie: set || cookie, headers: res.headers };
 }
 
 export const signUp = (name: string) => call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
