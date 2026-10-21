@@ -58,6 +58,7 @@ export const addMetrics = (a: RunMetrics, b: RunMetrics): RunMetrics => ({
   turns: a.turns + b.turns, tool_calls: a.tool_calls + b.tool_calls, tool_errors: a.tool_errors + b.tool_errors,
   repeated_calls: a.repeated_calls + b.repeated_calls, repeated_reads: a.repeated_reads + b.repeated_reads, compactions: a.compactions + b.compactions,
   first_edit_turn: a.first_edit_turn ?? (b.first_edit_turn && a.turns + b.first_edit_turn), minutes: Math.round((a.minutes + b.minutes) * 10) / 10,
+  model_secs: (a.model_secs ?? 0) + b.model_secs, tool_secs: (a.tool_secs ?? 0) + b.tool_secs, shell_secs: (a.shell_secs ?? 0) + b.shell_secs,
   stuck: b.stuck ? { ...b.stuck, turn: a.turns + b.stuck.turn } : a.stuck,
 });
 
@@ -77,6 +78,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   let turns = 0;
   let hinted = false;
   const m = { tool_calls: 0, tool_errors: 0, repeated_calls: 0, repeated_reads: 0, compactions: 0, first_edit_turn: null as number | null };
+  const ms = { model: 0, tool: 0, shell: 0 }; // where the time went (RunMetrics *_secs)
   const seen = new Set(o.resume?.messages.flatMap((msg) => msg.content.flatMap((b) => (b.type === "tool_use" ? [callKey(b)] : []))));
   // Stuck monitor (see STUCK): call+result pairs of the recent turns, idle turns in a row, the same-error streak.
   let recent: string[][] = [];
@@ -111,7 +113,9 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
 
   // One model call: appends the reply to the current conversation and books its usage.
   async function turn(summary = false) {
+    const t0 = now();
     const res = await usagePurpose(summary ? "compaction" : "", () => o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream));
+    ms.model += now() - t0;
     turns++;
     messages.push(res.message);
     addUsage(usage, res.usage);
@@ -193,9 +197,12 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
       let busy = false; // a write, or a shell call that may have written
       for (const call of calls) {
         o.onEvent({ type: "tool_call", payload: { id: call.id, name: call.name, input: call.input } });
+        const t1 = now();
         const r = o.signal?.aborted
           ? { content: "UserAborted: run cancelled before this tool ran", is_error: true, kind: "UserAborted" as const }
           : await runTool(o.tools, call, { ...ctx, turn: turns, reads });
+        ms.tool += now() - t1;
+        if (call.name === "shell") ms.shell += now() - t1;
         o.onEvent({ type: "tool_result", payload: { tool_use_id: call.id, content: r.content, is_error: r.is_error, error_kind: r.kind } });
         results.push({ type: "tool_result", tool_use_id: call.id, content: r.content, is_error: r.is_error, ...(call.namespace ? { namespace: call.namespace } : {}) });
         const key = callKey(call);
@@ -252,6 +259,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
   const metrics: RunMetrics = {
     turns, ...m, files_changed: null, turns_pct: Math.round((turns / o.budget.maxTurns) * 100),
     minutes: Math.round((now() - began) / 6_000) / 10,
+    model_secs: Math.round(ms.model / 1000), tool_secs: Math.round(ms.tool / 1000), shell_secs: Math.round(ms.shell / 1000),
     minutes_pct: deadline === undefined ? null : Math.round(((now() - began) / Math.max(1, deadline - began)) * 100),
     input: usage.input, output: usage.output, cache_read: usage.cache_read, stuck,
   };

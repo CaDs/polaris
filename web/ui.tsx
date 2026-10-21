@@ -34,6 +34,7 @@ export type RunMetrics = {
   turns: number; tool_calls: number; tool_errors: number; repeated_calls: number; repeated_reads: number; compactions: number;
   first_edit_turn: number | null; files_changed: number | null; turns_pct: number; minutes_pct: number | null;
   input: number; output: number; cache_read: number; stuck: null | { turn: number; signal: string; action: "nudge" | "stop" };
+  model_secs?: number; tool_secs?: number; shell_secs?: number; // absent on runs recorded before they existed
 };
 
 export type Provider = {

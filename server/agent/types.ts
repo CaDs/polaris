@@ -83,6 +83,8 @@ export type RunMetrics = {
   files_changed: number | null; // worker runs (runs.ts, from the worktree diff); null otherwise
   turns_pct: number; minutes_pct: number | null; // 0-100 of the budget; minutes_pct only with a deadline
   minutes: number; // elapsed wall-clock minutes, 1 decimal
+  // Where the time went, whole seconds: waiting for the model, running tools (shell included), running shell commands.
+  model_secs: number; tool_secs: number; shell_secs: number;
   input: number; output: number; cache_read: number;
   stuck: null | { turn: number; signal: StuckSignal; action: "nudge" | "stop" };
 };

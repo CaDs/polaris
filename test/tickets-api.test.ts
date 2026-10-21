@@ -91,10 +91,12 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
   assert.equal(listed.run_status, "passed");
   assert.equal(listed.tokens_out, 80);
   // M12 run metrics: on the ticket's runs and their own route (404 for a run without any).
-  assert.deepEqual(r.metrics, {
+  const { model_secs, tool_secs, shell_secs, ...counts } = r.metrics;
+  assert.deepEqual(counts, {
     turns: 4, tool_calls: 3, tool_errors: 0, repeated_calls: 0, repeated_reads: 0, compactions: 0, first_edit_turn: 1, files_changed: 1, // notes.txt
     turns_pct: 3, minutes: 0, minutes_pct: 0, input: 400, output: 80, cache_read: 40, stuck: null, // 4 of 120 turns; ~2 s of 60 min
   });
+  assert.ok(model_secs >= 1 && tool_secs >= 0 && shell_secs <= tool_secs, JSON.stringify({ model_secs, tool_secs, shell_secs })); // the demo model waits 400 ms a turn
   assert.deepEqual((await call("GET", `/api/runs/${r.id}/metrics`, alice)).body, r.metrics);
   db.prepare("INSERT INTO runs (id, ticket_id, model) VALUES ('no-metrics', ?, 'x')").run(t.body.id);
   assert.equal((await call("GET", "/api/runs/no-metrics/metrics", alice)).status, 404);
