@@ -81,6 +81,18 @@ test("flaky: a failure that passes on an immediate re-run passes the gate, flagg
   assert.equal(events(id, "run_finished")[0].turns, 4);
 });
 
+test("a nested git repository fails the gate (no flaky re-run) and is never committed", async () => {
+  await settings({ test_command: "test -f notes.txt" });
+  const t = await ticketRun("plain change with a repo inside", "git init -q sub");
+  assert.equal(t.status, "failed");
+  for (const run of t.runs) {
+    const gates = events(run.id, "test_result");
+    assert.ok(gates.length && gates.every((g) => !g.passed && g.nested?.join() === "sub/" && !g.flaky));
+    assert.match(events(run.id, "gate_fix")[0].reason, /nested git repository sub\//);
+    assert.equal(events(run.id, "commit").length, 0);
+  }
+});
+
 test("a real failure runs the command twice per check; a protected-path change is not re-run and asks for a revert", async () => {
   const count = marker();
   await settings({ test_command: "test -f notes.txt" });

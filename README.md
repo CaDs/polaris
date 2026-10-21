@@ -351,7 +351,8 @@ tasks.md          milestone checklist
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.
 - **Host git.** Every git command the harness runs has hooks and fsmonitor off, and addresses a run's worktree by the git
-  dir it recorded when it created it, never by the worktree's own `.git` file. Harness writes into a worktree (spilled
+  dir it recorded when it created it, never by the worktree's own `.git` file. It never descends into a nested repository,
+  and a change that contains one fails the test gate. Harness writes into a worktree (spilled
   output, history) refuse symlinks. The sandbox image setting must be a plain image reference.
 - **Scope.** Built for a single trusted user on their own machine. Anyone who can sign in can point a workspace at any
   git repository the server's user can read, merge into it, and spend the `ANTHROPIC_API_KEY` fallback. It is not
