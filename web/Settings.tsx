@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Providers } from "./Providers.tsx";
+import { SkillsTab } from "./Skills.tsx";
 import { LabelSettings } from "./tracker.tsx";
 import { Caps, type Usage } from "./Usage.tsx";
 import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useProviders } from "./ui.tsx";
@@ -20,7 +21,7 @@ type Phase = (typeof PHASES)[number][0];
 
 // One page per concern, in setup order; Appearance is the caller's own. A project's repository and commands are on its
 // Overview page.
-const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["appearance", "Appearance"]] as const;
+const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["skills", "Skills"], ["appearance", "Appearance"]] as const;
 
 export function Settings({ tab = "models", go }: { tab?: string; go: (to: string) => void }) {
   const [s, setS] = useState<WorkspaceSettings | null>(null);
@@ -42,6 +43,8 @@ export function Settings({ tab = "models", go }: { tab?: string; go: (to: string
           <LimitsTab s={s} saved={setS} go={go} />
         ) : tab === "labels" ? (
           <LabelSettings />
+        ) : tab === "skills" ? (
+          <SkillsTab />
         ) : tab === "appearance" ? (
           <AppearanceTab />
         ) : null}

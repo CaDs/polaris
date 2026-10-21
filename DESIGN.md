@@ -25,7 +25,7 @@ Review is never the accent's hue (periwinkle or violet next to a blue accent), s
 One block per palette (`:root` = the default, `[data-palette="…"]` the others; the attribute also scopes a palette to an
 Appearance preview card), each `light-dark(light, dark)`:
 bg, sidebar, surface, hover (raised), border, text, muted, accent, on-accent, accent-text, warn (running), review, ok
-(done), error (failed), and for the always-dark landing panel night, glow, glow-on. Derived for every palette:
+(done), error (failed), and for the always-dark landing night, glow, glow-on. Derived for every palette:
 `--accent-hover` (accent mixed 15% toward text), `--flow-a/b` (accent → accent-text).
 
 Contrast (WCAG AA, checked for every palette and mode): text, muted, accent-text and the four status colors ≥ 4.5:1 on bg,
@@ -42,17 +42,22 @@ on bg ≥ 3:1 (focus rings).
 Outline glyphs only: 1.5px stroke, `currentColor`, round caps, on a 24-unit grid (`Icon` in web/ui.tsx; status and
 priority glyphs in ui.tsx/tracker.tsx follow the same rule at 14px). No emoji and no typed symbols (⚠ ✓ ✗ ↑ ↓ +) as
 icons: they render as filled color pictures on some platforms. An icon-only control carries its own `aria-label`;
-counts sit beside a glyph, never over it. No looping motion anywhere: "running" is a static half-filled circle,
+counts sit beside a glyph, never over it. Nav links, the palette button, Ask Polaris and New ticket carry a muted glyph
+before the label (`IconName` in ui.tsx lists them: user, review, box, layers, views, chart, bulb, board, cycle, clock, book,
+home, search, chat, edit, bolt, list, code); the label always stays. No looping motion anywhere: "running" is a static half-filled circle,
 and a running card's static gradient hairline says a model is working. Selects use the same outline chevron instead of the OS control.
 
 ## Mark
 
-Inline SVG (`Mark` in web/App.tsx): a four-ray star (long cardinal rays, faded diagonals, like a compass rose) on a tile in
-the palette's accent, the star in on-accent. On the landing panel the panel's glow is the accent. The favicon is the default
-steel blue.
+"Circumpolar": a fixed point with two star trails turning around it; Polaris holds still while the agents work. Inline SVG
+(`Mark` in web/App.tsx) on a 32-unit grid: two arcs at a 2.6 stroke with round caps and a filled center dot, all in
+`currentColor`. Monochrome, no tile, no glow: it takes the text color (the landing's starlight on the night sky). The
+favicon is the same mark in white on a black rounded tile, so it reads on light and dark tabs.
 
 ## Gradient rule
 
 Inside the app a gradient means "a model is working": the 2px top hairline on a running board card and the 2px left rule on
-the model's own transcript and chat text (`--flow-a → --flow-b`). Buttons and the mark are flat. The landing panel is the
-palette's night with a soft accent glow and stars. Never on page, card, table or sidebar backgrounds, or on text.
+the model's own transcript in a run (`--flow-a → --flow-b`). Chat replies carry no rule: they sit in a gutter behind the
+mark (16px, muted), which takes the accent while the reply is still coming. Buttons and the mark are flat. The landing is one
+night sky across the whole page (the palette's night, a soft accent glow behind the brand, stars), always dark: the
+mark, wordmark and tagline centered over the form card. Never on page, card, table or sidebar backgrounds, or on text.

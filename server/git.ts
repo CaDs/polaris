@@ -52,9 +52,9 @@ export async function inspectRepo(repoPath: string, baseBranch: string): Promise
   return { repo_path: repoPath, base_branch: base };
 }
 
-// The agent's scratch dirs (spilled tool outputs, compaction history, the read-only wiki snapshot) are never part of a
-// change. .polaris/skills/ is not listed: skills are committed by humans.
-const POLARIS_SCRATCH = [".polaris/outputs", ".polaris/history", ".polaris/wiki"];
+// The agent's scratch dirs (spilled tool outputs, compaction history, the read-only wiki snapshot and workspace skills) are
+// never part of a change. .polaris/skills/ is not listed: repo skills are committed by humans.
+const POLARIS_SCRATCH = [".polaris/outputs", ".polaris/history", ".polaris/wiki", ".polaris/workspace-skills"];
 export const scratchPathspec = POLARIS_SCRATCH.map((p) => `:(exclude)${p}`);
 
 // Adds them to the repo's shared info/exclude (read by every worktree), so status/add/ls-files skip them.

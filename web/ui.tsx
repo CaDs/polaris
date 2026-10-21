@@ -95,9 +95,31 @@ const GLYPHS = {
   down: "M12 5v14M19 12l-7 7-7-7",
   more: "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
   calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+  // Navigation and actions.
+  user: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z",
+  review: "M18 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 9v12M13 6h3a2 2 0 0 1 2 2v7",
+  chat: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z",
+  box: "M21 8 12 3 3 8v8l9 5 9-5ZM3 8l9 5 9-5M12 13v8",
+  layers: "M12 2 2 7l10 5 10-5ZM2 17l10 5 10-5M2 12l10 5 10-5",
+  views: "M3 3h7v7H3ZM14 3h7v7h-7ZM14 14h7v7h-7ZM3 14h7v7H3Z",
+  chart: "M3 3v18h18M7 16v-4M12 16V8M17 16v-7",
+  bulb: "M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2Z",
+  board: "M4 4h4v16H4ZM10 4h4v11h-4ZM16 4h4v14h-4Z",
+  cycle: "M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",
+  clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5l3 2",
+  book: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5ZM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5",
+  home: "M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z",
+  search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM21 21l-4.3-4.3",
+  edit: "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z",
+  bolt: "M13 2 3 14h9l-1 8 10-12h-9Z",
+  list: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+  code: "m16 18 6-6-6-6M8 6l-6 6 6 6",
+  chevrons: "m7 15 5 5 5-5M7 9l5-5 5 5",
+  trash: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6",
   gear: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
 };
-export const Icon = ({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: number }) => (
+export type IconName = keyof typeof GLYPHS;
+export const Icon = ({ name, size = 16 }: { name: IconName; size?: number }) => (
   <svg className="glyph" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d={GLYPHS[name]} />
   </svg>
@@ -105,6 +127,18 @@ export const Icon = ({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: nu
 
 // Small status glyphs, all static: circle = todo, half-filled circle = running, ring with dot = review, check = done, x = failed.
 // label: the glyph is the only place the status shows (list rows, palette), so screen readers get it as an image.
+// The Polaris mark, "circumpolar": a fixed point with two star trails turning around it (Polaris holds still while the
+// agents work). One stroke weight on a 32-unit grid, drawn in currentColor: monochrome, no tile, no glow (DESIGN.md).
+export function Mark() {
+  return (
+    <svg className="mark" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" aria-hidden="true">
+      <path d="M9.42 18.39A7 7 0 0 1 22.06 12.5" />
+      <path d="M27.75 20.28A12.5 12.5 0 1 1 11.72 4.25" />
+      <circle cx="16" cy="16" r="2.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function StatusIcon({ status, label = false }: { status: string; label?: boolean }) {
   const c = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
   return (

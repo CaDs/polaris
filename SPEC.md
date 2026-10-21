@@ -179,6 +179,16 @@ never changed mid-conversation either (cache prefix, model behaviour).
   M14: an optional `phases:` frontmatter line (`worker`, `planner`, `reviewer`, `chat`; comma-separated or `[a, b]`)
   offers the skill only to those agents; without it the worker and the planner see it, as before. The reviewer gets its
   list at the top of its task, the chat in its first turn's message. The wiki maintainer gets none.
+  M17 (migration 004, `server/skills.ts`): **workspace skills** (`skills {name (unique per workspace, case-insensitive),
+  description, body, phases}`) are made in Polaris (Settings → Skills, or **Create skill** in the chat composer;
+  `GET/POST /api/skills`, `PATCH/DELETE /api/skills/:id`). Every worker, reviewer, planner and chat turn writes them to
+  `.polaris/workspace-skills/<name>-<id8>.md` in its checkout (git-excluded like the other `.polaris` scratch dirs; a read-only
+  path for the worker when there are any), and `listSkills` reads that directory after `.polaris/skills/`, so agents see both
+  kinds the same way. Frozen eval case runs get none (a score must not move when someone edits a skill). In chat a member
+  can **attach** up to 5 skills to a message (`skills: ["repo:<file>.md" | "ws:<id>"]`, from
+  `GET /api/projects/:id/skills`: the repo's skills on its base branch, read with git, and the workspace's): their full text
+  goes ahead of the message under `# Skills the user attached`, and the message shows them as chips. Unknown ids, and repo
+  ids that are not a plain `.md` file name, are left out.
 - **Provider retries.** HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to 4 times with
   exponential backoff (1 s base, ×2, ≤ 30 s) plus jitter, or the `retry-after` header when present. Each retry is an
   `error` event with `retrying: true`. Never after output started streaming.
@@ -553,15 +563,31 @@ until the member files it. Migration 021, server in `server/chat.ts`, prompt `se
   `POST /api/tickets` (shared `insertTicket`); the spec gets a last line `From chat: <title>`; `run: true` also queues
   the first run (a refused run returns the ticket with `run_error`). A proposal is filed once (409 after that, also for
   dismiss).
-- **Routes** (`/api/chats`, the caller's own chats in the active workspace; others 404): `GET /` (newest first, 50),
+- **Routes** (`/api/chats`, the caller's own chats in the active workspace; others 404): `GET /[?project_id=]` (newest first, 500; one project's),
   `POST / {message, context?}` (creates the chat and starts its turn, 201), `GET /:id` (`busy`, `events`, `proposals`),
   `POST /:id/messages {message, context?}` (202; 409 while a turn runs), `POST /:id/cancel`, `DELETE /:id`,
   `POST /proposals/:id/dismiss`, and `GET /:id/stream`: SSE that replays the stored events, then live ones (de-duped by
   seq), plus `event: delta {text}` with the reply's text as it streams (never stored); stays open across turns.
 - **Panel** (`web/Chat.tsx`): a third grid column (full screen under 720 px); a conversation picker; user messages,
-  replies (the wiki's Markdown subset), a "Looked at …" line for each run of read-only calls, proposal cards, errors;
+  replies (behind the mark, accent while streaming), a "Looked at …" line for each run of read-only calls, proposal cards, errors;
   the streamed reply while a turn runs, Stop. The composer sends on Enter (Shift+Enter: new line); `@` opens a ticket
-  picker (the palette's matching). The open state and the current chat are remembered in localStorage.
+  picker (the palette's matching); **Skills** attaches skills (M17). The open state and the current chat are remembered
+  in localStorage.
+- **Agent page** (`/agent`, sidebar **Agent**): the same chats at full width: the conversation in a 780 px column, the
+  composer at the bottom, and on a new chat three starting points (Plan a feature, Explain the code, Groom the backlog)
+  that fill the composer. It has no page context; the panel stays closed there. The open chat is in the URL (`/agent/<id>`; a new one pushes its URL once created) and becomes the panel's too;
+  the topbar shows its title and **New chat**.
+- **One project's chats**: a new chat starts in the current project (see Projects (M15)); the sidebar, the Chats page
+  and the panel's picker show only the current project's chats, and opening a chat (its URL) makes its project current.
+  The panel remembers its open chat per project (localStorage).
+- **History**: the sidebar lists the five most recent chats under **Agent**, then **All chats** (`/chats`): every chat,
+  newest first, filtered by title, each with its last activity and Delete (its proposals go with it; filed tickets
+  stay).
+- **Markdown** (replies, streamed text, wiki pages; `Markdown` in `web/Wiki.tsx`): `react-markdown` + GFM (tables, task
+  lists, strikethrough) with no raw HTML, after `normalizeMarkdown` (`web/markdown.ts`) evens out model dialects: `•`/`–`
+  bullets, `1)` numbering, `##Heading`, a list, table or quote glued to a paragraph, CRLF, runs of blank lines, and an
+  unclosed code fence (while streaming) is closed. Code blocks are left as written. Links: an href only for a parsed
+  http(s) URL (new tab); internal `.md` links open the wiki page; images show their alt text (no remote fetches).
 - **Demo** (`POLARIS_PROVIDER=fake`): a chat turn reads README.md, proposes a ticket titled after the message's last
   paragraph, then replies; `NO-PROPOSAL` only replies, `REPLACE-P<n>` replaces P<n>.
 
@@ -676,10 +702,15 @@ A workspace holds projects; a **project is one git repository** with its own boa
   bare `@12` means the chat's project, `@KEY-12` any project.
 - **Delete** only an empty project (no tickets, no run in flight); its milestones, cycles, chats and wiki go with it, the
   repository is never touched.
-- **UI.** Sidebar: My issues, Reviews (count), then Workspace (Projects, All issues, Views, More → Usage, Learning), then
+- **Current project.** Each member works in one project per workspace (`current_projects`, migration 005; `current` in
+  `GET /api/tracker`, `PUT /api/me/project {project_id}`). Creating a project makes it its maker's current one; opening
+  any of a project's pages or tickets does too. It is the default for `/` and New ticket, scopes the chats (a new chat
+  starts in it; the chat lists show its chats), and its sidebar group is the open one. The sidebar's header is the **project switcher**: the current project over the workspace's
+  name; its menu lists the projects (their boards) and New project (`/projects?new`).
+- **UI.** Sidebar: the project switcher, My issues, Reviews (count), then Workspace (Projects, All issues, Views, More → Usage, Learning), then
   Your projects, each a collapsible group (Board, Cycles + Current cycle, Wiki, Overview), Settings at the bottom. Routes:
   `/my-issues`, `/reviews`, `/issues`, `/projects`, `/p/KEY` (board), `/p/KEY/cycles[/id|current]`, `/p/KEY/wiki`,
-  `/p/KEY/overview` (fields, milestones, repository, delete), `/t/KEY-12`; `/` opens the first project's board (none:
+  `/p/KEY/overview` (fields, milestones, repository, delete), `/t/KEY-12`; `/` opens the current project's board (none:
   Projects, to create one). A board's filter bar keeps its project as a fixed scope (a view saved from it includes it).
   Settings tabs: Models, Automation, Limits, Labels, Appearance (the caller's own: palette and mode, `user_preferences`,
   `GET/PUT /api/me/preferences {palette?, mode?}` merging like settings; palettes and tokens: DESIGN.md).

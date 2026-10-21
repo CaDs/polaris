@@ -73,6 +73,7 @@ cost per run, and replay any transcript.
 | **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
 | **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace; inside it, each project is one repository with its own board, cycles, wiki and ticket keys. The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
 | **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama, OpenRouter (hundreds of models behind one key; its billed cost is tracked; providers that retain or train on prompts are excluded by default), a LiteLLM proxy. Provider calls are hardened: https off your network, no cloud-metadata addresses, no redirects, keys scrubbed from errors. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
+| **Chat and Agent page** | Ask Polaris in a side panel (⌘J) or the full-width **Agent** page: it reads the code and the wiki and proposes tickets for you to file. Replies render as clean Markdown whatever the model's dialect. Each chat belongs to a project: the current project's past chats are listed under **Agent** in the sidebar and on **All chats** (search, delete). Attach **skills** to a message; create workspace skills that every agent gets, next to the repo's own `.polaris/skills/`. |
 | **Agent loop** | Tools `read_file`, `edit_file` (or `apply_patch` for OpenAI models), `search`, `shell`. Append-only conversations (prompt caching friendly), provider retries, long output spilled to files. The first message states the environment: test command, read-only paths, budget, git read-only. |
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
 | **Test gate** | Your test command must pass. A failure is re-run once (flaky tests don't fail good work), then fed back into the same conversation for a fix, then retried fresh (up to 3 attempts). |
@@ -129,7 +130,8 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
 2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
    with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
-   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar.
+   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
+   picks the project you work in (a new one is picked for you): new tickets, the home page and the Agent's chats (each chat belongs to one project) follow it.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
 4. **New ticket**, describe the change, **Run agent**. Or open the chat (Cmd/Ctrl+J), describe what you want, and file the ticket it proposes. Watch the transcript, then **Approve** to merge into your base
@@ -259,7 +261,11 @@ from Slack itself is not built yet.
 npm run agent -- --task "text" --root DIR             # one-off agent run directly on DIR (no sandbox or gate)
 npm run agent -- <ticket-id> --root DIR               # run an existing ticket the same way
 npm run seed-tasks -- --workspace <slug> --project <KEY> [--file tasks.md]   # one ticket per open "- [ ]" item under "## Mn" headings
+npm run reset-password -- you@example.com                                     # forgot it: asks for a new one (hidden), signs the account out everywhere
 ```
+
+Polaris sends no email, so a forgotten password is reset from the machine it runs on: anyone who can run commands
+there can read its database anyway. The sign-in page's "Forgot your password?" says the same.
 
 ## What we learned
 

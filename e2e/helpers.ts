@@ -31,7 +31,7 @@ export async function signUp(page: Page, workspace: string) {
   await expect(page.getByRole("heading", { name: "Create a workspace" })).toBeVisible();
   await page.getByLabel("Name").fill(workspace);
   await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.locator("header strong")).toHaveText(workspace);
+  await expect(page.getByRole("button", { name: "Switch project" })).toContainText(workspace); // the switcher shows the workspace under the project
   return email;
 }
 

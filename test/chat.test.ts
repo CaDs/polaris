@@ -66,6 +66,8 @@ test("a chat turn reads the page's ticket, proposes a ticket, and the member fil
 
   assert.ok(usageSummary(w.ws).purposes.some((u: any) => u.purpose === "chat" && u.background === 1));
   assert.deepEqual((await call("GET", "/api/chats", w.cookie)).body.map((x: any) => [x.id, x.project_key]), [[started.body.id, "CAT"]]);
+  assert.equal((await call("GET", `/api/chats?project_id=${w.project.id}`, w.cookie)).body.length, 1);
+  assert.deepEqual((await call("GET", "/api/chats?project_id=elsewhere", w.cookie)).body, []); // the sidebar lists one project's chats
 });
 
 test("chats are private to their member and belong to a project of the workspace", async () => {

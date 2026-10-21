@@ -9,6 +9,7 @@
     "typecheck": "tsc",
     "agent": "node --env-file-if-exists=.env server/cli/agent.ts",
     "token": "node --env-file-if-exists=.env server/cli/token.ts",
+    "reset-password": "node --env-file-if-exists=.env server/cli/reset-password.ts",
     "seed-tasks": "node --env-file-if-exists=.env server/cli/seed-tasks.ts",
     "bench": "node --env-file-if-exists=.env bench/run.ts",
     "e2e": "playwright test",
@@ -21,7 +22,9 @@
     "hono": "^4.13.13",
     "jose": "^6.2.13",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",

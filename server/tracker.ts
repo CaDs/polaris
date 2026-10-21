@@ -266,6 +266,7 @@ trackerRoutes.get("/tracker", (c) => {
   const milestones = db.prepare("SELECT m.id, m.name, m.project_id, m.target_date FROM milestones m JOIN projects p ON p.id = m.project_id WHERE p.workspace_id = ? ORDER BY m.position").all(ws) as Record<string, any>[];
   return c.json({
     me: c.get("userId"),
+    current: (db.prepare("SELECT project_id FROM current_projects WHERE user_id = ? AND workspace_id = ?").get(c.get("userId"), ws) as { project_id: string } | undefined)?.project_id ?? null,
     members: members(ws),
     labels: db.prepare("SELECT id, name, color FROM labels WHERE workspace_id = ? ORDER BY name COLLATE NOCASE").all(ws),
     projects: (db.prepare("SELECT id, key, name, status FROM projects WHERE workspace_id = ? ORDER BY name COLLATE NOCASE").all(ws) as Record<string, any>[]).map((p) => ({
@@ -276,6 +277,17 @@ trackerRoutes.get("/tracker", (c) => {
 });
 
 trackerRoutes.get("/members", (c) => c.json(members(c.get("workspaceId"))));
+
+// The member's current project in this workspace (see migration 005).
+const setCurrent = (userId: string, ws: string, projectId: string) =>
+  db.prepare("INSERT INTO current_projects (user_id, workspace_id, project_id) VALUES (?, ?, ?) ON CONFLICT (user_id, workspace_id) DO UPDATE SET project_id = excluded.project_id").run(userId, ws, projectId);
+trackerRoutes.put("/me/project", async (c) => {
+  const b = await c.req.json().catch(() => null);
+  if (typeof b?.project_id !== "string" || !db.prepare("SELECT 1 FROM projects WHERE id = ? AND workspace_id = ?").get(b.project_id, c.get("workspaceId")))
+    return c.json({ error: "project_id: no such project in this workspace" }, 400);
+  setCurrent(c.get("userId"), c.get("workspaceId"), b.project_id);
+  return c.json({ project_id: b.project_id });
+});
 
 function labelBody(ws: string, b: Record<string, any>, cur?: Record<string, any>) {
   const v: Record<string, string> = {};
@@ -374,6 +386,7 @@ trackerRoutes.post("/projects", async (c) => {
   const v = await projectBody(c.get("workspaceId"), await body(c));
   const projectId = randomUUID();
   insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), ...v });
+  setCurrent(c.get("userId"), c.get("workspaceId"), projectId); // a new project is where its maker works next
   return c.json(project(c.get("workspaceId"), projectId), 201);
 });
 trackerRoutes.get("/projects/:id", (c) => {

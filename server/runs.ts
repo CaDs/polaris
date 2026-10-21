@@ -19,6 +19,7 @@ import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sand
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
+import { writeWorkspaceSkills, WORKSPACE_SKILLS } from "./skills.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
@@ -564,6 +565,8 @@ async function execute(runId: string) {
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
       }
+    // M17: workspace skills next to the repo's (not for frozen eval cases: a score must not move when someone edits them).
+    if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) protectedPaths = [...protectedPaths, WORKSPACE_SKILLS];
     sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image);
     log({ type: "setup", payload: { step: "sandbox", sandbox: sandbox.name } });
     const sh = (command: string) => sandbox!.exec(command, { cwd: worktree, timeoutMs: COMMAND_TIMEOUT, signal });
@@ -581,7 +584,7 @@ async function execute(runId: string) {
 
     const env = await sh("uname -sm; node --version 2>/dev/null; true");
     abortCheck();
-    const skills = listSkills(worktree, "worker");
+    const skills = listSkills(worktree, "worker"); // the workspace's skills were written before the sandbox opened
     if (skills.length) log({ type: "setup", payload: { step: "skills", skills } });
     // Ticket runs get the lessons active now; eval case runs the version frozen at eval start.
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
@@ -751,6 +754,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     await addDetached(s.repo_path, base_sha, worktree);
     db.prepare("UPDATE runs SET worktree = ?, base_sha = ? WHERE id = ?").run(worktree, base_sha, runId);
     log({ type: "setup", payload: { step: "worktree", branch: "", base_sha } });
+    writeWorkspaceSkills(t.workspace_id, worktree);
     const skills = listSkills(worktree, "planner");
     if (skills.length) log({ type: "setup", payload: { step: "skills", skills } });
     let wiki = "";
