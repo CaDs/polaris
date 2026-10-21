@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "./db.ts";
 import { metered, withUsage } from "./usage.ts";
+import { LOCAL_MODEL_TIMEOUT } from "./egress.ts";
 import { parseProtected, truncate } from "./agent/tools.ts";
 import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
@@ -158,12 +159,12 @@ export function capLessons(s: string) {
   return cut.slice(0, cut.lastIndexOf("\n") > 0 ? cut.lastIndexOf("\n") : LESSONS_MAX).trimEnd();
 }
 
-// timeoutMs: a hung reflection must not hold its run's queue slot for long. tools are only declared, never run (failure
+// timeoutMs: a hung reflection must not hold its run's queue slot for long (a local model gets LOCAL_MODEL_TIMEOUT). tools are only declared, never run (failure
 // mining's submit tool): the caller reads the call from content.
 export async function ask(provider: Provider, model: string, system: string, text: string, maxTokens: number, timeoutMs: number, signal?: AbortSignal, tools: ToolDef[] = []) {
   const res = await metered(provider, { name: "Custom provider", kind: "unknown", billing: "unknown" }).stream(
     { system: [{ type: "text", text: system }], messages: [{ role: "user", content: [{ type: "text", text }] }], tools, model, maxTokens,
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) },
+      signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(provider.local ? Math.max(timeoutMs, LOCAL_MODEL_TIMEOUT) : timeoutMs)]) },
     () => {},
   );
   return { text: res.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim(), usage: res.usage, content: res.message.content };

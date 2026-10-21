@@ -57,7 +57,7 @@ export function recordUsage(c: UsageContext, p: UsageProvider, model: string, re
 // retry emits its own measurement. Scripted/custom providers without transport telemetry get one measurement.
 const measuredErrors = new WeakSet<object>();
 export function metered(provider: Provider, p: UsageProvider, workspaceId?: string): Provider {
-  return { async stream(req, onEvent) {
+  return { local: provider.local, async stream(req, onEvent) {
     const current = context.getStore();
     const c = current ?? (workspaceId ? { workspaceId, purpose: "connection_test", background: true } : undefined);
     if (!c) return provider.stream(req, onEvent);

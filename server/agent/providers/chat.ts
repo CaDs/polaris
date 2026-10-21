@@ -34,7 +34,7 @@ function usageOf(raw?: Item): Usage {
   return { input: Math.max(0, (raw.prompt_tokens ?? 0) - cached - written), output: raw.completion_tokens ?? 0, cache_read: cached, cache_write: written };
 }
 
-export function chatCompletions(opts: { url: string; headers: Record<string, string>; extra?: Item }): Provider {
+export function chatCompletions(opts: { url: string; headers: Record<string, string>; extra?: Item; headersTimeoutMs?: number }): Provider {
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void) {
     let raw: Item | undefined;
     try {
@@ -46,7 +46,7 @@ export function chatCompletions(opts: { url: string; headers: Record<string, str
       };
       let res: Response;
       try {
-        res = await providerFetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...opts.headers }, body: JSON.stringify(body), signal: req.signal });
+        res = await providerFetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...opts.headers }, body: JSON.stringify(body), signal: req.signal }, opts.headersTimeoutMs);
       } catch (e) {
         if (req.signal?.aborted) throw e;
         if (e instanceof EgressError) throw new AgentError("ProviderError", e.message); // policy: a retry would be refused too

@@ -21,6 +21,7 @@ import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
 import { writeWorkspaceSkills, WORKSPACE_SKILLS } from "./skills.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
+import { LOCAL_MODEL_TIMEOUT } from "./egress.ts";
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
 const controllers = new Map<string, AbortController>();
@@ -99,7 +100,7 @@ function providerConfig(opts: { model?: string; baseUrl?: string; workspaceId?: 
   const apiKey = process.env.ANTHROPIC_API_KEY ?? (baseUrl ? "ollama" : undefined);
   if (!fake && !apiKey) throw new Error("set ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL for Ollama), or POLARIS_PROVIDER=fake");
   const model = opts.model ?? process.env.POLARIS_MODEL ?? (fake ? "demo" : DEFAULT_MODEL);
-  return { model, provider: (task: string) => metered(fake ? demoProvider(task) : anthropic({ apiKey: apiKey!, baseUrl }), { name: "Environment", kind: fake ? "fake" : baseUrl ? "ollama" : "anthropic", billing: !fake && baseUrl ? "local" : "api_key" }, opts.workspaceId) };
+  return { model, provider: (task: string) => metered(fake ? demoProvider(task) : { ...anthropic({ apiKey: apiKey!, baseUrl, headersTimeoutMs: baseUrl ? LOCAL_MODEL_TIMEOUT : undefined }), local: !fake && !!baseUrl }, { name: "Environment", kind: fake ? "fake" : baseUrl ? "ollama" : "anthropic", billing: !fake && baseUrl ? "local" : "api_key" }, opts.workspaceId) };
 }
 
 function capCheck(ws: string, ticketId: string | undefined, runId: string, log: Ctx["log"]) {
@@ -276,6 +277,8 @@ export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: Even
 // --- M9 automatic splitting (see SPEC "Automatic splitting (M9)") ---
 
 const SIZE_SPLIT = 3; // triage score (0 trivial … 4 epic) from which a ticket is split before running
+// A decision model answers in under a second once loaded; loading it next to the worker's model takes ~45 s.
+const TRIAGE_TIMEOUT = 60_000;
 const TRIAGE_QUESTIONS = {
   size: {
     type: "score", instructions: "How large is this software change for an AI coding agent?",
@@ -299,7 +302,7 @@ async function triageTicket(t: TicketRow, s: Settings): Promise<EventPayloads["t
     if (p?.kind !== "ollama") throw new Error("the workspace's default provider is not an Ollama provider");
     sent = true;
     const res = await fetch(`${(p.base_url || OLLAMA_URL).replace(/\/$/, "")}/v1/systemone`, {
-      method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(10_000),
+      method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(TRIAGE_TIMEOUT),
       body: JSON.stringify({ model, state: `${t.title}\n\n${t.spec}`, questions: TRIAGE_QUESTIONS }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);

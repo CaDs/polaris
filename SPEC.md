@@ -241,7 +241,9 @@ summaries. Encrypted-only reasoning shows nothing.
   time (cached a minute per origin) because a name can point anywhere; `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
   never the metadata one. A saved base URL gets the same checks without DNS (a single-label, `.local`, `.internal`, `.lan`
   name counts as local). Redirects are refused (a key never follows one), no response headers within 120 s (model lists
-  10–15 s) fails the call, and error bodies are read up to 64 KiB. Policy failures are not retried.
+  10–15 s; a local model, Ollama or a LiteLLM proxy on this network, 10 minutes: it may be swapping a model in or
+  prefilling a long prompt) fails the call, and a one-off request (reflection, mining) to a local model gets the same
+  10 minutes, and error bodies are read up to 64 KiB. Policy failures are not retried.
 - **Secrets.** Keys must be printable without spaces (a key is a header value: no header injection), at most 500 chars.
   `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()`: the provider's own key and common key
   and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses
@@ -464,7 +466,7 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
 - **Triage** (optional). Workspace setting `triage_model` (default "", off). With `auto_split` on, queueing the first
   run of a top-level task first asks a System One decision model on the workspace's default provider (must be Ollama):
   `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>", questions: {size: score 0–4, five criteria}}`,
-  10 s timeout. `answers.size.score ≥ 3` → the ticket is split as above (a `## Triage` section instead of the previous
+  60 s timeout (loading the decision model next to the worker's takes ~45 s). `answers.size.score ≥ 3` → the ticket is split as above (a `## Triage` section instead of the previous
   attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities,
   confidence | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error →
   logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.

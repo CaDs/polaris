@@ -4,7 +4,7 @@ import { db } from "./db.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { openai } from "./agent/providers/openai.ts";
 import { chatCompletions } from "./agent/providers/chat.ts";
-import { checkUrl, EgressError, providerFetch, scrub } from "./egress.ts";
+import { checkUrl, EgressError, isLocalUrl, LOCAL_MODEL_TIMEOUT, providerFetch, scrub } from "./egress.ts";
 import { cancelLogin, logins, OAuthError, openaiPlanBase, PLAN_SCOPE, refreshTokens, registration, revoke, startLogin, withoutTokens, type Tokens } from "./oauth.ts";
 import { metered } from "./usage.ts";
 import { decrypt, encrypt, SecretKeyError } from "./secrets.ts";
@@ -107,13 +107,18 @@ export async function freshTokens(p: ProviderRow): Promise<Tokens> {
   return next;
 }
 
+// A self-hosted model: Ollama anywhere (it loads and swaps models), a LiteLLM proxy on this machine or network.
+export const isLocalProvider = (p: Pick<ProviderRow, "kind" | "base_url">) => p.kind === "ollama" || (p.kind === "litellm" && isLocalUrl(p.base_url ?? ""));
+
 // All callers share request accounting. Credentials stay on the server; tools run in the existing sandbox.
 export function adapterFor(p: ProviderRow): Provider {
   try {
     const secret = p.auth_type === "api_key" ? (p.encrypted_secret ? decrypt(p.encrypted_secret) : "") : "";
     if (p.auth_type === "api_key" && !secret) throw new Error(`provider "${p.name}" has no API key`);
     let provider: Provider;
-    if (p.kind === "ollama") provider = anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL });
+    const local = isLocalProvider(p);
+    const headersTimeoutMs = local ? LOCAL_MODEL_TIMEOUT : undefined;
+    if (p.kind === "ollama") provider = anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL, headersTimeoutMs });
     else if (p.kind === "anthropic") provider = anthropic({ apiKey: secret, baseUrl: p.base_url || undefined });
     else if (p.kind === "openrouter")
       provider = chatCompletions({
@@ -121,7 +126,7 @@ export function adapterFor(p: ProviderRow): Provider {
         // usage.include: the billed cost comes back with the usage (the ledger records it, caps count it).
         extra: { usage: { include: true }, ...(optionsOf(p).data_collection === "allow" ? {} : { provider: { data_collection: "deny" } }) },
       });
-    else if (p.kind === "litellm") provider = chatCompletions({ url: `${litellmBase(p)}/v1/chat/completions`, headers: secret ? { authorization: `Bearer ${secret}` } : {} });
+    else if (p.kind === "litellm") provider = chatCompletions({ url: `${litellmBase(p)}/v1/chat/completions`, headers: secret ? { authorization: `Bearer ${secret}` } : {}, headersTimeoutMs });
     else if (p.auth_type === "api_key") provider = openai({ url: `${openaiBase(p)}/v1/responses`, headers: async () => ({ authorization: `Bearer ${secret}` }) });
     else provider = openai({ url: `${openaiPlanBase()}/responses`, subscription: true,
       headers: async () => ({ authorization: `Bearer ${(await freshTokens(p)).access}` }) });
@@ -148,7 +153,7 @@ export function adapterFor(p: ProviderRow): Provider {
         throw e;
       }
     } };
-    return metered(provider, { id: p.id, name: p.name, kind: p.kind, billing: p.kind === "ollama" ? "local" : p.auth_type === "oauth" ? "subscription" : "api_key" }, p.workspace_id);
+    return metered({ ...provider, local }, { id: p.id, name: p.name, kind: p.kind, billing: p.kind === "ollama" ? "local" : p.auth_type === "oauth" ? "subscription" : "api_key" }, p.workspace_id);
   } catch (e) { throw new AgentError("ProviderError", (e as Error).message); }
 }
 
