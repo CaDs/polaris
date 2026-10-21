@@ -1,9 +1,13 @@
-import { lookup } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns";
+import http from "node:http";
+import https from "node:https";
 import { BlockList, isIP } from "node:net";
+import { Readable } from "node:stream";
 
 // Outbound calls to model providers carry API keys, so they all go through providerFetch (SPEC "Provider egress"):
 // - http(s) only, no credentials in the URL (keys go in headers, never in a URL that ends up in logs);
-// - never to link-local, unspecified or multicast addresses (cloud metadata endpoints live there);
+// - never to link-local, unspecified or multicast addresses (cloud metadata endpoints live there), judged on the address
+//   actually dialled (a name that resolves differently the second time cannot rebind to one);
 // - plain http only to this machine or a private network: a key in cleartext over the internet is a leaked key
 //   (POLARIS_ALLOW_HTTP_PROVIDERS=1 overrides, for a trusted network the address check cannot see);
 // - redirects are refused, so a key is never replayed to another host;
@@ -21,6 +25,10 @@ never.addAddress("::", "ipv6");
 never.addSubnet("fe80::", 10, "ipv6");
 never.addSubnet("ff00::", 8, "ipv6");
 never.addAddress("fd00:ec2::254", "ipv6"); // AWS metadata over IPv6
+never.addAddress("fd20:ce::254", "ipv6"); // GCP metadata over IPv6
+never.addSubnet("fec0::", 10, "ipv6"); // deprecated site-local
+never.addSubnet("192.0.0.0", 24);
+never.addAddress("168.63.129.16"); // Azure wire server
 
 const local = new BlockList(); // where plain http is acceptable
 local.addSubnet("127.0.0.0", 8);
@@ -34,7 +42,19 @@ local.addSubnet("fc00::", 7, "ipv6");
 // ::ffff:169.254.169.254 is the IPv4 address in disguise.
 const plain = (a: string) => (/^::ffff:\d+\.\d+\.\d+\.\d+$/i.test(a) ? a.slice(7) : a);
 const family = (a: string) => (isIP(a) === 6 ? "ipv6" : "ipv4");
-const isNever = (a: string) => never.check(plain(a), family(plain(a)));
+// The IPv4 address hiding in a NAT64 (64:ff9b::/96), 6to4 (2002::/16) or IPv4-compatible (::/96) IPv6 address.
+function embedded(a: string) {
+  if (isIP(a) !== 6) return undefined;
+  const [head, tail = ""] = new URL(`http://[${a}]`).hostname.slice(1, -1).split("::"); // the URL parser writes dotted tails as hex
+  const groups = (x: string) => x.split(":").filter(Boolean).map((g) => parseInt(g, 16));
+  const h = groups(head), t = groups(tail);
+  const w = [...h, ...Array(8 - h.length - t.length).fill(0), ...t];
+  const v4 = (x: number, y: number) => `${x >> 8}.${x & 255}.${y >> 8}.${y & 255}`;
+  if (w[0] === 0x64 && w[1] === 0xff9b && w.slice(2, 6).every((x) => !x)) return v4(w[6], w[7]);
+  if (w[0] === 0x2002) return v4(w[1], w[2]);
+  if (w.slice(0, 6).every((x) => !x) && w[6]) return v4(w[6], w[7]);
+}
+const isNever = (a: string) => never.check(plain(a), family(plain(a))) || ((e) => !!e && never.check(e, "ipv4"))(embedded(plain(a)));
 const isLocal = (a: string) => local.check(plain(a), family(plain(a)));
 // A host name that can only mean this machine or the local network (docker service names, mDNS, .internal).
 const localName = (h: string) => h === "localhost" || h.endsWith(".localhost") || !h.includes(".") || /\.(local|internal|lan|home\.arpa)$/.test(h);
@@ -70,39 +90,45 @@ export function checkUrl(raw: string): URL {
 }
 const allowHttp = () => process.env.POLARIS_ALLOW_HTTP_PROVIDERS === "1";
 
-// The full policy, with the addresses the host resolves to now (a name can point anywhere). Cached per origin briefly.
-const checked = new Map<string, number>();
-const CHECK_TTL = 60_000;
-export async function checkEndpoint(raw: string) {
-  const u = checkUrl(raw);
-  if ((checked.get(u.origin) ?? 0) > Date.now()) return u;
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  let addrs: string[];
-  try {
-    addrs = isIP(host) ? [host] : (await lookup(host, { all: true, verbatim: true })).map((a) => a.address);
-  } catch {
-    throw new EgressError(`cannot resolve ${host}`);
-  }
-  const bad = addrs.find(isNever);
-  if (bad) throw new EgressError(`${host} resolves to ${bad}, a link-local, multicast or unspecified address: refused`);
-  if (u.protocol === "http:" && !allowHttp() && addrs.some((a) => !isLocal(a)))
-    throw new EgressError(`${host} resolves to a public address: plain http would send the key unencrypted, use https (or set POLARIS_ALLOW_HTTP_PROVIDERS=1)`);
-  checked.set(u.origin, Date.now() + CHECK_TTL);
-  return u;
+// The lookup every provider connection dials through: the same address policy, judged on the addresses the socket will
+// actually use (a check made earlier, and cached, could be rebound by a TTL-0 DNS answer). `resolve` is for tests.
+export function guardedLookup(protocol: string, resolve: typeof dnsLookup = dnsLookup) {
+  return (host: string, opts: { all?: boolean; family?: number }, cb: (err: Error | null, addr?: any, family?: number) => void) =>
+    resolve(host, { family: opts.family, all: true, verbatim: true }, (err, list) => {
+      const addrs = (list as unknown as { address: string; family: number }[] | undefined) ?? [];
+      if (err || !addrs.length) return cb(new EgressError(`cannot resolve ${host}`));
+      const bad = addrs.find((a) => isNever(a.address));
+      if (bad) return cb(new EgressError(`${host} resolves to ${bad.address}, a link-local, multicast or unspecified address: refused`));
+      if (protocol === "http:" && !allowHttp() && addrs.some((a) => !isLocal(a.address)))
+        return cb(new EgressError(`${host} resolves to a public address: plain http would send the key unencrypted, use https (or set POLARIS_ALLOW_HTTP_PROVIDERS=1)`));
+      opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family);
+    });
 }
 
 // fetch for provider calls: the policy above, no redirects, and a deadline for the response headers (the body keeps
-// streaming under the caller's own signal). Policy failures are EgressError, never worth a retry.
+// streaming under the caller's own signal). Policy failures are EgressError, never worth a retry. It speaks node:http
+// rather than fetch because fetch offers no hook on the address it dials. ponytail: string bodies only (all callers send JSON).
 export async function providerFetch(url: string, init: RequestInit = {}, headersTimeoutMs = 120_000) {
-  const u = await checkEndpoint(url);
+  const u = checkUrl(url);
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), headersTimeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal;
   try {
-    return await fetch(url, { ...init, redirect: "error", signal: init.signal ? AbortSignal.any([init.signal, deadline.signal]) : deadline.signal });
+    return await new Promise<Response>((resolve, reject) => {
+      const req = (u.protocol === "https:" ? https : http).request(u, { method: init.method ?? "GET", headers: Object.fromEntries(new Headers(init.headers)), lookup: guardedLookup(u.protocol) as any, signal }, (res) => {
+        clearTimeout(timer);
+        const status = res.statusCode ?? 502;
+        if (status >= 300 && status < 400) return res.destroy(), reject(new EgressError(`${u.origin} answered with a redirect: refused (the key would follow it)`));
+        const headers = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) for (const x of [v ?? []].flat()) headers.append(k, x);
+        resolve(new Response([101, 204, 205, 304].includes(status) ? null : (Readable.toWeb(res) as ReadableStream), { status, statusText: res.statusMessage, headers }));
+      });
+      req.on("error", reject);
+      req.end(init.body as string | undefined);
+    });
   } catch (e) {
     if (init.signal?.aborted) throw e;
     if (deadline.signal.aborted) throw new EgressError(`${u.origin} sent no response within ${Math.round(headersTimeoutMs / 1000)} s`);
-    if (/redirect/i.test(String((e as { cause?: unknown }).cause ?? ""))) throw new EgressError(`${u.origin} answered with a redirect: refused (the key would follow it)`);
     throw e;
   } finally {
     clearTimeout(timer);

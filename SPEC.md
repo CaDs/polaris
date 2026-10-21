@@ -245,9 +245,10 @@ summaries. Encrypted-only reasoning shows nothing.
   table when the model is in it).
 - **Provider egress** (`server/egress.ts`, every provider call including model lists and Ollama's window detection):
   `providerFetch` checks the URL first: http(s) only, no `user:pass@`; never link-local, unspecified or multicast addresses
-  (cloud metadata: 169.254.0.0/16, fe80::/10, `fd00:ec2::254`, also as IPv4-mapped IPv6); plain http only when every address
-  the host resolves to is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7), checked again at request
-  time (cached a minute per origin) because a name can point anywhere; `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
+  (cloud metadata: 169.254.0.0/16, 192.0.0.0/24, 168.63.129.16, fe80::/10, fec0::/10, `fd00:ec2::254`, `fd20:ce::254`, also as
+  IPv4-mapped, NAT64 `64:ff9b::/96`, 6to4 `2002::/16` or IPv4-compatible `::/96` IPv6); plain http only when every address
+  the host resolves to is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); the address rules run in
+  the connection's own DNS lookup, on the address actually dialled (no check-then-connect gap for a name to rebind in); `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
   never the metadata one. A saved base URL gets the same checks without DNS (a single-label, `.local`, `.internal`, `.lan`
   name counts as local). Redirects are refused (a key never follows one), no response headers within 120 s (model lists
   10–15 s; a local model, Ollama or a LiteLLM proxy on this network, 10 minutes: it may be swapping a model in or

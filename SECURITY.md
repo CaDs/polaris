@@ -14,5 +14,6 @@ outside their worktree are the most valuable.
   network, never to link-local/metadata addresses, never across a redirect, with TLS certificate checks on (the server
   refuses to start with `NODE_TLS_REJECT_UNAUTHORIZED=0`). OpenRouter keys only ever go to `openrouter.ai`.
 - Changing a provider's base URL drops its stored key unless a new one comes with it.
-- Known limit: the address checks run when a URL is saved and again (cached a minute) before requests; a DNS answer that
-  changes in between is not caught. Keep `HOST` on loopback, or put Polaris behind an authenticating proxy.
+- The address checks run on the address the socket actually dials (a custom `lookup` in `providerFetch`), so a DNS answer
+  that changes between a check and the connection cannot reach a blocked address. Keep `HOST` on loopback, or put Polaris
+  behind an authenticating proxy.
