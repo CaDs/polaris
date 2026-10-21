@@ -31,7 +31,7 @@ export const normalized = (u: Partial<Usage> = {}): Usage => Object.fromEntries(
 
 export function recordUsage(c: UsageContext, p: UsageProvider, model: string, request: RequestUsage, historical = false, costOverride?: number) {
   const u = normalized(request.usage);
-  const usd = costOverride ?? usageCost(model, u, p.billing);
+  const usd = costOverride ?? request.cost_usd ?? usageCost(model, u, p.billing);
   db.exec("SAVEPOINT usage_record");
   let added = false;
   try {
@@ -72,7 +72,7 @@ export function metered(provider: Provider, p: UsageProvider, workspaceId?: stri
           recordUsage(c, p, req.model, e.request);
         } else onEvent(e);
       });
-      if (!attempts && !r.metered) recordUsage(c, p, req.model, { id, started_at, outcome: "completed", usage: r.usage, status: r.usageStatus ?? "reported" });
+      if (!attempts && !r.metered) recordUsage(c, p, req.model, { id, started_at, outcome: "completed", usage: r.usage, status: r.usageStatus ?? "reported", cost_usd: r.costUsd });
       return { ...r, metered: true };
     } catch (e) {
       const alreadyMeasured = typeof e === "object" && e !== null && measuredErrors.has(e);

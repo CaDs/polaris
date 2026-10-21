@@ -11,7 +11,7 @@ import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
-import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } from "./providers.ts";
+import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun } from "./failures.ts";
@@ -132,13 +132,14 @@ export function compactThreshold(capTokens: number | undefined, window: number) 
 }
 const envWindow = () => (process.env.ANTHROPIC_BASE_URL ? CONTEXT_WINDOW.ollama : CONTEXT_WINDOW.anthropic); // no stored provider: env fallback
 
-// The window a run assumes, and where that came from. An Ollama provider still at the default 32768 is "auto" (the
-// default is a guess, and Ollama often serves far more); any other stored value is the user's choice and wins, even
-// above what is detected. Detection failing falls back to the stored value.
+// The window a run assumes, and where that came from. An Ollama or OpenRouter provider still at its default is "auto" (the
+// default is a guess: Ollama often serves far more, OpenRouter's models range widely, and both can tell); any other stored
+// value is the user's choice and wins, even above what is detected. Detection failing falls back to the stored value.
 export async function runWindow(stored: ReturnType<typeof providerById>, model: string) {
   if (!stored) return { window: envWindow(), source: "default" };
-  const auto = stored.kind === "ollama" && stored.context_window === CONTEXT_WINDOW.ollama;
-  return (auto && (await ollamaWindow(stored.base_url, model))) || { window: stored.context_window, source: auto ? "default" : "provider setting" };
+  const auto = (stored.kind === "ollama" || stored.kind === "openrouter") && stored.context_window === CONTEXT_WINDOW[stored.kind];
+  const detected = auto && (stored.kind === "ollama" ? await ollamaWindow(stored.base_url, model) : await openrouterWindow(model));
+  return detected || { window: stored.context_window, source: auto ? "default" : "provider setting" };
 }
 
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or

@@ -2,15 +2,36 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Alert, Confirm, Dialog, Icon, api, type Provider } from "./ui.tsx";
 
 type Check = { model: string; ok: boolean; tool_call: boolean; latency_ms: number; error?: string };
-const KINDS = { anthropic: ["api_key"], openai: ["api_key", "oauth"], ollama: ["none"] } as const;
-const CONTEXT_WINDOW = { anthropic: 1_000_000, openai: 400_000, ollama: 32_768 };
+const KINDS = { anthropic: ["api_key"], openai: ["api_key", "oauth"], ollama: ["none"], openrouter: ["api_key"], litellm: ["api_key", "none"] } as const;
+const KIND_LABEL = { anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama", openrouter: "OpenRouter", litellm: "LiteLLM proxy" };
+const CONTEXT_WINDOW = { anthropic: 1_000_000, openai: 400_000, ollama: 32_768, openrouter: 128_000, litellm: 128_000 };
+const AUTO_WINDOW = ["ollama", "openrouter"]; // left empty (or at the default): detected per model
+const BASE_URL_HINT = {
+  anthropic: ["https://api.anthropic.com", "Leave empty for Anthropic's API."],
+  openai: ["https://api.openai.com", "Leave empty for OpenAI's API."],
+  ollama: ["http://localhost:11434", "Leave empty for Ollama on this machine."],
+  litellm: ["http://localhost:4000", "Your LiteLLM proxy (litellm --config config.yaml). Models are the proxy's model_list aliases."],
+} as const;
 const AUTH_LABEL = { api_key: "API key", oauth: "ChatGPT sign-in", none: "No auth" };
+// Many models behind one key: the Test button checks the model picked next to it.
+const PICK_TEST_MODEL = ["openrouter", "litellm"];
 
 // The list is the Models tab's (Settings), which shares it with its model pickers so a new provider shows there at once.
 export function Providers({ providers, reload }: { providers: Provider[] | null; reload: () => void }) {
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
   const [deleting, setDeleting] = useState<Provider | null>(null);
   const [checks, setChecks] = useState<Record<string, Check[] | string>>({}); // by provider id; string = error or "Testing…"
+  const [testModel, setTestModel] = useState<Record<string, string>>({});
+  const [catalogs, setCatalogs] = useState<Record<string, { id: string; name: string }[] | string>>({}); // string = error
+  const catalog = (p: Provider) => {
+    if (catalogs[p.id]) return;
+    setCatalogs((c) => ({ ...c, [p.id]: [] }));
+    api<{ models: string[]; model_details?: { id: string; name: string }[] }>(`/api/providers/${p.id}/models`).then(
+      (r) => setCatalogs((c) => ({ ...c, [p.id]: r.model_details ?? r.models.map((id) => ({ id, name: id })) })),
+      (e) => setCatalogs((c) => ({ ...c, [p.id]: e.message })),
+    );
+  };
+  useEffect(() => providers?.filter((p) => PICK_TEST_MODEL.includes(p.kind) && (p.has_secret || p.auth_type === "none")).forEach(catalog), [providers]);
   const [error, setError] = useState("");
   const [welcomeClosed, setWelcomeClosed] = useState(false);
   const welcome = providers?.find((p) => p.account?.status === "connected" && !p.account.welcomed);
@@ -26,8 +47,9 @@ export function Providers({ providers, reload }: { providers: Provider[] | null;
   async function test(p: Provider) {
     setChecks((c) => ({ ...c, [p.id]: "Testing…" }));
     try {
-      // Ollama: every installed model (tool support varies per model). Others: the default model only.
-      const models = p.kind === "ollama" ? (await api<{ models: string[] }>(`/api/providers/${p.id}/models`)).models : [undefined];
+      // Ollama: every installed model (tool support varies per model). OpenRouter, LiteLLM: the picked one. Others: the default.
+      const models = p.kind === "ollama" ? (await api<{ models: string[] }>(`/api/providers/${p.id}/models`)).models
+        : PICK_TEST_MODEL.includes(p.kind) ? [testModel[p.id] || (Array.isArray(catalogs[p.id]) ? (catalogs[p.id] as { id: string }[])[0]?.id : undefined)] : [undefined];
       if (!models.length) throw new Error("no models installed");
       const out: Check[] = [];
       for (const model of models) {
@@ -76,7 +98,7 @@ export function Providers({ providers, reload }: { providers: Provider[] | null;
             <li key={p.id}>
               <div className="row">
                 <strong className="grow">{p.name}</strong>
-                <span className="muted">{p.kind} · {AUTH_LABEL[p.auth_type]}</span>
+                <span className="muted">{KIND_LABEL[p.kind]} · {AUTH_LABEL[p.auth_type]}{p.kind === "openrouter" && (p.options.data_collection === "allow" ? " · any provider" : " · no data collection")}</span>
                 {p.auth_type === "api_key" && <span className="mono muted">{p.has_secret ? `••••${p.secret_last4 ?? ""}` : "no key"}</span>}
                 {p.auth_type === "oauth" && (
                   <>
@@ -86,11 +108,17 @@ export function Providers({ providers, reload }: { providers: Provider[] | null;
                     {p.has_secret && <button className="btn" onClick={() => void api<{ warning?: string }>(`/api/providers/${p.id}/oauth/logout`, "POST").then((r) => (setError(r.warning ?? ""), reload()))}>Disconnect ChatGPT</button>}
                   </>
                 )}
+                {PICK_TEST_MODEL.includes(p.kind) && Array.isArray(catalogs[p.id]) && (catalogs[p.id] as unknown[]).length > 0 && (
+                  <select aria-label={`Model to test on ${p.name}`} value={testModel[p.id] ?? ""} onChange={(e) => setTestModel((m) => ({ ...m, [p.id]: e.target.value }))}>
+                    {(catalogs[p.id] as { id: string; name: string }[]).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  </select>
+                )}
                 <button className="btn" onClick={() => test(p)}>Test</button>
                 <button className="btn" onClick={() => setEditing(p)}>Edit</button>
                 <button className="btn danger" onClick={() => setDeleting(p)}>Delete</button>
               </div>
               {p.login === "error" && <p className="error">Sign-in failed: {p.login_error}</p>}
+              {typeof catalogs[p.id] === "string" && <p className="error">{catalogs[p.id] as string}</p>}
               {p.auth_type === "oauth" && <span className="hint">Eligible requests use your ChatGPT plan. Token usage is tracked like local and API-key models.</span>}
               {typeof c === "string" && <p className="muted">{c}</p>}
               {Array.isArray(c) && (
@@ -123,13 +151,18 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
   const [kind, setKind] = useState<Provider["kind"]>(p?.kind ?? "anthropic");
   const [auth, setAuth] = useState<Provider["auth_type"]>(p?.auth_type ?? "api_key");
   const [error, setError] = useState("");
-  const [window, setWindow] = useState(p ? String(p.context_window) : kind === "ollama" ? "" : String(CONTEXT_WINDOW[kind]));
-  const pickKind = (k: Provider["kind"]) => (setKind(k), setAuth(KINDS[k][0]), setWindow(k === "ollama" ? "" : String(CONTEXT_WINDOW[k])));
+  // Empty = auto: a new Ollama/OpenRouter provider, or one still at the default (the server treats that as auto).
+  const [window, setWindow] = useState(AUTO_WINDOW.includes(kind) && (!p || p.context_window === CONTEXT_WINDOW[kind]) ? "" : String(p?.context_window ?? CONTEXT_WINDOW[kind]));
+  const pickKind = (k: Provider["kind"]) => (setKind(k), setAuth(KINDS[k][0]), setWindow(AUTO_WINDOW.includes(k) ? "" : String(CONTEXT_WINDOW[k])));
+  const [share, setShare] = useState(p?.options.data_collection === "allow");
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
-    const body = { name: f.name, kind, auth_type: auth, base_url: f.base_url || null, api_key: f.api_key || undefined, context_window: Number(f.context_window) || CONTEXT_WINDOW[kind] };
+    const body = {
+      name: f.name, kind, auth_type: auth, base_url: f.base_url || null, api_key: f.api_key || undefined, context_window: Number(f.context_window) || CONTEXT_WINDOW[kind],
+      ...(kind === "openrouter" ? { options: { data_collection: share ? "allow" : "deny" } } : {}),
+    };
     try {
       await api(p ? `/api/providers/${p.id}` : "/api/providers", p ? "PATCH" : "POST", body);
       saved();
@@ -147,10 +180,9 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
         <label>
           Kind
           <select value={kind} disabled={!!p} onChange={(e) => pickKind(e.target.value as Provider["kind"])}>
-            <option value="anthropic">anthropic</option>
-            <option value="openai">openai</option>
-            <option value="ollama">ollama</option>
+            {(Object.keys(KINDS) as Provider["kind"][]).map((k) => <option key={k} value={k}>{KIND_LABEL[k]}</option>)}
           </select>
+          {kind === "openrouter" && <span className="hint">Hundreds of models behind one key, at <span className="mono">openrouter.ai</span>. Billed per request; the cost OpenRouter reports goes into Usage and spending caps.</span>}
         </label>
         <label>
           Auth type
@@ -159,21 +191,29 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
           </select>
           {auth === "oauth" && <span className="hint">Connect your ChatGPT account from the provider row after saving. No API key is needed.</span>}
         </label>
-        {auth !== "oauth" && <label>
+        {auth !== "oauth" && kind !== "openrouter" && <label>
           Base URL
-          <input name="base_url" className="mono" defaultValue={p?.base_url ?? ""} spellCheck={false}
-            placeholder={kind === "ollama" ? "http://localhost:11434" : kind === "openai" ? "https://api.openai.com" : "https://api.anthropic.com"} />
+          <input name="base_url" className="mono" defaultValue={p?.base_url ?? ""} spellCheck={false} required={kind === "litellm"} placeholder={BASE_URL_HINT[kind][0]} />
+          <span className="hint">{BASE_URL_HINT[kind][1]} https is required except on this machine or a private network, so a key never crosses the internet unencrypted.</span>
         </label>}
+        {kind === "openrouter" && (
+          <>
+            <label className="check">
+              <input type="checkbox" checked={share} onChange={(e) => setShare(e.target.checked)} /> Allow providers that may store or train on prompts
+            </label>
+            <span className="hint">Off (recommended): OpenRouter routes only to providers that neither retain nor train on your code. Some models are then unavailable.</span>
+          </>
+        )}
         <label>
           Context window (tokens)
-          <input name="context_window" type="number" min={1000} step={1} value={window} onChange={(e) => setWindow(e.target.value)} required={kind !== "ollama"} placeholder={kind === "ollama" ? "auto" : undefined} />
-          <span className="hint">Runs compact their conversation at 70% of this (and never above the cap in Settings → Limits).{kind === "ollama" && " Leave empty (or 32768) to detect what Ollama serves."}</span>
+          <input name="context_window" type="number" min={1000} step={1} value={window} onChange={(e) => setWindow(e.target.value)} required={!AUTO_WINDOW.includes(kind)} placeholder={AUTO_WINDOW.includes(kind) ? "auto" : undefined} />
+          <span className="hint">Runs compact their conversation at 70% of this (and never above the cap in Settings → Limits).{kind === "ollama" && " Leave empty (or 32768) to detect what Ollama serves."}{kind === "openrouter" && " Leave empty to use each model's context length from OpenRouter's catalog."}</span>
         </label>
         {auth === "api_key" && (
           <label>
             API key
             <input name="api_key" type="password" autoComplete="off" spellCheck={false} placeholder={p?.has_secret ? "Leave empty to keep the stored key (a new base URL clears it)" : ""} />
-            <span className="hint">Write-only: stored encrypted, only its last 4 characters are ever shown.</span>
+            <span className="hint">Write-only: stored encrypted, only its last 4 characters are ever shown (none for short keys). {kind === "litellm" ? "A LiteLLM master or virtual key; pick No auth if the proxy has none." : ""}</span>
           </label>
         )}
         <Alert error={error} />

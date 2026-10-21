@@ -37,7 +37,8 @@ export type RunMetrics = {
 };
 
 export type Provider = {
-  id: string; name: string; kind: "anthropic" | "openai" | "ollama"; auth_type: "api_key" | "oauth" | "none"; base_url: string | null;
+  id: string; name: string; kind: "anthropic" | "openai" | "ollama" | "openrouter" | "litellm"; auth_type: "api_key" | "oauth" | "none"; base_url: string | null;
+  options: { data_collection?: "deny" | "allow" };
   account?: { email?: string; label: string; status: string; welcomed: boolean };
   context_window: number; has_secret: boolean; secret_last4: string | null; login: "pending" | "error" | null; login_error: string | null;
 };

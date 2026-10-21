@@ -13,7 +13,8 @@ export type ToolDef = { name: string; description: string; input_schema: Record<
 export type Usage = { input: number; output: number; cache_read: number; cache_write: number };
 export const noUsage = (): Usage => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
 export type UsageStatus = "reported" | "partial" | "unavailable";
-export type RequestUsage = { id: string; usage: Usage; status: UsageStatus; outcome: "completed" | "failed" | "cancelled"; started_at: number };
+// cost_usd: what the provider itself billed for the request (OpenRouter reports it); absent = priced from the table.
+export type RequestUsage = { id: string; usage: Usage; status: UsageStatus; outcome: "completed" | "failed" | "cancelled"; started_at: number; cost_usd?: number };
 export const totalTokens = (u: Usage) => u.input + u.output + u.cache_read + u.cache_write;
 // Same value, object keys sorted (canonical JSON once stringified).
 export const stable = (v: unknown): unknown =>
@@ -38,7 +39,7 @@ export type ProviderRequest = {
   cacheKey?: string; // routes requests of one ticket to the same provider-side cache (OpenAI prompt_cache_key)
   signal?: AbortSignal;
 };
-export type ProviderResponse = { message: Msg; usage: Usage; stopReason: string; usageStatus?: UsageStatus; metered?: boolean };
+export type ProviderResponse = { message: Msg; usage: Usage; stopReason: string; usageStatus?: UsageStatus; metered?: boolean; costUsd?: number };
 
 export interface Provider {
   stream(req: ProviderRequest, onEvent: (e: StreamEvent) => void): Promise<ProviderResponse>;

@@ -4,6 +4,13 @@ import { app } from "./app.ts";
 import { recoverOrphans } from "./runs.ts";
 import { recoverChats } from "./chat.ts";
 
+// Certificate checks are what keep provider keys and OAuth tokens going to the real endpoint, for every call this process
+// makes. A private CA belongs in NODE_EXTRA_CA_CERTS, not in turning the checks off.
+if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" && process.env.POLARIS_ALLOW_INSECURE_TLS !== "1") {
+  console.error("NODE_TLS_REJECT_UNAUTHORIZED=0 turns off TLS certificate checks, so provider keys could be sent to an impostor. Unset it (for a private CA set NODE_EXTRA_CA_CERTS=/path/ca.pem), or set POLARIS_ALLOW_INSECURE_TLS=1 to run anyway.");
+  process.exit(1);
+}
+
 // Built dashboard (npm run build). In dev, Vite serves it and proxies /api here.
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("*", serveStatic({ path: "./dist/index.html" }));

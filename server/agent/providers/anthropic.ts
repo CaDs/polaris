@@ -1,5 +1,6 @@
 import { AgentError, stable, type Block, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
 import { httpError, retryable, withRetry } from "./retry.ts";
+import { cappedText, EgressError, providerFetch } from "../../egress.ts";
 
 // Anthropic Messages API over fetch + SSE. The same adapter talks to Ollama's
 // Anthropic-compatible endpoint (baseUrl http://localhost:11434, any api key).
@@ -51,7 +52,7 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
     const body = requestBody(req);
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await providerFetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": opts.apiKey, "anthropic-version": "2023-06-01" },
         body: JSON.stringify(body),
@@ -59,10 +60,11 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
       });
     } catch (e) {
       if (req.signal?.aborted) throw e;
+      if (e instanceof EgressError) throw new AgentError("ProviderError", e.message); // policy: a retry would be refused too
       throw retryable(new AgentError("ProviderError", `request failed: ${(e as Error).message}`));
     }
     if (!res.ok || !res.body) {
-      const text = await res.text();
+      const text = await cappedText(res);
       try { raw = { ...JSON.parse(text)?.usage }; } catch {}
       throw httpError(res, text);
     }
