@@ -27,7 +27,7 @@
   --night: #000000; --glow: #2f7cad; --glow-on: #ffffff; /* the landing panel: always dark */
 }
 [data-palette="graphite"] {
-  /* A · Graphite: Linear-style monochrome, color only for status */
+  /* A · Graphite: neutral monochrome, color only for status */
   --bg: light-dark(#ffffff, #111113);
   --sidebar: light-dark(#f7f7f8, #0c0c0e);
   --surface: light-dark(#ffffff, #18181b);
