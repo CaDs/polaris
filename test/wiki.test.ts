@@ -183,7 +183,7 @@ test("approve → one ingest run: demo page, index, log line and commit message 
 test("the next run sees the wiki: snapshot in .polaris/wiki, index in the first message, read-only, git-excluded", async () => {
   const { t, run } = await w.ticket("Second change");
   const first = task(run.id);
-  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer\n\n# Task/);
+  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer\n\n\(end of reference notes\)\n\n# Task/);
   assert.doesNotMatch(first, /may be stale/);
   assert.match(first, /Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki/);
   const wt = worktreeOf((await w.get(t.id)).runs[0].id);

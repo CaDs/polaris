@@ -12,7 +12,7 @@ import { ESTIMATES, KINDS, ticketKey, trackerHeader } from "./tracker.ts";
 import { withUsage } from "./usage.ts";
 import { materialize, wikiSection } from "./wiki.ts";
 import { attachedSkills, attachedText, skillIds, writeWorkspaceSkills } from "./skills.ts";
-import { listSkills, skillsText } from "./agent/context.ts";
+import { listSkills, referenceNotes, skillsText } from "./agent/context.ts";
 import { runAgent } from "./agent/loop.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type Msg } from "./agent/types.ts";
@@ -239,7 +239,7 @@ async function turn(chat: Chat, message: string, signal: AbortSignal, skills: st
       } catch (e) {
         append(chat.id, "error", { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` });
       }
-    const task = prior.length ? firstText(prior[0]) : [environment(s, sha), skillsText(listSkills(worktree, "chat")), wiki, message].filter(Boolean).join("\n\n");
+    const task = prior.length ? firstText(prior[0]) : [environment(s, sha), referenceNotes([skillsText(listSkills(worktree, "chat")), wiki]), message].filter(Boolean).join("\n\n");
     const { provider, model } = metaProvider(ws, "chat");
     const a = await withUsage({ workspaceId: ws, purpose: "chat", background: true }, () =>
       runAgent({

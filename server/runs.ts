@@ -5,7 +5,7 @@ import { db } from "./db.ts";
 import { capText, checkUsageCaps, metered, monthSpend, normalized, recordUsage, treeSpend, usageCaps, usagePurpose, withUsage } from "./usage.ts";
 export { monthSpend, treeSpend } from "./usage.ts";
 import { createRun, eventLog, liveStream, touch } from "./agent/events.ts";
-import { listSkills, skillsText, type Skill } from "./agent/context.ts";
+import { listSkills, referenceNotes, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
@@ -167,9 +167,8 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
       `- Budget: ${info.budget.turns} turns and ${info.budget.minutes} minutes for this attempt (fix rounds after failed tests or a review use what is left); a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
   ];
-  if (info.skills.length) parts.push(skillsText(info.skills));
-  if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
-  if (info.wiki) parts.push(info.wiki);
+  const notes = referenceNotes([info.skills.length ? skillsText(info.skills) : "", info.lessons && `# Lessons from earlier runs\n\n${info.lessons}`, info.wiki]);
+  if (notes) parts.push(notes);
   const body = [t.header, t.spec].filter(Boolean).join("\n\n"); // header: the tracker's priority, labels, milestone, due date (M11)
   parts.push(...feedback, `# Task\n\n${body ? `# ${t.title}\n\n${body}` : t.title}`);
   return parts.join("\n\n");

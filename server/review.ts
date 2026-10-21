@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { skillsText, type Skill } from "./agent/context.ts";
+import { referenceNotes, skillsText, type Skill } from "./agent/context.ts";
 import { reviewTools, type Tool } from "./agent/tools.ts";
 import { AgentError, type Finding } from "./agent/types.ts";
 
@@ -16,11 +16,10 @@ export const findingsText = (findings: Finding[]) => findings.map((f) => `- ${f.
 
 export function reviewTask(t: { title: string; spec: string }, o: { base_sha: string; test: string; wiki?: string; skills?: Skill[] }) {
   return [
-    ...(o.skills?.length ? [skillsText(o.skills)] : []),
-    ...(o.wiki ? [o.wiki] : []),
+    referenceNotes([o.skills?.length ? skillsText(o.skills) : "", o.wiki]),
     `# Ticket\n\n# ${t.title}${t.spec ? `\n\n${t.spec}` : ""}`,
     `# Change under review\n\nThe worker's change is uncommitted in the working directory, on top of commit ${o.base_sha}. The test gate${o.test.trim() ? ` (\`${o.test}\`)` : ""} passed. Inspect it with \`git status --short\` and \`git diff\`, and read the new files.`,
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 const str = (v: unknown, what: string, max = 5000) => {
