@@ -226,3 +226,22 @@ test("manual status changes: only between todo, done and failed (and review back
   assert.equal((await call("PATCH", `/api/tickets/${b.id}`, alice, { status: "todo" })).status, 200);
   assert.equal((await waitFor(alice, b.id, "review")).runs.length, 2);
 });
+
+test("won't do: set by hand, settles, leaves progress totals, and blocks an epic child's dependents", async () => {
+  const { withStates } = await import("../server/planner.ts");
+  const t = (await fileTicket(alice, { title: "not worth it", estimate: 3 })).body;
+  const projectId = t.project_id;
+  const before = (await call("GET", `/api/projects/${projectId}`, alice)).body.progress;
+  const r = await call("PATCH", `/api/tickets/${t.id}`, alice, { status: "wont_do" });
+  assert.equal(r.body.status, "wont_do");
+  assert.ok((db.prepare("SELECT settled_at FROM tickets WHERE id = ?").get(t.id) as { settled_at: number | null }).settled_at);
+  const after = (await call("GET", `/api/projects/${projectId}`, alice)).body.progress;
+  assert.deepEqual([after.total, after.points, after.by_status.wont_do], [before.total - 1, before.points - 3, 1]);
+  assert.equal((await call("PATCH", `/api/tickets/${t.id}`, alice, { status: "todo" })).body.status, "todo"); // reopened
+
+  const row = (id: string, status: string, depends_on: string[] = []) =>
+    ({ id, key: id.toUpperCase(), status, depends_on: JSON.stringify(depends_on), parent_id: "e", run_count: 0, escalated_to: null }) as any;
+  const [a, b] = withStates([row("a", "wont_do"), row("b", "todo", ["a"])]);
+  assert.match(a.label, /^won't do/);
+  assert.equal(b.label, "blocked (dependency A won't be done)");
+});

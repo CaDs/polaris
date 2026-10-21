@@ -85,11 +85,11 @@ type TicketRow = {
 const ticketRow = (id: string) =>
   db.prepare(`SELECT t.id, t.workspace_id, t.project_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, ${ticketKey()} AS key
     FROM tickets t WHERE t.id = ?`).get(id) as TicketRow | undefined;
-// Every ticket status change goes through here. Becoming done or failed settles a child: its planner may react (settled).
+// Every ticket status change goes through here. Becoming done, failed or won't do settles a child: its planner may react (settled).
 // quiet: no reaction (a child replaced by a "Split:" epic: that epic is open in its place, nothing to wake up for).
 function setTicket(id: string, status: string, quiet = false) {
   const now = Date.now();
-  const end = status === "done" || status === "failed";
+  const end = status === "done" || status === "failed" || status === "wont_do";
   db.prepare("UPDATE tickets SET status = ?, updated_at = ?, settled_at = ? WHERE id = ?").run(status, now, end ? now : null, id);
   const ws = db.prepare("SELECT workspace_id FROM tickets WHERE id = ?").get(id) as { workspace_id: string } | undefined;
   if (ws) touch(ws.workspace_id, { type: "ticket", id });
@@ -1028,7 +1028,8 @@ export function wake(epicId: string, removed = false) {
   const kids = childrenOf(epicId);
   const fresh = kids.filter((k) => (k.settled_at ?? 0) > (last.started_at ?? 0));
   if (openChildren(kids).length) {
-    if (!removed && !fresh.some((k) => k.status === "failed" && !k.escalated_to)) return; // done children wait for the next round
+    // done children wait for the next round; a failed one, or one a person closed as won't do, needs a plan now
+    if (!removed && !fresh.some((k) => (k.status === "failed" && !k.escalated_to) || k.status === "wont_do")) return;
   } else if (!removed && !fresh.length)
     return failEpic(epicId, "The planner ended a round without complete_epic while no child ticket was open, so nothing would start another round.");
   if (last.attempt >= MAX_ROUNDS) return failEpic(epicId, `Planner round limit reached (${MAX_ROUNDS} rounds) before the epic was completed.`);
@@ -1252,11 +1253,11 @@ export async function reject(ticketId: string, note: string) {
   setTicket(ticketId, "failed");
 }
 
-// A status change by hand (the Status select): only between the states no run owns, plus review back to todo (its
+// A status change by hand (the Status select): only between the states no run owns (todo, done, failed, wont_do), plus review back to todo (its
 // branch is dropped, as on a reject). Running and review belong to the pipeline: Run, Cancel, Approve, Reject.
 // Through setTicket, so a child settled by hand wakes its planner and dependents; one put back in todo starts again
 // once its dependencies are done, as when its last dependency settled.
-const MANUAL = ["todo", "done", "failed"];
+const MANUAL = ["todo", "done", "failed", "wont_do"];
 export async function moveTicket(id: string, to: string) {
   const t = db.prepare("SELECT status, workspace_id, parent_id, depends_on FROM tickets WHERE id = ?").get(id) as { status: string; workspace_id: string; parent_id: string | null; depends_on: string };
   if (t.status === to) return;

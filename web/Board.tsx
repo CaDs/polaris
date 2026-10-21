@@ -1,4 +1,4 @@
-import { COLUMNS, StatusIcon, cost, fmt, waiting, type Ticket } from "./ui.tsx";
+import { COLUMNS, StatusIcon, cost, fmt, statusName, waiting, type Ticket } from "./ui.tsx";
 import { Avatar, LabelChip, PriorityIcon } from "./tracker.tsx";
 
 export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: Ticket) => void }) {
@@ -7,9 +7,9 @@ export function Board({ tickets, open }: { tickets: Ticket[] | null; open: (t: T
       {COLUMNS.map((col) => {
         const list = tickets?.filter((t) => t.status === col) ?? [];
         return (
-          <section key={col} aria-label={col}>
+          <section key={col} aria-label={statusName(col)}>
             <h2>
-              <StatusIcon status={col} /> {col} <span className="muted">{list.length}</span>
+              <StatusIcon status={col} /> {statusName(col)} <span className="muted">{list.length}</span>
             </h2>
             {list.map((t) => (
               <button key={t.id} className={t.status === "running" ? "ticket running" : "ticket"} onClick={() => open(t)}>

@@ -78,15 +78,16 @@ function childStates(kids: Sibling[]) {
     let s: State;
     if (k.status === "failed" && k.escalated_to) s = { label: `split into ${byId.get(k.escalated_to)?.key ?? "an epic"} (failed as one ticket)`, open: false };
     else if (k.status === "done" || k.status === "failed") s = { label: k.status, open: false };
+    else if (k.status === "wont_do") s = { label: "won't do (closed by a person; don't redo it)", open: false };
     else if (k.status === "review") s = { label: "in review (passed the gate, waiting to be merged)", open: true };
     else if (k.status === "running") s = { label: k.run_status === "queued" ? "queued" : "running", open: true };
     else {
       const ids = JSON.parse(k.depends_on) as string[];
       const deps = ids.flatMap((id) => byId.get(id) ?? []);
-      const dead = deps.find((d) => d.status === "failed" || (d.status !== "done" && !state(d).open));
+      const dead = deps.find((d) => d.status === "failed" || d.status === "wont_do" || (d.status !== "done" && !state(d).open));
       const waiting = deps.filter((d) => d.status !== "done");
       if (deps.length < ids.length) s = { label: "blocked (dependency deleted)", open: false };
-      else if (dead) s = { label: `blocked (dependency ${dead.key} ${dead.status === "failed" ? "failed" : "is blocked"})`, open: false };
+      else if (dead) s = { label: `blocked (dependency ${dead.key} ${dead.status === "failed" ? "failed" : dead.status === "wont_do" ? "won't be done" : "is blocked"})`, open: false };
       else if (waiting.length) s = { label: `waiting on ${waiting.map((d) => d.key).join(", ")}`, open: true };
       else s = { label: k.run_count ? "todo (stopped; a human must run it again)" : "todo", open: true };
     }

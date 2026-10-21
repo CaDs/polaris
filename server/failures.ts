@@ -78,7 +78,7 @@ function backfill(ws: string) {
 
 const openMined = (ws: string, cls: string) =>
   db.prepare(`SELECT t.id, ${ticketKey()} AS key, t.status FROM tickets t
-    WHERE t.workspace_id = ? AND t.mined_class = ? AND t.status NOT IN ('done', 'failed') ORDER BY t.number DESC LIMIT 1`).get(ws, cls) as { id: string; key: string; status: string } | undefined;
+    WHERE t.workspace_id = ? AND t.mined_class = ? AND t.status NOT IN ('done', 'failed', 'wont_do') ORDER BY t.number DESC LIMIT 1`).get(ws, cls) as { id: string; key: string; status: string } | undefined;
 
 type Row = { run_id: string; class: FailureClass; model: string; ticket_id: string; ticket_key: string; title: string; day: string; reason: string | null };
 

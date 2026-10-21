@@ -36,7 +36,7 @@ const COLORS = ["gray", "red", "orange", "yellow", "green", "teal", "blue", "ind
 const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"]; // Linear's numbering: 0 none, 1 urgent … 4 low
 export const ESTIMATES = [1, 2, 3, 5, 8];
 const SORTS = ["manual", "priority", "updated", "created", "due"];
-export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
+export const STATUSES = ["todo", "running", "review", "done", "failed", "wont_do"]; // ticket status; runs.ts moveTicket has the transitions
 export const KINDS = ["task", "epic"];
 const PROTECTED_MODES = ["add_only", "read_only"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
@@ -356,7 +356,9 @@ function progress(where: string, ...params: SQLInputValue[]): Progress {
   }[];
   const by_status = Object.fromEntries(STATUSES.map((s) => [s, rows.find((r) => r.status === s)?.n ?? 0]));
   const sum = (k: "n" | "pts", only?: string) => rows.filter((r) => !only || r.status === only).reduce((a, r) => a + r[k], 0);
-  return { total: sum("n"), done: sum("n", "done"), points: sum("pts"), points_done: sum("pts", "done"), by_status };
+  const open = rows.filter((r) => r.status !== "wont_do"); // closed without doing it: out of the scope progress is measured against
+  const total = (k: "n" | "pts") => open.reduce((a, r) => a + r[k], 0);
+  return { total: total("n"), done: sum("n", "done"), points: total("pts"), points_done: sum("pts", "done"), by_status };
 }
 
 function project(ws: string, projectId: string) {
@@ -545,7 +547,7 @@ trackerRoutes.post("/cycles/:id/move-unfinished", (c) => {
   const next = db.prepare("SELECT * FROM cycles WHERE project_id = ? AND starts_at > ? ORDER BY starts_at LIMIT 1").get(cur.project_id, cur.ends_at) as Cycle | undefined;
   if (!next) fail(`there is no cycle after cycle ${cur.number}: create the next cycle first`);
   const now = Date.now();
-  const r = db.prepare("UPDATE tickets SET cycle_id = ?, cycle_added_at = ?, updated_at = ? WHERE cycle_id = ? AND status <> 'done'").run(next!.id, now, now, cur.id);
+  const r = db.prepare("UPDATE tickets SET cycle_id = ?, cycle_added_at = ?, updated_at = ? WHERE cycle_id = ? AND status NOT IN ('done', 'wont_do')").run(next!.id, now, now, cur.id);
   return c.json({ moved: Number(r.changes), to: withProgress(next!) });
 });
 

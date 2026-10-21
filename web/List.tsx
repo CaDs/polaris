@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { COLUMNS, Loading, StatusIcon, api, type Ticket } from "./ui.tsx";
+import { COLUMNS, Loading, StatusIcon, api, statusName, type Ticket } from "./ui.tsx";
 import { Avatar, cycleName, LabelChip, PRIORITIES, PRIORITY_ORDER, PriorityIcon } from "./tracker.tsx";
 
 export const GROUPS = ["status", "priority", "project", "assignee", "cycle", "label"] as const;
@@ -14,7 +14,7 @@ function buckets(tickets: Ticket[], group: Group): Bucket[] {
     by.get(key)!.items.push(t);
   };
   for (const t of tickets) {
-    if (group === "status") put(t.status, t.status, t, <StatusIcon status={t.status} />);
+    if (group === "status") put(t.status, statusName(t.status), t, <StatusIcon status={t.status} />);
     else if (group === "priority") put(String(t.priority), PRIORITIES[t.priority], t, <PriorityIcon p={t.priority} />);
     else if (group === "project") put(t.project?.id ?? "", t.project?.name ?? "No project", t);
     else if (group === "assignee") put(t.assignee?.id ?? "", t.assignee?.name ?? "No assignee", t);

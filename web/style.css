@@ -285,6 +285,7 @@ nav a.active { background: var(--hover); font-weight: 500; }
 .s-review { color: var(--review); }
 .s-done { color: var(--ok); }
 .s-failed { color: var(--error); }
+.s-wont_do { color: var(--muted); }
 
 /* ticket view */
 /* The ticket takes the whole center column: specs, runs and transcripts are wide, and a fixed cap left half the screen empty. */

@@ -2,8 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 
 export type TokenSummary = { tokens_total: number; tokens_in: number; input_uncached: number; tokens_out: number; tokens_cached: number; tokens_cache_write: number; partial: number; unavailable: number; cost_usd: number; unknown_price: number; subscription_calls: number; local_calls: number };
 
-export type Status = "todo" | "running" | "review" | "done" | "failed";
-export const COLUMNS: Status[] = ["todo", "running", "review", "done", "failed"];
+export type Status = "todo" | "running" | "review" | "done" | "failed" | "wont_do";
+export const COLUMNS: Status[] = ["todo", "running", "review", "done", "failed", "wont_do"];
+export const statusName = (s: string) => (s === "wont_do" ? "won't do" : s);
 export type Ticket = {
   id: string; number: number; key: string; title: string; spec: string; test_command: string | null; status: Status;
   provider_id: string | null; model: string | null; run_model: string | null; run_auth: string | null;
@@ -70,7 +71,7 @@ const CODES: Record<string, string> = {
 export function errorText(data: any, status = 0) {
   const e: string = typeof data?.error === "string" ? data.error : typeof data?.message === "string" ? data.message : "";
   if (e === "invalid_transition")
-    return `A ${data.from} ticket can't be set to ${data.to} by hand. Only todo, done and failed can be set by hand (review only back to todo), and not while a run is queued or running; Run, Cancel, Approve and Reject do the rest.`;
+    return `A ${data.from} ticket can't be set to ${data.to} by hand. Only todo, done, failed and won't do can be set by hand (review only back to todo), and not while a run is queued or running; Run, Cancel, Approve and Reject do the rest.`;
   const s = CODES[e] ?? (e || (status >= 500 || !status ? CODES["internal error"] : `The request failed (HTTP ${status}).`));
   return s.replace(/^[a-z][a-z-]*(?=[\s:,])/, (w) => w[0].toUpperCase() + w.slice(1)); // "cancel the run first" → "Cancel …"; leaves "a/b.md …"
 }
@@ -126,7 +127,7 @@ export const Icon = ({ name, size = 16 }: { name: IconName; size?: number }) => 
   </svg>
 );
 
-// Small status glyphs, all static: circle = todo, half-filled circle = running, ring with dot = review, check = done, x = failed.
+// Small status glyphs, all static: circle = todo, half-filled circle = running, ring with dot = review, check = done, x = failed, slashed circle = won't do.
 // label: the glyph is the only place the status shows (list rows, palette), so screen readers get it as an image.
 // The Polaris mark, "circumpolar": a fixed point with two star trails turning around it (Polaris holds still while the
 // agents work). One stroke weight on a 32-unit grid, drawn in currentColor: monochrome, no tile, no glow (DESIGN.md).
@@ -143,7 +144,7 @@ export function Mark() {
 export function StatusIcon({ status, label = false }: { status: string; label?: boolean }) {
   const c = { fill: "none", stroke: "currentColor", strokeWidth: 1.5 };
   return (
-    <svg className={`icon s-${status}`} width="14" height="14" viewBox="0 0 14 14" {...(label ? { role: "img", "aria-label": status } : { "aria-hidden": true })}>
+    <svg className={`icon s-${status}`} width="14" height="14" viewBox="0 0 14 14" {...(label ? { role: "img", "aria-label": statusName(status) } : { "aria-hidden": true })}>
       {status === "running" ? (
         <>
           <circle cx="7" cy="7" r="5.5" {...c} />
@@ -155,6 +156,7 @@ export function StatusIcon({ status, label = false }: { status: string; label?: 
       {status === "review" && <circle cx="7" cy="7" r="2.5" fill="currentColor" />}
       {status === "done" && <path d="M4.5 7.2l1.8 1.8 3.2-3.6" fill="none" stroke="var(--bg)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />}
       {status === "failed" && <path d="M5 5l4 4M9 5l-4 4" {...c} strokeLinecap="round" />}
+      {status === "wont_do" && <path d="M3.1 10.9l7.8-7.8" {...c} />}
     </svg>
   );
 }
