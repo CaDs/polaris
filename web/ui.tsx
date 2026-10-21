@@ -162,7 +162,7 @@ export type Theme = "system" | "light" | "dark";
 // The palettes in web/style.css, default first; GET/PUT /api/me/preferences validates the same ids.
 export const PALETTES = [
   { id: "black", name: "Black + Blue", hint: "True black, neutral greys, one steel blue. The default." },
-  { id: "graphite", name: "Graphite", hint: "Linear-style monochrome: color only for status." },
+  { id: "graphite", name: "Graphite", hint: "Neutral monochrome: color only for status." },
   { id: "stone", name: "Stone & Ink", hint: "Warm monochrome, paper and ink." },
   { id: "polar", name: "Polar Night", hint: "Navy ink with a north-blue accent." },
   { id: "ember", name: "Ember", hint: "Warm charcoal with an orange accent." },

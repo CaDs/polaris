@@ -12,7 +12,7 @@ before first paint. Chosen from a canvas of options (true black and neutral grey
 | id | Name | Character | Accent light / dark |
 |---|---|---|---|
 | `black` (default) | Black + Blue | true black, neutral greys, one steel blue | `#1f6d9a` / `#2f7cad` |
-| `graphite` | Graphite | Linear-style monochrome: the accent is the ink | `#18181b` / `#ededef` |
+| `graphite` | Graphite | neutral monochrome: the accent is the ink | `#18181b` / `#ededef` |
 | `stone` | Stone & Ink | warm monochrome (paper and ink) | `#1c1a17` / `#ece8e1` |
 | `polar` | Polar Night | the original navy ink, north blue | `#3d68ee` |
 | `ember` | Ember | warm charcoal, orange; running turns violet so it never reads as the accent | `#c2410c` / `#ff7a45` |
