@@ -11,6 +11,7 @@ import { OWN_RUNS } from "./planner.ts";
 import { ESTIMATES, KINDS, ticketKey, trackerHeader } from "./tracker.ts";
 import { withUsage } from "./usage.ts";
 import { materialize, wikiSection } from "./wiki.ts";
+import { attachedSkills, attachedText, skillIds, writeWorkspaceSkills } from "./skills.ts";
 import { listSkills, skillsText } from "./agent/context.ts";
 import { runAgent } from "./agent/loop.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
@@ -211,8 +212,9 @@ function environment(s: ProjectSettings, sha: string) {
 }
 
 // Runs one turn and stores its events and the conversation. A later turn that does not finish keeps the user's message in
-// the conversation with a note, so the next turn knows it was asked and never resumes a dangling tool call.
-async function turn(chat: Chat, message: string, signal: AbortSignal) {
+// the conversation with a note, so the next turn knows it was asked and never resumes a dangling tool call. skills: ids
+// the member attached; their full text goes ahead of the message (read from this turn's checkout and the workspace).
+async function turn(chat: Chat, message: string, signal: AbortSignal, skills: string[] = []) {
   const ws = chat.workspace_id;
   const s = projectSettings(chat.project_id);
   const worktree = join(dataDir(), "worktrees", `chat-${randomUUID()}`);
@@ -226,6 +228,9 @@ async function turn(chat: Chat, message: string, signal: AbortSignal) {
     const sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, sha, worktree);
     added = true;
+    writeWorkspaceSkills(ws, worktree);
+    const attached = attachedText(attachedSkills(ws, worktree, skills));
+    if (attached) message = `${attached}\n\n${message.startsWith("# Context") ? message : `# Message\n\n${message}`}`;
     let wiki = "";
     if (s.wiki)
       try {
@@ -260,13 +265,14 @@ async function turn(chat: Chat, message: string, signal: AbortSignal) {
   append(chat.id, "turn_finished", finished);
 }
 
-// Stores the user's message and starts its turn in the background. The model sees the message behind its context block.
-function start(chat: Chat, text: string, ctx: PageContext) {
+// Stores the user's message and starts its turn in the background. The model sees the message behind its context block
+// (and the attached skills ahead of both). The event keeps the attached skills' ids and names for the chips.
+function start(chat: Chat, text: string, ctx: PageContext, skills: { id: string; name: string }[] = []) {
   const context = contextText(chat, text, ctx);
-  append(chat.id, "user_message", { text, context: ctx });
+  append(chat.id, "user_message", { text, context: ctx, ...(skills.length ? { skills } : {}) });
   const ctl = new AbortController();
   busy.set(chat.id, ctl);
-  void turn(chat, context ? `${context}\n\n# Message\n\n${text}` : text, ctl.signal)
+  void turn(chat, context ? `${context}\n\n# Message\n\n${text}` : text, ctl.signal, skills.map((s) => s.id))
     .catch((e) => console.error("chat turn", e))
     .finally(() => busy.delete(chat.id));
 }
@@ -288,7 +294,10 @@ async function messageBody(c: Context<Env>) {
   if (!text || text.length > MESSAGE_MAX) return { error: `message must be a string of 1-${MESSAGE_MAX} chars` };
   const ctx: PageContext = {};
   for (const k of ["ticket", "project", "cycle"] as const) if (typeof b?.context?.[k] === "string") ctx[k] = b.context[k].slice(0, 100);
-  return { text, ctx, project_id: typeof b?.project_id === "string" ? b.project_id : undefined };
+  // Attached skills: ids plus the names the composer showed (display only; the turn reads the skill itself).
+  const names: Record<string, string> = Object.fromEntries((Array.isArray(b?.skill_names) ? b.skill_names : []).filter((x: unknown) => Array.isArray(x) && typeof x[0] === "string" && typeof x[1] === "string").map((x: string[]) => [x[0], x[1].slice(0, 60)]));
+  const skills = skillIds(b?.skills).map((id) => ({ id, name: names[id] ?? id.replace(/^(repo|ws):/, "") }));
+  return { text, ctx, skills, project_id: typeof b?.project_id === "string" ? b.project_id : undefined };
 }
 
 const proposalsOf = (chatId: string) =>
@@ -309,7 +318,7 @@ chatRoutes.post("/", async (c) => {
   const id = randomUUID();
   db.prepare("INSERT INTO chats (id, workspace_id, project_id, user_id, title) VALUES (?, ?, ?, ?, ?)").run(id, c.get("workspaceId"), m.project_id!, c.get("userId"), m.text.split("\n")[0].slice(0, 80));
   const chat = chatIn(c, id)!;
-  start(chat, m.text, m.ctx);
+  start(chat, m.text, m.ctx, m.skills);
   return c.json({ id, title: chat.title, project_id: chat.project_id, busy: true }, 201);
 });
 
@@ -325,7 +334,7 @@ chatRoutes.post("/:id/messages", async (c) => {
   if (busy.has(chat.id)) return c.json({ error: "Polaris is still answering the previous message." }, 409);
   const m = await messageBody(c);
   if ("error" in m) return c.json(m, 400);
-  start(chat, m.text, m.ctx);
+  start(chat, m.text, m.ctx, m.skills);
   return c.json({ ok: true }, 202);
 });
 

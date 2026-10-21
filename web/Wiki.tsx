@@ -1,4 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { normalizeMarkdown } from "./markdown.ts";
 import { Transcript } from "./TicketView.tsx";
 import { Alert, Icon, Loading, api, when, type Run } from "./ui.tsx";
 import type { ProjectRef } from "./tracker.tsx";
@@ -18,45 +21,20 @@ const resolvePath = (from: string, to: string) => {
   return parts.join("/");
 };
 
-// A small markdown subset (headings, bullets, code fences, `code`, **bold**, links): internal .md links open the page
-// (without open, e.g. chat replies, they show as text).
+// Markdown from models and wiki pages: normalized (web/markdown.ts) so every model's dialect renders the same, then
+// CommonMark + GFM (tables, task lists, strikethrough). No raw HTML is rendered. A link is an href only when it parses as
+// http(s) (opens in a new tab); an internal .md link opens that wiki page when `open` is given, else it shows as text.
 export function Markdown({ path = "", text, open }: { path?: string; text: string; open?: (path: string) => void }) {
-  const inline = (s: string): ReactNode[] =>
-    s.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/).map((t, i) => {
-      const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(t);
-      const web = link && URL.parse(link[2]);
-      if (t.startsWith("`") && t.endsWith("`") && t.length > 1) return <code key={i}>{t.slice(1, -1)}</code>;
-      if (t.startsWith("**") && t.endsWith("**") && t.length > 4) return <strong key={i}>{t.slice(2, -2)}</strong>;
-      if (!link) return t;
-      // Only a parsed http(s) URL becomes an href: page text can never be a javascript: URL.
-      return web && (web.protocol === "https:" || web.protocol === "http:")
-        ? <a key={i} href={web.href} target="_blank" rel="noreferrer">{link[1]}</a>
-        : open ? <button key={i} className="link" onClick={() => open(resolvePath(path, link[2]))}>{link[1]}</button> : link[1];
-    });
-  const out: ReactNode[] = [];
-  let list: string[] = [];
-  let code: string[] | null = null;
-  const flush = () => {
-    if (list.length) out.push(<ul key={out.length}>{list.map((l, i) => <li key={i}>{inline(l)}</li>)}</ul>);
-    list = [];
+  const components: Components = {
+    a: ({ href = "", children }) => {
+      const web = URL.parse(href);
+      if (web && (web.protocol === "https:" || web.protocol === "http:")) return <a href={web.href} target="_blank" rel="noreferrer">{children}</a>;
+      return open && /\.md(#.*)?$/.test(href) ? <button className="link" onClick={() => open(resolvePath(path, href.replace(/#.*$/, "")))}>{children}</button> : <>{children}</>;
+    },
+    img: ({ alt }) => <>{alt}</>, // no remote images: a reply must not make the browser fetch anything
+    table: ({ children }) => <div className="md-table"><table>{children}</table></div>,
   };
-  for (const line of text.split("\n")) {
-    if (line.startsWith("```")) {
-      flush();
-      if (code) out.push(<pre key={out.length} className="body">{code.join("\n")}</pre>);
-      code = code ? null : [];
-    } else if (code) code.push(line);
-    else if (/^\s*[-*] /.test(line)) list.push(line.replace(/^\s*[-*] /, ""));
-    else {
-      flush();
-      const h = /^(#{1,4}) (.*)$/.exec(line);
-      if (h) out.push(<h4 key={out.length}>{inline(h[2])}</h4>);
-      else if (line.trim()) out.push(<p key={out.length}>{inline(line)}</p>);
-    }
-  }
-  flush();
-  if (code) out.push(<pre key={out.length} className="body">{code.join("\n")}</pre>);
-  return <div className="md">{out}</div>;
+  return <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{normalizeMarkdown(text)}</ReactMarkdown></div>;
 }
 
 function PageView({ base, path, open, reload }: { base: string; path: string; open: (path: string) => void; reload: () => Promise<void> }) {

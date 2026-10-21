@@ -2,16 +2,26 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type 
 import { matchTickets } from "./Palette.tsx";
 import { Markdown } from "./Wiki.tsx";
 import { PRIORITIES, useTracker, type ProjectRef } from "./tracker.tsx";
+import { Popover } from "./Filters.tsx";
+import { SkillDialog } from "./Skills.tsx";
 import { Alert, Icon, StatusIcon, api, type Ticket } from "./ui.tsx";
 
-// M13: the chat panel (Cmd/Ctrl+J). Talks with a project's agent about the page you're on; the agent proposes tickets
-// as cards and you file them into that project. A new chat starts in the page's project (or the one picked). One chat at a time is open; its stored events replay over SSE, then live ones and the
+// M13: the chat (Cmd/Ctrl+J panel, or the full-width Agent page: variant "page"). Talks with a project's agent about the
+// page you're on; the agent proposes tickets as cards and you file them into that project. A new chat starts in the page's
+// project (or the one picked). Skills (M17) can be attached to a message: their full text goes with it. One chat at a time is open; its stored events replay over SSE, then live ones and the
 // reply's text as it streams.
 export type ChatContext = { ticket?: string; project?: string; cycle?: string };
 type Ev = { seq: number; type: string; payload: any };
 type Draft = { title: string; spec: string; kind: string; test_command: string | null; priority: number; estimate: number | null };
 type Proposal = { id: string; number: number; status: "open" | "filed" | "dismissed" | "superseded"; payload: Draft; ticket_key: string | null };
 type ChatInfo = { id: string; title: string; project_key?: string };
+type SkillRef = { id: string; name: string };
+// The Agent page's starting points: they fill the composer, the member finishes the sentence.
+const EXAMPLES = [
+  { title: "Plan a feature", text: "Turn an idea into scoped tickets", prompt: "I want to add … Ask me what's unclear, then propose tickets." },
+  { title: "Explain the code", text: "How a part of the repository works", prompt: "How does … work in this repository? Point me to the files." },
+  { title: "Groom the backlog", text: "Stale, duplicated or oversized tickets", prompt: "Which open tickets look stale, duplicated or too large to finish in one run? Suggest what to split or close." },
+];
 
 const remembered = () => {
   try {
@@ -35,8 +45,9 @@ const SOURCE: Record<string, (i: any) => string> = {
   list_tickets: (i) => `tickets${i.status ? ` (${i.status})` : ""}${i.query ? ` “${i.query}”` : ""}`,
 };
 
-export function Chat({ context, label, project, tickets, go, filed, close }: {
-  context: ChatContext; label: string | null; project: ProjectRef | undefined; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close: () => void;
+export function Chat({ context, label, project, tickets, go, filed, close, variant = "panel" }: {
+  context: ChatContext; label: string | null; project: ProjectRef | undefined; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close?: () => void;
+  variant?: "panel" | "page";
 }) {
   const { tracker } = useTracker();
   const [picked, setPicked] = useState<string | null>(null); // a project chosen for the next new chat
@@ -50,12 +61,14 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
   const [draft, setDraft] = useState("");
   const [useContext, setUseContext] = useState(true);
   const [error, setError] = useState("");
+  const [chatProject, setChatProject] = useState<string | null>(null); // an open chat's own project
+  const [skills, setSkills] = useState<SkillRef[]>([]); // attached to the next message
   const end = useRef<HTMLDivElement>(null);
 
   const list = () => api<ChatInfo[]>("/api/chats").then(setChats, (e) => setError(e.message));
   const load = (chat = id) =>
     chat
-      ? api<{ busy: boolean; proposals: Proposal[] }>(`/api/chats/${chat}`).then((c) => (setProposals(c.proposals), setBusy(c.busy)), () => pick(null))
+      ? api<{ busy: boolean; proposals: Proposal[]; project_id: string }>(`/api/chats/${chat}`).then((c) => (setProposals(c.proposals), setBusy(c.busy), setChatProject(c.project_id)), () => pick(null))
       : Promise.resolve();
   const pick = (chat: string | null) => (remember(chat), setId(chat));
 
@@ -86,7 +99,7 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
     const message = draft.trim();
     if (!message || busy) return;
     setError("");
-    const body = { message, context: useContext ? context : undefined, project_id: projectId };
+    const body = { message, context: useContext ? context : undefined, project_id: projectId, skills: skills.map((k) => k.id), skill_names: skills.map((k) => [k.id, k.name]) };
     try {
       if (id) await api(`/api/chats/${id}/messages`, "POST", body);
       else {
@@ -95,6 +108,7 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
         void list();
       }
       setDraft("");
+      setSkills([]);
       setBusy(true);
     } catch (e) {
       setError((e as Error).message);
@@ -103,7 +117,7 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
   const stop = () => id && api(`/api/chats/${id}/cancel`, "POST").catch((e) => setError(e.message));
 
   return (
-    <section className="chat" aria-label="Chat">
+    <section className={`chat chat-${variant}`} aria-label="Chat">
       <header className="chat-head">
         <select aria-label="Conversation" value={id ?? ""} onChange={(e) => pick(e.target.value || null)}>
           <option value="">New chat</option>
@@ -115,13 +129,23 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
           </select>
         )}
         <button className="icon-btn" aria-label="New chat" title="New chat" onClick={() => pick(null)}><Icon name="plus" /></button>
-        <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>
+        {close && <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>}
       </header>
       <div className="chat-log" role="log" aria-label="Messages">
         {!id && (
           <div className="chat-empty muted">
+            {variant === "page" && <h2 className="chat-hello">Ask Polaris</h2>}
             <p>Ask about the project, or describe a change. Polaris reads the code and the wiki, asks what's unclear and proposes tickets for you to file.</p>
-            <p>It knows the page you're on; type <kbd>@</kbd> to mention a ticket.</p>
+            <p>{variant === "panel" && "It knows the page you're on; "}Type <kbd>@</kbd> to mention a ticket; attach a skill to say how to go about it.</p>
+            {variant === "page" && (
+              <div className="chat-examples" aria-label="Examples">
+                {EXAMPLES.map((x) => (
+                  <button key={x.title} className="chat-example" onClick={() => setDraft(x.prompt)}>
+                    <strong>{x.title}</strong><span className="muted">{x.text}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {render(events, proposals, (p) => <ProposalCard key={p.id} p={p} go={go} changed={() => (void load(), filed())} />)}
@@ -130,7 +154,8 @@ export function Chat({ context, label, project, tickets, go, filed, close }: {
       </div>
       <Alert error={error} />
       <Composer draft={draft} setDraft={setDraft} send={send} tickets={tickets} busy={busy} stop={stop}
-        chip={label && useContext ? <span className="chip">On {label}<button aria-label={`Leave out ${label}`} onClick={() => setUseContext(false)}><Icon name="x" size={12} /></button></span> : null} />
+        chip={label && useContext ? <span className="chip">On {label}<button aria-label={`Leave out ${label}`} onClick={() => setUseContext(false)}><Icon name="x" size={12} /></button></span> : null}
+        tools={(id ? chatProject : projectId) ? <SkillPicker projectId={(id ? chatProject : projectId)!} selected={skills} setSelected={setSkills} /> : null} />
     </section>
   );
 }
@@ -151,7 +176,13 @@ function render(events: Ev[], proposals: Proposal[], card: (p: Proposal) => Reac
     }
     if (e.type === "tool_call" || e.type === "tool_result") continue;
     flush();
-    if (e.type === "user_message") out.push(<div key={e.seq} className="chat-user">{e.payload.text}</div>);
+    if (e.type === "user_message")
+      out.push(
+        <div key={e.seq} className="chat-user">
+          {e.payload.text}
+          {e.payload.skills?.length > 0 && <span className="chat-skills">{e.payload.skills.map((k: SkillRef) => <span key={k.id} className="chip">{k.name}</span>)}</span>}
+        </div>,
+      );
     else if (e.type === "assistant_message") {
       const text = (e.payload.message.content as any[]).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
       if (text) out.push(<div key={e.seq} className="chat-model"><Markdown text={text} /></div>);
@@ -167,8 +198,8 @@ function render(events: Ev[], proposals: Proposal[], card: (p: Proposal) => Reac
 }
 
 // Enter sends, Shift+Enter is a new line; "@" plus a key or title picks a ticket (arrows, Enter or Tab).
-function Composer({ draft, setDraft, send, tickets, busy, stop, chip }: {
-  draft: string; setDraft: (s: string) => void; send: () => void; tickets: Ticket[]; busy: boolean; stop: () => void; chip: ReactNode;
+function Composer({ draft, setDraft, send, tickets, busy, stop, chip, tools }: {
+  draft: string; setDraft: (s: string) => void; send: () => void; tickets: Ticket[]; busy: boolean; stop: () => void; chip: ReactNode; tools: ReactNode;
 }) {
   const box = useRef<HTMLTextAreaElement>(null);
   const [caret, setCaret] = useState(0);
@@ -217,10 +248,49 @@ function Composer({ draft, setDraft, send, tickets, busy, stop, chip }: {
       {chip}
       <textarea ref={box} autoFocus rows={3} aria-label="Message" placeholder="Ask or describe a change…  @ to mention a ticket" value={draft}
         onChange={(e) => (setDraft(e.target.value), setCaret(e.target.selectionStart))} onSelect={(e) => setCaret(e.currentTarget.selectionStart)} onKeyDown={key} />
-      <div className="row end">
+      <div className="row">
+        {tools}
+        <span className="grow" />
         {busy ? <button className="btn" onClick={stop}>Stop</button> : <button className="btn primary" disabled={!draft.trim()} onClick={send}>Send</button>}
       </div>
     </div>
+  );
+}
+
+// The composer's Skills menu: the project's repo skills and the workspace's, attached to the next message (shown as chips);
+// Create skill makes a workspace skill and attaches it.
+type SkillOption = SkillRef & { description: string; source: "repo" | "workspace" };
+function SkillPicker({ projectId, selected, setSelected }: { projectId: string; selected: SkillRef[]; setSelected: (s: SkillRef[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [options, setOptions] = useState<SkillOption[] | string | null>(null); // string: an error
+  const load = () => api<SkillOption[]>(`/api/projects/${projectId}/skills`).then(setOptions, (e) => setOptions(e.message));
+  useEffect(() => void (open && load()), [open, projectId]);
+  const on = (k: SkillRef) => selected.some((x) => x.id === k.id);
+  const toggle = (k: SkillRef) => setSelected(on(k) ? selected.filter((x) => x.id !== k.id) : [...selected, { id: k.id, name: k.name }].slice(0, 5));
+  return (
+    <>
+      <span className="menu-anchor">
+        <button className="btn skills-btn" aria-expanded={open} onClick={() => setOpen(!open)}>Skills{selected.length > 0 && ` · ${selected.length}`}</button>
+        {open && (
+          <Popover close={() => setOpen(false)}>
+            {typeof options === "string" && <p className="error item">{options}</p>}
+            {Array.isArray(options) && !options.length && <p className="muted item">No skills yet for this project.</p>}
+            {Array.isArray(options) && options.map((k) => (
+              <label key={k.id} className="check item skill-option" title={k.description}>
+                <input type="checkbox" checked={on(k)} onChange={() => toggle(k)} />
+                <span className="grow"><span>{k.name}</span>{k.source === "repo" && <span className="badge">repo</span>}<br /><span className="muted">{k.description}</span></span>
+              </label>
+            ))}
+            <button className="item" onClick={() => (setOpen(false), setCreating(true))}><Icon name="plus" size={13} /> Create skill</button>
+          </Popover>
+        )}
+      </span>
+      {selected.map((k) => (
+        <span key={k.id} className="chip">{k.name}<button aria-label={`Remove skill ${k.name}`} onClick={() => toggle(k)}><Icon name="x" size={12} /></button></span>
+      ))}
+      {creating && <SkillDialog skill={null} close={() => setCreating(false)} saved={(k) => (setCreating(false), setSelected([...selected, { id: `ws:${k.id}`, name: k.name }].slice(0, 5)))} />}
+    </>
   );
 }
 

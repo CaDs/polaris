@@ -16,6 +16,7 @@ import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.
 import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 import { chatRoutes, proposalIn } from "./chat.ts";
+import { skillRoutes } from "./skills.ts";
 
 migrate();
 backfillUsage();
@@ -62,6 +63,7 @@ app.use("/api/*", async (c, next) => {
 
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects (each a repository), milestones, cycles, views, members
+app.route("/api", skillRoutes); // M17: workspace skills, and each project's skills for the chat composer
 app.route("/api/chats", chatRoutes); // M13: chat (filing a proposal is below, next to POST /api/tickets)
 
 // Ticket + Linear-style key (its project's key + number) + summary of its runs.

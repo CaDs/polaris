@@ -179,6 +179,16 @@ never changed mid-conversation either (cache prefix, model behaviour).
   M14: an optional `phases:` frontmatter line (`worker`, `planner`, `reviewer`, `chat`; comma-separated or `[a, b]`)
   offers the skill only to those agents; without it the worker and the planner see it, as before. The reviewer gets its
   list at the top of its task, the chat in its first turn's message. The wiki maintainer gets none.
+  M17 (migration 004, `server/skills.ts`): **workspace skills** (`skills {name (unique per workspace, case-insensitive),
+  description, body, phases}`) are made in Polaris (Settings → Skills, or **Create skill** in the chat composer;
+  `GET/POST /api/skills`, `PATCH/DELETE /api/skills/:id`). Every worker, reviewer, planner and chat turn writes them to
+  `.polaris/workspace-skills/<name>-<id8>.md` in its checkout (git-excluded like the other `.polaris` scratch dirs; a read-only
+  path for the worker when there are any), and `listSkills` reads that directory after `.polaris/skills/`, so agents see both
+  kinds the same way. Frozen eval case runs get none (a score must not move when someone edits a skill). In chat a member
+  can **attach** up to 5 skills to a message (`skills: ["repo:<file>.md" | "ws:<id>"]`, from
+  `GET /api/projects/:id/skills`: the repo's skills on its base branch, read with git, and the workspace's): their full text
+  goes ahead of the message under `# Skills the user attached`, and the message shows them as chips. Unknown ids, and repo
+  ids that are not a plain `.md` file name, are left out.
 - **Provider retries.** HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to 4 times with
   exponential backoff (1 s base, ×2, ≤ 30 s) plus jitter, or the `retry-after` header when present. Each retry is an
   `error` event with `retrying: true`. Never after output started streaming.
@@ -559,9 +569,18 @@ until the member files it. Migration 021, server in `server/chat.ts`, prompt `se
   `POST /proposals/:id/dismiss`, and `GET /:id/stream`: SSE that replays the stored events, then live ones (de-duped by
   seq), plus `event: delta {text}` with the reply's text as it streams (never stored); stays open across turns.
 - **Panel** (`web/Chat.tsx`): a third grid column (full screen under 720 px); a conversation picker; user messages,
-  replies (the wiki's Markdown subset), a "Looked at …" line for each run of read-only calls, proposal cards, errors;
+  replies, a "Looked at …" line for each run of read-only calls, proposal cards, errors;
   the streamed reply while a turn runs, Stop. The composer sends on Enter (Shift+Enter: new line); `@` opens a ticket
-  picker (the palette's matching). The open state and the current chat are remembered in localStorage.
+  picker (the palette's matching); **Skills** attaches skills (M17). The open state and the current chat are remembered
+  in localStorage.
+- **Agent page** (`/agent`, sidebar **Agent**): the same chats at full width: the conversation in a 780 px column, the
+  composer at the bottom, and on a new chat three starting points (Plan a feature, Explain the code, Groom the backlog)
+  that fill the composer. It has no page context (pick the project in the header); the panel stays closed there.
+- **Markdown** (replies, streamed text, wiki pages; `Markdown` in `web/Wiki.tsx`): `react-markdown` + GFM (tables, task
+  lists, strikethrough) with no raw HTML, after `normalizeMarkdown` (`web/markdown.ts`) evens out model dialects: `•`/`–`
+  bullets, `1)` numbering, `##Heading`, a list, table or quote glued to a paragraph, CRLF, runs of blank lines, and an
+  unclosed code fence (while streaming) is closed. Code blocks are left as written. Links: an href only for a parsed
+  http(s) URL (new tab); internal `.md` links open the wiki page; images show their alt text (no remote fetches).
 - **Demo** (`POLARIS_PROVIDER=fake`): a chat turn reads README.md, proposes a ticket titled after the message's last
   paragraph, then replies; `NO-PROPOSAL` only replies, `REPLACE-P<n>` replaces P<n>.
 

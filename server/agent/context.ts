@@ -4,25 +4,32 @@ import { truncate, type Exec } from "./tools.ts";
 import type { Msg } from "./types.ts";
 
 // Skills: markdown files with `name`/`description` frontmatter in <root>/.polaris/skills/ (committed by humans, with
-// optional scripts next to them). Only name, description and path are offered, in the first user message; the model
-// reads the full file with read_file when it is relevant. Sorted by file name so the message is stable.
+// optional scripts next to them) and <root>/.polaris/workspace-skills/ (made in Polaris, written there for each run by
+// server/skills.ts). Only name, description and path are offered, in the first user message; the model reads the full
+// file with read_file when it is relevant. Sorted by directory, then file name, so the message is stable.
 // `phases: worker, reviewer` (or `[worker, reviewer]`) offers a skill only to those agents; without it, the worker and
 // the planner see it (as before phases existed).
 export type Skill = { name: string; description: string; path: string };
 export const PHASES = ["worker", "planner", "reviewer", "chat"] as const;
 export type Phase = (typeof PHASES)[number];
+export const SKILL_DIRS = [".polaris/skills", ".polaris/workspace-skills"];
 
-export function listSkills(root: string, phase: Phase): Skill[] {
-  const dir = join(root, ".polaris/skills");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().flatMap((f) => {
-    const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(join(dir, f), "utf8"))?.[1] ?? "";
-    const get = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(fm)?.[1].trim().replace(/^(["'])(.*)\1$/, "$2") ?? "";
-    const phases = get("phases").replace(/^\[|\]$/g, "").split(",").map((p) => p.trim().replace(/^(["'])(.*)\1$/, "$2").toLowerCase()).filter(Boolean);
-    if (!(phases.length ? phases : ["worker", "planner"]).includes(phase)) return [];
-    return [{ name: get("name") || f.slice(0, -3), description: get("description"), path: `.polaris/skills/${f}` }];
+// Every skill in root, with the agents it is for.
+export function allSkills(root: string): (Skill & { phases: string[] })[] {
+  return SKILL_DIRS.flatMap((rel) => {
+    const dir = join(root, rel);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((f) => f.endsWith(".md")).sort().map((f) => {
+      const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(join(dir, f), "utf8"))?.[1] ?? "";
+      const get = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(fm)?.[1].trim().replace(/^(["'])(.*)\1$/, "$2") ?? "";
+      const phases = get("phases").replace(/^\[|\]$/g, "").split(",").map((p) => p.trim().replace(/^(["'])(.*)\1$/, "$2").toLowerCase()).filter(Boolean);
+      return { name: get("name") || f.slice(0, -3), description: get("description"), path: `${rel}/${f}`, phases: phases.length ? phases : ["worker", "planner"] };
+    });
   });
 }
+
+export const listSkills = (root: string, phase: Phase): Skill[] =>
+  allSkills(root).filter((s) => s.phases.includes(phase)).map(({ name, description, path }) => ({ name, description, path }));
 
 export const skillsText = (skills: Skill[]) =>
   skills.length

@@ -229,7 +229,7 @@ function Account({ email }: { email: string }) {
 
 // Workspace-wide pages; Settings sits apart at the bottom. The route stays /improvement.
 const PAGES: Record<string, string> = {
-  "my-issues": "My issues", reviews: "Reviews", issues: "All issues", projects: "Projects", views: "Views", usage: "Usage", improvement: "Learning", settings: "Settings",
+  "my-issues": "My issues", reviews: "Reviews", agent: "Agent", issues: "All issues", projects: "Projects", views: "Views", usage: "Usage", improvement: "Learning", settings: "Settings",
 };
 // A project's pages: /p/KEY (the board), /p/KEY/cycles[/id|current], /p/KEY/wiki, /p/KEY/overview.
 const PROJECT_PAGES: [string, string][] = [["", "Board"], ["cycles", "Cycles"], ["wiki", "Wiki"], ["overview", "Overview"]];
@@ -302,7 +302,7 @@ function Dashboard({ email }: { email: string }) {
   );
 
   return (
-    <div className={`shell${chat ? " chat-open" : ""}`}>
+    <div className={`shell${chat && section !== "agent" ? " chat-open" : ""}`}>
       <aside>
         <header className="ws">
           <Mark />
@@ -312,6 +312,7 @@ function Dashboard({ email }: { email: string }) {
         <nav aria-label="Main">
           {link("/my-issues", "My issues", section === "my-issues")}
           {link("/reviews", <>Reviews{reviews.length > 0 && <span className="count">{reviews.length}</span>}</>, section === "reviews")}
+          {link("/agent", "Agent", section === "agent")}
           <div className="nav-group">Workspace</div>
           {(["projects", "issues", "views"] as const).map((p) => link(`/${p}`, PAGES[p], section === p))}
           <details className="nav-more" open={section === "usage" || section === "improvement" || undefined}>
@@ -342,7 +343,7 @@ function Dashboard({ email }: { email: string }) {
           <h1>{title}</h1>
           <span className="grow" />
           <Bell open={open} />
-          {!chat && <button className="btn" onClick={() => setChat(true)} title="⌘J">Ask Polaris</button>}
+          {!chat && section !== "agent" && <button className="btn" onClick={() => setChat(true)} title="⌘J">Ask Polaris</button>}
           <button className="btn primary" onClick={() => setCreating(true)} disabled={!tracker?.projects.length} title={tracker?.projects.length ? undefined : "Create a project first"}>New ticket</button>
         </div>
         <main>
@@ -352,6 +353,9 @@ function Dashboard({ email }: { email: string }) {
             <UsagePage />
           ) : section === "improvement" ? (
             <Improvement open={open} changed={reload} />
+          ) : section === "agent" ? (
+            // The same conversations as the ⌘J panel, with the room to read them.
+            <Chat variant="page" context={{}} label={null} project={project ?? tracker?.projects[0]} tickets={tickets ?? []} go={go} filed={reload} />
           ) : section === "projects" ? (
             <Projects go={go} />
           ) : section === "views" ? (
@@ -384,7 +388,7 @@ function Dashboard({ email }: { email: string }) {
           ) : null}
         </main>
       </div>
-      {chat && <Chat context={chatContext} label={chatLabel} project={project ?? tracker?.projects[0]} tickets={tickets ?? []} go={go} filed={reload} close={() => setChat(false)} />}
+      {chat && section !== "agent" && <Chat context={chatContext} label={chatLabel} project={project ?? tracker?.projects[0]} tickets={tickets ?? []} go={go} filed={reload} close={() => setChat(false)} />}
       {creating && !!tracker?.projects.length && <NewTicket tickets={tickets ?? []} defaults={{ ...defaults, project_id: defaults.project_id ?? tracker.projects[0].id }} close={() => setCreating(false)} created={() => (reload(), setCreating(false))} />}
       {palette && <Palette tickets={tickets ?? []} go={go} create={() => setCreating(true)} close={() => setPalette(false)} />}
     </div>
