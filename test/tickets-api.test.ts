@@ -170,7 +170,9 @@ test("startup recovery: an interrupted attempt is retried with the reason fed ba
   db.prepare("INSERT INTO runs (id, ticket_id, model, status) VALUES (?, ?, 'demo', 'passed')").run(`done-${stuck.id}`, stuck.id);
   const epic = (await fileTicket(alice, { title: "planning", kind: "epic" })).body;
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(epic.id);
-  db.prepare("INSERT INTO runs (id, ticket_id, model, status, role) VALUES (?, ?, 'demo', 'running', 'planner')").run(`round-${epic.id}`, epic.id);
+  // A planner round is re-run once after a restart (test/resume.test.ts); one that was already a re-run fails its epic.
+  db.prepare("INSERT INTO runs (id, ticket_id, model, status, role) VALUES (?, ?, 'demo', 'failed', 'planner')").run(`round0-${epic.id}`, epic.id);
+  db.prepare("INSERT INTO runs (id, ticket_id, model, status, role, resumed_from) VALUES (?, ?, 'demo', 'running', 'planner', ?)").run(`round-${epic.id}`, epic.id, `round0-${epic.id}`);
 
   assert.equal(recoverOrphans(), 3);
   const failedEpic = (await call("GET", `/api/tickets/${epic.id}`, alice)).body;

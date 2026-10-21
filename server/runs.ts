@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
 import { capText, checkUsageCaps, metered, monthSpend, normalized, recordUsage, treeSpend, usageCaps, usagePurpose, withUsage } from "./usage.ts";
@@ -10,9 +10,9 @@ import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
-import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
+import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type EventPayloads, type Msg, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun, failureClass } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
@@ -217,9 +217,12 @@ function feedback(t: TicketRow, runId: string, attempt: number) {
 
 // The prompt version active at queue time is the run's (a promotion applies to runs queued after it). Planner runs use
 // planner.md (not versioned) and attempt = round number. A triage result is the run's first event (logged before it can start).
-function queue(t: TicketRow, model: string, attempt: number, providerId: string | null, planner = false, triaged?: EventPayloads["triage"]) {
+// resumedFrom: a run interrupted by a restart that this one continues (same attempt; a worker keeps its prompt version).
+function queue(t: TicketRow, model: string, attempt: number, providerId: string | null, planner = false, triaged?: EventPayloads["triage"], resumedFrom?: string) {
+  const prev = resumedFrom ? (db.prepare("SELECT prompt_version FROM runs WHERE id = ?").get(resumedFrom) as { prompt_version: number | null }) : undefined;
   const runId = createRun({
-    ticketId: t.id, model, attempt, providerId, role: planner ? "planner" : "worker", promptVersion: planner ? undefined : activePrompt(t.workspace_id).version,
+    ticketId: t.id, model, attempt, providerId, role: planner ? "planner" : "worker", resumedFrom,
+    promptVersion: planner ? undefined : (prev?.prompt_version ?? activePrompt(t.workspace_id).version),
   });
   if (triaged) eventLog(runId)({ type: "triage", payload: triaged });
   setTicket(t.id, "running");
@@ -450,7 +453,7 @@ export function pump() {
 
 type RunRow = {
   ticket_id: string; role: string; model: string; attempt: number; provider_id: string | null; prompt_version: number | null; lessons_version: number | null;
-  eval_run_id: string | null; eval_case_id: string | null; wiki_op: string | null; base_sha: string | null;
+  eval_run_id: string | null; eval_case_id: string | null; wiki_op: string | null; base_sha: string | null; resumed_from: string | null;
 };
 
 // Reflection on the series a run ended, with that run's provider and model, in a fresh no-tools conversation (improve.ts).
@@ -547,7 +550,9 @@ async function execute(runId: string) {
   let branch: string | undefined;
   let reply = ""; // the agent's final text (handoff)
   let gateOutput = "";
-  const worktree = join(dataDir(), "worktrees", runId);
+  // Continuing an attempt a restart interrupted: its worktree, branch and conversation (falls back to fresh when gone).
+  const resumed = run.resumed_from && !run.eval_run_id ? resumeState(run.resumed_from) : undefined;
+  const worktree = resumed?.worktree ?? join(dataDir(), "worktrees", runId);
   return pipeline(runId, run.model, async (res, { signal, log, cap }) => {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "the ticket's project was deleted");
     // The ticket's own test_command (when set) overrides the project's; eval case runs use the case's frozen command.
@@ -556,12 +561,16 @@ async function execute(runId: string) {
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     let base_sha: string;
     if (ev) await addDetached(cfg.repo_path, (base_sha = ev.base_sha), worktree);
-    else {
+    else if (resumed) {
+      [branch, base_sha] = [resumed.branch, resumed.base_sha];
+      if (!(await adoptWorktree(cfg.repo_path, worktree))) throw new AgentError("UnexpectedEnvironment", "the interrupted attempt's worktree is no longer in the repository");
+    } else {
       branch = `polaris/${t.key}-${run.attempt}-${runId.slice(0, 8)}`;
       base_sha = await addWorktree(cfg.repo_path, s!.base_branch, worktree, branch);
     }
     db.prepare("UPDATE runs SET worktree = ?, branch = ?, base_sha = ? WHERE id = ?").run(worktree, branch ?? null, (diffBase = base_sha), runId);
     log({ type: "setup", payload: { step: "worktree", branch: branch ?? "", base_sha } });
+    if (resumed) log({ type: "setup", payload: { step: "resumed", from: run.resumed_from!, turns: resumed.turns } });
     // M10: the wiki's HEAD as a read-only snapshot (a broken wiki must not stop the work: fail-open). Not for frozen eval cases.
     let wiki = "";
     let wikiTree: Awaited<ReturnType<typeof materialize>> | undefined;
@@ -598,7 +607,7 @@ async function execute(runId: string) {
     const lessons = run.eval_run_id ? lessonsAt(t.workspace_id, run.lessons_version) : currentLessons(t.workspace_id);
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
-    const task = taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
+    const task = resumed?.task ?? taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
       sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
       budget: { turns: limits.max_turns, minutes: limits.max_minutes }, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
@@ -607,8 +616,12 @@ async function execute(runId: string) {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
       onEvent: relay(log), onStream: liveStream(runId), // this pipeline writes run_metrics and run_finished
     };
-    const workerBudget = { maxTurns: limits.max_turns, maxTokens: limits.max_tokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
-    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
+    // A resumed attempt gets what the interrupted one left, with the fix rounds' floors.
+    const workerBudget = resumed
+      ? { maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - resumed.turns), maxTokens: Math.max(FIX_ROUND_MIN_TOKENS, limits.max_tokens - resumed.tokens),
+          deadline: attemptStart + Math.max(10 * 60_000, limits.max_minutes * 60_000 - resumed.elapsedMs), minutes: limits.max_minutes }
+      : { maxTurns: limits.max_turns, maxTokens: limits.max_tokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
+    let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, ...(resumed ? { resume: { messages: resumed.messages } } : {}), tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
     ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
     if (res.status !== "passed") {
@@ -1167,18 +1180,66 @@ export function startRun(ticketId: string, opts: StartOptions) {
 // attempt is retried like a gate failure while attempts remain, else its series ends failed (a child hands off, a
 // planner round fails its epic). Queued runs stay queued and start now. A task left "running" with no active run (the
 // process died between run_finished and the ticket's transition) gets its latest run's ticket status.
+// --- Resuming an attempt interrupted by a restart (HANDOVER-TASKS 1.3) ---
+
+export const RESUME_NOTE = "[harness] The harness restarted while you were working. The worktree is exactly as you left it (see git status); a command that was still running was stopped. Continue the task.";
+// The conversation a worker had, rebuilt from its events: the task, then each assistant turn with its tool results. A last
+// turn whose tool calls have no results (the restart cut it) is dropped. The note ends the conversation as the user's turn.
+// Undefined when it can't be replayed exactly: the harness added text the events don't hold (a stuck nudge, a compaction,
+// a fix round's message) or the gate had started; such an attempt starts fresh instead.
+export function resumeMessages(events: { type: string; payload: any }[]): { task: string; messages: Msg[]; turns: number } | undefined {
+  if (events.some((e) => ["stuck", "compaction", "gate_fix", "test_result", "model_review_started"].includes(e.type))) return;
+  const task = events.find((e) => e.type === "run_started")?.payload.task as string | undefined;
+  if (!task) return;
+  const messages: Msg[] = [{ role: "user", content: [{ type: "text", text: task }] }];
+  const results = new Map<string, Block>();
+  for (const e of events) if (e.type === "tool_result") results.set(e.payload.tool_use_id, e.payload);
+  let turns = 0;
+  for (const e of events) {
+    if (e.type !== "assistant_message") continue;
+    const msg = e.payload.message as Msg;
+    const calls = msg.content.filter((b) => b.type === "tool_use");
+    if (calls.some((c) => !results.has(c.id))) break; // cut by the restart: never sent its results
+    messages.push(msg);
+    turns++;
+    if (!calls.length) continue;
+    messages.push({ role: "user", content: calls.map((c) => {
+      const r = results.get(c.id) as { content: string; is_error?: boolean };
+      return { type: "tool_result", tool_use_id: c.id, content: r.content, is_error: r.is_error, ...(c.namespace ? { namespace: c.namespace } : {}) };
+    }) });
+  }
+  if (!turns) return;
+  const last = messages.at(-1)!;
+  if (last.role === "user") last.content.push({ type: "text", text: RESUME_NOTE });
+  else messages.push({ role: "user", content: [{ type: "text", text: RESUME_NOTE }] });
+  return { task, messages, turns };
+}
+// The interrupted run's worktree, branch and conversation, and how much of the attempt's budget it used.
+function resumeState(runId: string) {
+  const r = db.prepare("SELECT worktree, branch, base_sha, started_at, tokens_in, tokens_out FROM runs WHERE id = ?").get(runId) as
+    { worktree: string | null; branch: string | null; base_sha: string | null; started_at: number | null; tokens_in: number; tokens_out: number } | undefined;
+  const events = runEvents(runId);
+  const conv = resumeMessages(events);
+  if (!r?.worktree || !r.branch || !r.base_sha || !conv || !existsSync(r.worktree)) return;
+  const elapsedMs = (events.at(-1)?.created_at ?? Date.now()) - (r.started_at ?? Date.now());
+  return { ...conv, worktree: r.worktree, branch: r.branch, base_sha: r.base_sha, elapsedMs, tokens: r.tokens_in + r.tokens_out };
+}
+const runEvents = (runId: string) =>
+  (db.prepare("SELECT type, payload, created_at FROM events WHERE run_id = ? ORDER BY seq").all(runId) as { type: string; payload: string; created_at: number }[]).map((e) => ({ ...e, payload: JSON.parse(e.payload) }));
+
 export function recoverOrphans() {
   const stuck = db.prepare(`SELECT t.id, (SELECT status FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1) AS last
     FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
     AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND ${OWN_RUNS})`).all() as { id: string; last: RunStatus | null }[];
   for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
-  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.project_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
+  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, r.resumed_from, t.project_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {
     id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; attempt: number; model: string; provider_id: string | null;
-    project_id: string; parent_id: string | null; eval_repo: string | null;
+    resumed_from: string | null; project_id: string; parent_id: string | null; eval_repo: string | null;
   }[];
   const dead = orphans.filter((o) => !controllers.has(o.id));
   const retries: typeof dead = [];
+  const resumes: typeof dead = []; // continue in place (same attempt, worktree and conversation), once per attempt
   for (const o of dead) {
     const log = eventLog(o.id);
     const message = "interrupted by server restart";
@@ -1198,8 +1259,10 @@ export function recoverOrphans() {
       continue;
     }
     const s = (o.branch || o.role === "planner") && projectSettings(o.project_id); // CLI runs have neither: their worktree is the user's dir
-    if (s) background(removeWorktree(s.repo_path, o.worktree, o.branch, dataDir()), "orphan cleanup failed");
-    if (o.role === "planner") failEpic(o.ticket_id, `A planner round failed: ${message}`);
+    const resume = !o.resumed_from && (o.role === "planner" || (s && o.branch && o.worktree && existsSync(o.worktree) && resumeMessages(runEvents(o.id))));
+    if (s && !(resume && o.role === "worker")) background(removeWorktree(s.repo_path, o.worktree, o.branch, dataDir()), "orphan cleanup failed");
+    if (resume) resumes.push(o); // the ticket stays running until it is queued; a planner round is re-run (it is stateless)
+    else if (o.role === "planner") failEpic(o.ticket_id, `A planner round failed: ${message}`);
     else if (o.branch && o.attempt < MAX_ATTEMPTS) retries.push(o); // the ticket stays running until it is queued
     else {
       if (o.parent_id) db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(handoffText("", message), o.ticket_id);
@@ -1209,6 +1272,7 @@ export function recoverOrphans() {
   // Sweep first, or it could remove a fresh run's container.
   background(removeStaleContainers().then(() => {
     for (const o of retries) queue(ticketRow(o.ticket_id)!, o.model, o.attempt + 1, o.provider_id);
+    for (const o of resumes) queue(ticketRow(o.ticket_id)!, o.model, o.attempt, o.provider_id, o.role === "planner", undefined, o.id);
     pump();
   }), "recovery failed");
   return dead.length;

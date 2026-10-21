@@ -370,9 +370,17 @@ After a worker's loop ends, the gate runs the ticket's test command (its own `te
 checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back: the
 previous run's `run_finished` reason, its failing gate output, and the last review findings when the review failed it).
 
-- **Restart.** At startup a run left `running` fails with `interrupted by server restart` (worktree and container
-  removed); a ticket attempt is then retried like a gate failure while attempts remain, else the ticket fails (a child
-  hands off, a planner round fails its epic). A task left `running` with no active run gets its latest run's outcome.
+- **Restart.** At startup a run left `running` fails with `interrupted by server restart` (its container removed). A
+  worker attempt that can be replayed exactly is **resumed** in place (once): a new run with the same attempt number and
+  `resumed_from` keeps the worktree and branch (its git dir found from the repository's side, `adoptWorktree`), rebuilds
+  the conversation from the events (`resumeMessages`: task, each turn with its tool results, a turn the restart cut is
+  dropped, a `[harness]` note says the harness restarted), keeps the prompt version, and gets what the attempt had left of
+  its turns, minutes and tokens (with the fix rounds' floors); a `setup {step: "resumed"}` event marks it. Not
+  replayable (the harness had added text the events don't hold: a stuck nudge, a compaction, a fix round, or the gate had
+  started), already a resumed run, or its worktree gone: the worktree is removed and the attempt is retried fresh like a
+  gate failure while attempts remain, else the ticket fails (a child hands off). An interrupted planner round is re-run
+  once (a round is stateless), then fails its epic. A task left `running` with no active run gets its latest run's
+  outcome.
 - **Manual status.** `PATCH /api/tickets/:id {status}` (the Status select) moves only between `todo`, `done` and
   `failed`, or `review` back to `todo` (its branch is dropped), never while a run is active; anything else is a 409
   `{error: "invalid_transition", from, to}`. It goes through the same transition as the pipeline: a child marked done

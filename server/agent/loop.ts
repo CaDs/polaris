@@ -10,7 +10,9 @@ export type RunOptions = {
   model: string;
   system: string;
   task: string; // the whole first user message: per-run context (environment, skills, earlier failures) ahead of the ticket
-  resume?: { messages: Msg[]; message: string }; // continue that conversation with a new user message (the worker, after review findings); task is still the original (compaction)
+  // Continue that conversation (task is still the original, for compaction): with a new user message (the worker, after
+  // review findings), or without one when it already ends with the user's turn (an attempt resumed after a restart).
+  resume?: { messages: Msg[]; message?: string };
   cacheKey?: string; // passed to providers that route cache hits by key (one per ticket)
   compactAt?: number; // context tokens (input + cache read + cache write of the latest request) above which the conversation is compacted
   tools: Tool[];
@@ -66,7 +68,7 @@ export const addMetrics = (a: RunMetrics, b: RunMetrics): RunMetrics => ({
 // shorten it: it appends a summary request, then starts a NEW conversation (fresh array) seeded with task + summary.
 // Tools and system prompt never change either.
 export async function runAgent(o: RunOptions): Promise<RunResult> {
-  let messages: Msg[] = o.resume ? [...o.resume.messages, user(o.resume.message)] : [user(o.task)];
+  let messages: Msg[] = o.resume ? [...o.resume.messages, ...(o.resume.message ? [user(o.resume.message)] : [])] : [user(o.task)];
   const usage = noUsage();
   const ctx = { root: o.root, exec: o.exec ?? hostExec, signal: o.signal, protectedPaths: o.protectedPaths };
   let reads = new Map<string, { out: string; turn: number }>(); // read_file dedupe; belongs to the current conversation (see compact)
@@ -136,7 +138,7 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
     writeScratch(o.root, path, `\n## Summary written at compaction\n\n${summary}\n`, true);
     histories.push(path);
     const state = await workState(ctx.exec, o.root, o.signal);
-    messages = [user(compactedTask(o.resume ? `${o.task}\n\n${o.resume.message}` : o.task, summary, histories, state, readPaths(messages)))];
+    messages = [user(compactedTask(o.resume?.message ? `${o.task}\n\n${o.resume.message}` : o.task, summary, histories, state, readPaths(messages)))];
     reads = new Map(); // the earlier outputs are no longer in the conversation
     contextTokens = 0;
     m.compactions++;

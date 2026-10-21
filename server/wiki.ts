@@ -243,6 +243,7 @@ async function snapshotTo(pid: string, dest: string) {
 // (the dir is git-excluded, so git can't see a write there; the sandbox mounts it read-only, the host sandbox does not).
 export async function materialize(pid: string, worktree: string) {
   const dest = join(worktree, ".polaris/wiki");
+  rmSync(dest, { recursive: true, force: true }); // a resumed attempt's worktree has one: what the agent left there must not become "original"
   await snapshotTo(pid, dest);
   return readTree(dest);
 }

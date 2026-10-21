@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -79,6 +79,32 @@ export async function addWorktree(repo: string, baseBranch: string, path: string
   gitDirs.set(path, await git(path, ["rev-parse", "--absolute-git-dir"]));
   await excludeScratch(repo);
   return sha;
+}
+
+// A worktree made before a restart (gitDirs is in memory): its git dir found from the repository's side, never from the
+// worktree's own .git file, which the agent could have rewritten. Returns false when the repo doesn't list it.
+export async function adoptWorktree(repo: string, path: string) {
+  const common = await git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const admin = join(common, "worktrees");
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p; // git records the resolved path (/private/var on macOS for /var)
+    }
+  };
+  const want = real(join(path, ".git"));
+  for (const name of existsSync(admin) ? readdirSync(admin) : []) {
+    let points = "";
+    try {
+      points = readFileSync(join(admin, name, "gitdir"), "utf8").trim();
+    } catch {}
+    if (points && real(points) === want) {
+      gitDirs.set(path, join(admin, name));
+      return true;
+    }
+  }
+  return false;
 }
 
 // Detached checkout of `sha` at `path`, no branch (eval cases: nothing is committed).
