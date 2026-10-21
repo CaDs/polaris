@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 process.env.POLARIS_DATA_DIR = mkdtempSync(join(tmpdir(), "docker-data-"));
 delete process.env.POLARIS_SANDBOX;
 const { openSandbox, removeStaleContainers, SANDBOX_IMAGE } = await import("../server/sandbox.ts");
+const { readOnlyPaths } = await import("../server/agent/tools.ts");
 
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8" }).trim();
 let skip: string | false = false;
@@ -70,6 +71,26 @@ test("container per run: /work mount, read-only protected dirs, in-container kil
     await sb.close();
   }
   assert.equal(docker("ps", "-aq", "--filter", `name=${sb.name}`), "");
+});
+
+test("a read-only path missing at start is made read-only too; add-only mode leaves it writable (POL-29)", { skip, timeout: 600_000 }, async () => {
+  const wt = realpathSync(mkdtempSync(join(tmpdir(), "docker-wt-")));
+  const ro = await openSandbox(randomUUID(), wt, readOnlyPaths(["evals"], "read_only", [".polaris/wiki"]), SANDBOX_IMAGE);
+  try {
+    const r = await ro.exec("echo x > evals/new.txt", { cwd: wt, timeoutMs: 30_000 });
+    assert.match(r.stderr, /Read-only file system/);
+  } finally {
+    await ro.close();
+  }
+  const wt2 = realpathSync(mkdtempSync(join(tmpdir(), "docker-wt-")));
+  mkdirSync(join(wt2, "tests"));
+  const add = await openSandbox(randomUUID(), wt2, readOnlyPaths(["tests"], "add_only"), SANDBOX_IMAGE);
+  try {
+    assert.equal((await add.exec("echo x > tests/new.txt", { cwd: wt2, timeoutMs: 30_000 })).code, 0);
+    assert.equal(readFileSync(join(wt2, "tests/new.txt"), "utf8"), "x\n");
+  } finally {
+    await add.close();
+  }
 });
 
 test("startup sweep removes stale containers of this data dir only", { skip, timeout: 600_000 }, async () => {

@@ -87,3 +87,17 @@ test("scrub removes key shapes, bearer tokens and the given secrets", () => {
   assert.equal(scrub("key mysecretkey rejected", ["mysecretkey"]), "key [redacted] rejected");
   assert.equal(scrub("short keys like abc stay", ["abc"]), "short keys like abc stay"); // too short to scrub safely
 });
+
+// POL-5: provider traffic goes through providerFetch. A bare fetch( in server/ would skip the policy (metadata addresses, redirects,
+// key-safe timeouts), as triage once did. The files listed make requests that are not to a model provider: the OAuth flows, the
+// MCP bridge to this server's own API, the Slack webhook, and egress.ts itself.
+test("no bare fetch( in server/ outside the allowlist", async () => {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const allowed = new Set(["oauth.ts", "mcp.ts", "tracker.ts", "egress.ts"]);
+  const dir = new URL("../server/", import.meta.url).pathname;
+  const files = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() && e.name !== "migrations" ? files(join(d, e.name)) : e.name.endsWith(".ts") ? [join(d, e.name)] : []));
+  const bare = files(dir).filter((f) => !allowed.has(f.slice(f.lastIndexOf("/") + 1)))
+    .filter((f) => readFileSync(f, "utf8").split("\n").some((l) => !l.trim().startsWith("//") && /(^|[^.\w])fetch\(/.test(l)));
+  assert.deepEqual(bare, [], "use providerFetch (server/egress.ts), or add the file to this allowlist with a reason");
+});

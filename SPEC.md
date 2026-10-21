@@ -152,7 +152,7 @@ never changed mid-conversation either (cache prefix, model behaviour).
   prompt (the workspace's active prompt version, v1 = `prompts/worker.md`; static, no per-run or per-repo text) → messages.
   The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node
   and what it has and lacks, `SANDBOX_TOOLS`: no Docker, browser or Playwright, so don't install them; the planner gets
-  the same line for its child tickets), repo, base branch, test command, read-only paths, git read-only, turn and minute budget), the skills list, `# Lessons
+  the same line for its child tickets), repo, base branch, test command, protected paths ("Read-only paths (changes there fail the run)", or in add-only mode "Protected paths (add new files there, e.g. regression tests; changing or deleting existing files fails the run)"; the planner and the gate-fix message say the same), git read-only, turn and minute budget), the skills list, `# Lessons
   from earlier runs` (M6), the wiki index (M10), the epic's handoff request (M7), the latest reviewer note, the previous
   attempt's failure, then `# Task`. The environment block is the one place for those facts; `worker.md` only points at it.
 - **Cache breakpoints** (Anthropic, 3 of the 4 allowed): end of tools, end of system, and a moving one on the last content
@@ -386,6 +386,16 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
 After a worker's loop ends, the gate runs the ticket's test command (its own `test_command`, else the workspace's) and
 checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back: the
 previous run's `run_finished` reason, its failing gate output, and the last review findings when the review failed it).
+A turn, minute or token budget running out and a `stuck:` stop are retried the same way.
+
+- **Escalation** (POL-30). The workspace's `escalation` phase model (`escalation_provider_id`/`escalation_model`, null = off) takes
+  the last attempt (`MAX_ATTEMPTS`) of a worker ticket, and the retry right after a turn/minute/token budget ran out, so a local
+  model gets its tries and the frontier model only the ticket it could not finish. It never replaces a model the user chose: a
+  run is `pinned` (`runs.pinned`) when its model came from the ticket or Retry with…, and later attempts inherit that. Provider,
+  environment and spending-cap failures never escalate, an attempt already on the escalation model retries on it, and planner,
+  reviewer, wiki and eval runs are untouched. The escalated run's first event is `escalated {from, to, reason, attempt}`
+  (before `run_started`); the ticket's transcript shows "Escalated to <model>: <reason>". A failure of the escalated attempt
+  splits as before (`nextAttempt` in `server/runs.ts`).
 
 - **Restart.** At startup a run left `running` fails with `interrupted by server restart` (its container removed). A
   worker attempt that can be replayed exactly is **resumed** in place (once): a new run with the same attempt number and
@@ -441,7 +451,9 @@ M14: the planner, chat and wiki phases have the same kind of setting: `{planner,
 (migration 022, `PUT /api/settings/<phase>-provider`, Settings → Models → Models per phase). Null falls back: the planner
 and chat to the workspace default, the wiki to the model of the run it documents (as before). An epic's round 1 resolves
 explicit choice → ticket → planner setting → workspace default; later rounds keep round 1's model. Worker runs and the
-reviewer are unchanged (ticket/default, `review_*`). Triage keeps `triage_model`; reflection uses the run's model.
+reviewer are unchanged (ticket/default, `review_*`). POL-30 adds two phases the same way: `escalation` (see the test gate) and
+`triage` (`triage_provider_id`, migration 010, beside the older `triage_model` string; a null provider = the workspace default,
+as before); `PUT /api/settings/triage-provider` stores an empty model as "". Reflection uses the run's model.
 
 - **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
@@ -498,13 +510,17 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
 - **Size hint.** Workspace setting `child_size_hint` (default "at most 3 files and about 60 changed lines, finishable in
   20 agent turns"; empty = none) goes into every round's environment: "the worker model reliably finishes tickets of
   this size: …; make every child at most that size". Meant to be calibrated per model from a benchmark.
-- **Triage** (optional). Workspace setting `triage_model` (default "", off). With `auto_split` on, queueing the first
-  run of a top-level task first asks a System One decision model on the workspace's default provider (must be Ollama):
-  `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>", questions: {size: score 0–4, five criteria}}`,
-  60 s timeout (loading the decision model next to the worker's takes ~45 s). `answers.size.score ≥ 3` → the ticket is split as above (a `## Triage` section instead of the previous
-  attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities,
-  confidence | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error →
-  logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.
+- **Triage** (optional). Phase setting `triage_provider_id` + `triage_model` ("" = off; Settings → Models → Models per
+  phase; the provider defaults to the workspace's). With `auto_split` on, queueing the first run of a top-level task first asks
+  the model how large it is, one of two ways: an Ollama model whose `/api/show` `capabilities` include `"decision"` (cached per
+  provider and model; unreadable = assumed) gets System One, `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>",
+  questions: {size: score 0–4, five criteria}}`; any other model, on any provider, gets one request through the provider adapter
+  (no tools) whose system prompt carries the same five criteria and asks for exactly `{"score": 0-4, "reason": "<one sentence>"}`,
+  parsed strictly. Both go through `providerFetch` (egress policy: no redirects, no metadata addresses, capped error bodies) and
+  time out after 60 s (loading a decision model next to the worker's takes ~45 s). Score ≥ 3 → the ticket is split as above (a `## Triage` section instead of the previous
+  attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities, confidence |
+  reason | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error (a malformed
+  reply, a timeout, HTTP) → logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.
 - **Planner prompt.** Size children by the hint; use per-child `test_command`, mapped from the repo's protected tests;
   when a child fails and the environment says failed children are split, expect a `Split:` child instead of creating a
   same-size follow-up; call `complete_epic` only when the epic gate can pass.
@@ -733,12 +749,25 @@ is a 400 in a body and matches nothing in a filter).
 A workspace holds projects; a **project is one git repository** with its own board, cycles, wiki and ticket keys
 (Linear's team). Code: `server/tracker.ts` (routes), `projectSettings()` in `server/runs.ts`.
 
-- **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, image}`. The key
+- **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, protected_mode, image}`. The key
   (2-5 capitals or digits, a capital first, unique in the workspace) prefixes ticket keys: `tickets.number` counts per
   project (`KEY-12`); `ticketKey()` reads the project's key, so renaming a key renames its tickets. Repository fields are
   validated like the old settings (`inspectRepo`: the root of a repo with commits, the base branch exists, empty = its
   current branch; image reference; protected paths relative) on create and whenever given; `null` resets a command to
   `PROJECT_DEFAULTS`.
+- **Repository inspection** (`POST /api/projects/inspect {repo_path, base_branch?}`, `server/inspect.ts`): what the project form
+  shows once a folder is set. A folder that `inspectRepo` would refuse gets its 400 plus a `state` the form can act on:
+  `not_found`, `not_a_repo`, `inside_repo` (with the repository's `root`) or `no_commits`. Otherwise `ok`: the local
+  branches newest first (`polaris/*` run branches left out, the checked-out one marked), `base_branch` (default: the
+  checked-out one; `base_exists` false when it is gone), **protected-path candidates** (directories at depth <= 2 named
+  `test(s)`, `spec(s)`, `__tests__`, `e2e`, `eval(s)`, or holding at least 3 test files, with a file count and the dominant
+  test-file pattern; top-level test files are listed unsuggested) and **suggested setup/test commands** by lockfile
+  (npm, pnpm, yarn, bun, uv, pip, go, cargo; first match wins). All of it is read from git objects of the base branch
+  (`ls-tree`, `cat-file`), never the working tree. `check_paths` makes it also return `missing`, the given protected paths with no
+  file at the branch. The form (`web/Projects.tsx` RepoFields) calls it as the folder is typed, pasted or left, and on every branch or
+  path change; it offers "Use the root", a base-branch select (typing another name stays possible), the candidates as checkboxes (a new
+  project starts with the suggested ones checked and the suggested commands filled in until typed over; a saved project's values are
+  only ever offered a "Use"), the mode radios, and warns about missing paths, no protected paths, no test command and a deleted base branch.
 - **What stays workspace-wide** (`workspace_settings`, `GET/PUT /api/settings`): models (default, reviewer, per phase),
   model review, auto-approve, auto-split + triage, child size hint, the wiki toggle, budgets, compaction, spending caps;
   providers, labels, views, lessons, prompts, evals, failure mining, usage, notifications. A run's settings are
@@ -770,7 +799,16 @@ A workspace holds projects; a **project is one git repository** with its own boa
 
 ## Guardrails
 
-- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
+- A project's protected paths (default `tests/,evals/`) bind agents in one of two modes (`projects.protected_mode`). **add_only**
+  (the default for new projects): agents may add files there (regression tests) but a file that existed at the run's base
+  commit may not be modified, deleted, renamed away or have its type changed: `edit_file`/`apply_patch` refuse it ("existed
+  before this run under a protected path: add new files instead of changing it", from the set of base-commit files built once
+  per run), the gate's `protectedChanges` fails M/D/T entries of `git diff --name-status --no-renames <base>` there (added and
+  untracked files pass, so does editing a file the run added), and the sandbox does not mount them read-only (new files must be
+  creatable); the tools and the gate are the enforcement. **read_only** (what projects had before; the migration keeps
+  existing ones on it): nothing under them changes, enforced by the tools, the gate and a read-only mount (a path missing from
+  the worktree is made an empty directory first, so it is read-only too). Whatever the mode, `.polaris/wiki` (M10), the workspace skills dir and
+  `WIKI_PROTECTED` stay fully read-only, kept apart from the project's paths. Eval cases store the mode they were made with. Any `.git` path is
   never writable by agent tools, file tools open only regular files up to 5 MB (a FIFO or sparse file can't hang or fill the server) and re-check after opening that a swapped parent dir didn't redirect them, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
   file is mounted read-only in the sandbox.
 - Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;

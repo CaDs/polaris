@@ -37,16 +37,16 @@ export async function signUp(page: Page, workspace: string) {
 
 // A project (repository fields of data, key APP) and the workspace settings (the rest) through the API, for specs that do
 // not test those pages; then the board of the project.
-const REPO_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "image"];
+const REPO_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "protected_mode", "image"];
 export async function putSettings(page: Page, data: Record<string, unknown>) {
   const part = (repo: boolean) => Object.fromEntries(Object.entries(data).filter(([k]) => REPO_FIELDS.includes(k) === repo));
-  expect((await page.request.post("/api/projects", { data: { name: "App", key: "APP", ...part(true) } })).ok()).toBe(true);
+  expect((await page.request.post("/api/projects", { data: { name: "App", key: "APP", protected_mode: "read_only", ...part(true) } })).ok()).toBe(true);
   expect((await page.request.put("/api/settings", { data: part(false) })).ok()).toBe(true);
   await page.goto("/p/APP");
 }
 
-// A project through the New project form: name App (key APP), this repository, no setup command, this test command.
-// Ends on its board.
+// A project through the New project form: name App (key APP), this repository, no setup command, this test command, tests and
+// evals protected read-only (the old defaults). Ends on its board.
 export async function saveSettings(page: Page, repo: string, testCommand: string) {
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Projects", exact: true }).click();
   const form = page.locator("details.new-project");
@@ -56,6 +56,11 @@ export async function saveSettings(page: Page, repo: string, testCommand: string
   await form.getByLabel("Repository path").fill(repo);
   await form.getByLabel("Setup command").fill("");
   await form.getByLabel("Test command").fill(testCommand);
+  for (const path of ["tests", "evals"]) {
+    await form.getByLabel("Add a path").fill(path);
+    await form.getByLabel("Add a path").press("Enter");
+  }
+  await form.getByLabel("Agents can't touch these paths at all").check();
   await form.getByRole("button", { name: "Create project" }).click();
   await expect(page).toHaveURL(/\/p\/APP$/);
 }

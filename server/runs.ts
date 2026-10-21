@@ -9,10 +9,10 @@ import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
-import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
+import { parseProtected, readOnlyPaths, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type EventPayloads, type Msg, type RunStatus, type Usage } from "./agent/types.ts";
-import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { adapterFor, CONTEXT_WINDOW, isDecisionModel, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
+import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, protectedFilesAt, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun, failureClass } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_TOOLS, type Sandbox } from "./sandbox.ts";
@@ -21,7 +21,7 @@ import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
 import { writeWorkspaceSkills, WORKSPACE_SKILLS } from "./skills.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
-import { LOCAL_MODEL_TIMEOUT } from "./egress.ts";
+import { cappedText, LOCAL_MODEL_TIMEOUT, providerFetch } from "./egress.ts";
 
 // In-flight runs. Cancel aborts the controller; the run then finishes with status "cancelled".
 const controllers = new Map<string, AbortController>();
@@ -47,7 +47,8 @@ type Settings = {
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 } & Record<`${ModelPhase}_provider_id` | `${ModelPhase}_model`, string | null>;
 // Phases with their own model setting (M14); the reviewer's is review_provider_id/review_model, the worker's the default.
-export const MODEL_PHASES = ["planner", "wiki", "chat"] as const;
+// escalation (POL-30): takes the last attempt of a ticket the default model could not finish; triage: sizes a new ticket.
+export const MODEL_PHASES = ["planner", "wiki", "chat", "escalation", "triage"] as const;
 export type ModelPhase = (typeof MODEL_PHASES)[number];
 const phaseModel = (s: Settings, p: ModelPhase): Choice | undefined =>
   s[`${p}_provider_id`] || s[`${p}_model`] ? { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] } : undefined;
@@ -59,18 +60,19 @@ export const SETTINGS_DEFAULTS = {
 };
 // Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
 const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes, max_tokens: SETTINGS_DEFAULTS.max_tokens };
+// (triage_model is a plain string column: SETTINGS_DEFAULTS, spread after these, keeps its "" default.)
 const MODEL_DEFAULTS = Object.fromEntries(["default", "review", ...MODEL_PHASES].flatMap((p) => [[`${p}_provider_id`, null], [`${p}_model`, null]]));
 // The workspace's settings, defaults included (the row exists only once something was saved).
 export const settingsFor = (ws: string) =>
-  ({ ...SETTINGS_DEFAULTS, ...MODEL_DEFAULTS, workspace_id: ws, ...(db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as object | undefined) }) as Settings;
+  ({ ...MODEL_DEFAULTS, ...SETTINGS_DEFAULTS, workspace_id: ws, ...(db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as object | undefined) }) as Settings;
 // What a run of a project's ticket uses: the workspace's settings plus the project's repository.
 export type ProjectSettings = Settings & {
-  project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
+  project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; protected_mode: string; image: string;
   sandbox_cpus: number; sandbox_memory_gb: number; sandbox_network: string;
 };
 export const resourcesOf = (s: ProjectSettings | undefined) => (s ? { cpus: s.sandbox_cpus, memory_gb: s.sandbox_memory_gb, network: s.sandbox_network } : undefined);
 export function projectSettings(projectId: string) {
-  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, sandbox_cpus, sandbox_memory_gb, sandbox_network FROM projects WHERE id = ?").get(projectId) as
+  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, protected_mode, image, sandbox_cpus, sandbox_memory_gb, sandbox_network FROM projects WHERE id = ?").get(projectId) as
     | { workspace_id: string }
     | undefined;
   return p && ({ ...settingsFor(p.workspace_id), ...p } as ProjectSettings);
@@ -149,12 +151,19 @@ export async function runWindow(stored: ReturnType<typeof providerById>, model: 
   return detected || { window: stored.context_window, source: auto ? "default" : "provider setting" };
 }
 
+// The worker's environment lines for the protected paths (the planner's line is in planner.ts, same wording). `fixed`:
+// read-only whatever the mode.
+export const protectedLines = (paths: string[], mode: string, fixed: string[] = []) => [
+  ...(mode === "add_only" && paths.length ? [`- Protected paths (add new files there, e.g. regression tests; changing or deleting existing files fails the run): ${paths.join(", ")}`] : []),
+  ...((mode === "add_only" ? fixed : [...paths, ...fixed]).length ? [`- Read-only paths (changes there fail the run): ${(mode === "add_only" ? fixed : [...paths, ...fixed]).join(", ")}`] : []),
+];
+
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
 // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
 // lessons, the project wiki's index (M10) and feedback (see below).
 // The environment block is the one place for these facts; worker.md only points at it.
 function taskFor(t: { title: string; spec: string; header?: string }, info: {
-  sandbox: string; repo: string; base: string; test: string; protectedPaths: string[]; budget: { turns: number; minutes: number }; skills: Skill[]; lessons?: string; wiki?: string;
+  sandbox: string; repo: string; base: string; test: string; protectedPaths: string[]; fixedPaths: string[]; protectedMode: string; budget: { turns: number; minutes: number }; skills: Skill[]; lessons?: string; wiki?: string;
 }, feedback: string[]) {
   const parts = [
     [
@@ -162,7 +171,7 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
       `- Sandbox: ${info.sandbox || "unknown"}; ${SANDBOX_TOOLS}: don't install them, skip acceptance criteria that need them and say so in your reply`,
       `- Repository: ${info.repo}, branched from ${info.base}. It is at /work in the sandbox, which is also every shell command's working directory; tool paths are relative to it (absolute /work/... is accepted too)`,
       `- Test command: ${info.test.trim() ? `\`${info.test}\`. The harness runs it after you finish and it must exit 0` : "none (the harness runs no tests)"}`,
-      ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
+      ...protectedLines(info.protectedPaths, info.protectedMode, info.fixedPaths),
       "- git is read-only: status, diff and log work; commit and other writes fail. The harness commits your change after the tests pass",
       `- Budget: ${info.budget.turns} turns and ${info.budget.minutes} minutes for this attempt (fix rounds after failed tests or a review use what is left); a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
@@ -218,13 +227,18 @@ function feedback(t: TicketRow, runId: string, attempt: number) {
 // The prompt version active at queue time is the run's (a promotion applies to runs queued after it). Planner runs use
 // planner.md (not versioned) and attempt = round number. A triage result is the run's first event (logged before it can start).
 // resumedFrom: a run interrupted by a restart that this one continues (same attempt; a worker keeps its prompt version).
-function queue(t: TicketRow, model: string, attempt: number, providerId: string | null, planner = false, triaged?: EventPayloads["triage"], resumedFrom?: string) {
+// pinned: the model is the user's choice (the ticket's own, or Retry with…), so escalation leaves it alone; later attempts
+// inherit it. escalated: this attempt moved to the escalation model (logged before anything else).
+function queue(t: TicketRow, model: string, attempt: number, providerId: string | null, planner = false, triaged?: EventPayloads["triage"], resumedFrom?: string,
+  opts: { pinned?: boolean; escalated?: EventPayloads["escalated"] } = {}) {
   const prev = resumedFrom ? (db.prepare("SELECT prompt_version FROM runs WHERE id = ?").get(resumedFrom) as { prompt_version: number | null }) : undefined;
+  const pinned = opts.pinned ?? (attempt > 1 && !planner && !!(db.prepare(`SELECT pinned FROM runs WHERE ticket_id = ? AND role = 'worker' AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1`).get(t.id) as { pinned: number } | undefined)?.pinned);
   const runId = createRun({
-    ticketId: t.id, model, attempt, providerId, role: planner ? "planner" : "worker", resumedFrom,
+    ticketId: t.id, model, attempt, providerId, role: planner ? "planner" : "worker", resumedFrom, pinned,
     promptVersion: planner ? undefined : (prev?.prompt_version ?? activePrompt(t.workspace_id).version),
   });
   if (triaged) eventLog(runId)({ type: "triage", payload: triaged });
+  if (opts.escalated) eventLog(runId)({ type: "escalated", payload: opts.escalated });
   setTicket(t.id, "running");
   pump();
   return runId;
@@ -254,6 +268,30 @@ function choose(t: TicketRow, s: Settings, pick?: Choice, phase?: Choice): { pro
   const model = level.model ?? (p.kind === "anthropic" ? DEFAULT_MODEL : undefined);
   if (!model) throw new Error(`choose a model for provider "${p.name}"`);
   return { provider_id: p.id, model };
+}
+
+// The model of the attempt after `run`, and the escalation to log when it differs (POL-30). The escalation phase's model takes
+// the last attempt (MAX_ATTEMPTS) and, with attempts left, a retry after a turn/minute budget ran out, but only from a run on
+// the workspace default: a model the user picked (pinned) stays. Provider, environment and spending-cap failures never
+// escalate (a stronger model can't fix an unreachable endpoint), and a run already on the escalation model retries on it.
+export function nextAttempt(t: TicketRow, s: Settings | undefined, run: { model: string; provider_id: string | null; attempt: number; pinned: number }, reason?: string) {
+  const same = { model: run.model, provider_id: run.provider_id, escalated: undefined as EventPayloads["escalated"] | undefined };
+  const phase = s && phaseModel(s, "escalation");
+  if (!phase || run.pinned || reason?.startsWith("SpendingCap:")) return same;
+  const cls = failureClass({ status: "failed", reason });
+  const budget = cls === "budget_turns" || cls === "budget_time";
+  const last = run.attempt + 1 >= MAX_ATTEMPTS;
+  if (cls === "provider_error" || cls === "environment" || !(budget || last)) return same;
+  let to: ReturnType<typeof choose>;
+  try {
+    to = choose(t, s, undefined, phase);
+  } catch {
+    return same; // the escalation provider was deleted: keep the model
+  }
+  if (to.model === run.model && to.provider_id === run.provider_id) return same;
+  const name = (m: string, id: string | null) => (id ? `${providerById(id)?.name ?? "provider"} · ${m}` : m);
+  return { ...to, escalated: { from: name(run.model, run.provider_id), to: name(to.model, to.provider_id), attempt: run.attempt + 1,
+    reason: `${budget ? `attempt ${run.attempt} ran out of ${cls === "budget_time" ? "time" : "turns"}` : `attempt ${run.attempt + 1} of ${MAX_ATTEMPTS} is the last`}${reason ? ` (${reason.split("\n")[0].slice(0, 160)})` : ""}` } };
 }
 
 // Provider + model for a prompt proposal (or a phase's own setting, e.g. chat): the workspace default, else env. Throws a
@@ -288,7 +326,7 @@ export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: Even
   if (now.status === "running") return { error: "ticket already has a running run", status: 409 };
   if (now.escalated_to !== t.escalated_to) return { error: "ticket was just split into an epic", status: 409 };
   if (triage?.split) return split(t, `## Triage\n\nA triage model scored this ticket's size ${triage.score!.toFixed(2)} of 4 (3 = many files or several features), so it was split before any direct attempt.`, triage);
-  if (t.kind !== "epic") return { runId: queue(t, chosen.model, 1, chosen.provider_id, false, triage) };
+  if (t.kind !== "epic") return { runId: queue(t, chosen.model, 1, chosen.provider_id, false, triage, undefined, { pinned: !!(pick?.provider_id || pick?.model || t.provider_id || t.model) }) };
   const round = (db.prepare("SELECT COALESCE(MAX(attempt), 0) AS n FROM runs WHERE ticket_id = ? AND role = 'planner'").get(t.id) as { n: number }).n + 1;
   if (round > MAX_ROUNDS) return { error: `This epic has used all ${MAX_ROUNDS} planner rounds.`, status: 409 };
   return { runId: queue(t, chosen.model, round, chosen.provider_id, true, triaged) };
@@ -298,7 +336,7 @@ export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: Even
 
 const SIZE_SPLIT = 3; // triage score (0 trivial … 4 epic) from which a ticket is split before running
 // A decision model answers in under a second once loaded; loading it next to the worker's model takes ~45 s.
-const TRIAGE_TIMEOUT = 60_000;
+const TRIAGE_TIMEOUT = Number(process.env.POLARIS_TRIAGE_TIMEOUT_MS) || 60_000; // the env knob is for tests
 const TRIAGE_QUESTIONS = {
   size: {
     type: "score", instructions: "How large is this software change for an AI coding agent?",
@@ -306,34 +344,62 @@ const TRIAGE_QUESTIONS = {
   },
 };
 
-// Asks the workspace's System One decision model (served by its default Ollama provider) how large the ticket is. Never
-// throws: an error is part of the result, and the ticket then runs directly.
+// A chat model gets the same five criteria as plain text and must answer exactly {"score": 0-4, "reason": "..."}.
+const TRIAGE_SYSTEM = `${TRIAGE_QUESTIONS.size.instructions} Score the ticket from 0 to 4:
+${TRIAGE_QUESTIONS.size.criteria.map((c, i) => `${i} = ${c}`).join("\n")}
+Reply with exactly {"score": <number from 0 to 4>, "reason": "<one sentence>"} and nothing else.`;
+function triageAnswer(text: string) {
+  let a: any;
+  try {
+    a = JSON.parse(text.trim());
+  } catch {
+    throw new Error(`the reply is not JSON: ${text.trim().slice(0, 120)}`);
+  }
+  if (typeof a?.score !== "number" || !Number.isFinite(a.score) || a.score < 0 || a.score > 4 || typeof a.reason !== "string")
+    throw new Error(`the reply is not {"score": 0-4, "reason": "..."}: ${text.trim().slice(0, 120)}`);
+  return a as { score: number; reason: string };
+}
+
+// Asks the triage model how large the ticket is (POL-30): the phase's provider, else the workspace default. An Ollama
+// decision model answers System One (`/v1/systemone`); any other model answers one plain request through the provider
+// adapter. Both go through the egress policy (providerFetch). Never throws, except on a spending cap: an error is part of
+// the result, and the ticket then runs directly.
 async function triageTicket(t: TicketRow, s: Settings): Promise<EventPayloads["triage"]> {
   const model = s.triage_model.trim();
   const context = { workspaceId: t.workspace_id, ticketId: t.id, purpose: "triage", background: true };
   checkUsageCaps(context);
   const id = randomUUID();
   const started_at = Date.now();
-  const p = s.default_provider_id ? providerById(s.default_provider_id) : undefined;
+  const pid = s.triage_provider_id || s.default_provider_id;
+  const p = pid ? providerById(pid) : undefined;
+  const signal = AbortSignal.timeout(TRIAGE_TIMEOUT);
+  const state = `${t.title}\n\n${t.spec}`;
   let usage: Usage | undefined;
   let completed = false;
   let sent = false;
   try {
-    if (p?.kind !== "ollama") throw new Error("the workspace's default provider is not an Ollama provider");
-    sent = true;
-    const res = await fetch(`${(p.base_url || OLLAMA_URL).replace(/\/$/, "")}/v1/systemone`, {
-      method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(TRIAGE_TIMEOUT),
-      body: JSON.stringify({ model, state: `${t.title}\n\n${t.spec}`, questions: TRIAGE_QUESTIONS }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const body = await res.json() as any;
-    if (body.usage) usage = normalized({ input: body.usage.input_tokens, output: body.usage.output_tokens, cache_read: body.usage.cache_read_input_tokens, cache_write: body.usage.cache_creation_input_tokens });
-    const a = body?.answers?.size;
-    if (typeof a?.score !== "number" || !Number.isFinite(a.score)) throw new Error("the answer has no size score");
-    completed = true;
-    return { model, split: a.score >= SIZE_SPLIT, score: a.score, probabilities: a.probabilities, confidence: a.confidence };
+    if (pid && p?.workspace_id !== t.workspace_id) throw new Error("the triage provider no longer exists");
+    if (p?.kind === "ollama" && (await isDecisionModel(p, model)) !== false) {
+      // ponytail: when /api/show can't be read the model is assumed to be a decision model, as before POL-30.
+      sent = true;
+      const res = await providerFetch(`${(p.base_url || OLLAMA_URL).replace(/\/$/, "")}/v1/systemone`, {
+        method: "POST", headers: { "content-type": "application/json" }, signal, body: JSON.stringify({ model, state, questions: TRIAGE_QUESTIONS }),
+      }, TRIAGE_TIMEOUT);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await cappedText(res)).slice(0, 200)}`);
+      const body = await res.json() as any;
+      if (body.usage) usage = normalized({ input: body.usage.input_tokens, output: body.usage.output_tokens, cache_read: body.usage.cache_read_input_tokens, cache_write: body.usage.cache_creation_input_tokens });
+      const a = body?.answers?.size;
+      if (typeof a?.score !== "number" || !Number.isFinite(a.score)) throw new Error("the answer has no size score");
+      completed = true;
+      return { model, split: a.score >= SIZE_SPLIT, score: a.score, probabilities: a.probabilities, confidence: a.confidence };
+    }
+    // The adapter records its own usage (metered), so nothing is recorded here.
+    const provider = p ? adapterFor(p) : providerConfig({ model, workspaceId: t.workspace_id }).provider("");
+    const r = await withUsage(context, () => provider.stream({ system: [{ type: "text", text: TRIAGE_SYSTEM }], messages: [{ role: "user", content: [{ type: "text", text: state }] }], tools: [], model, maxTokens: 300, signal }, () => {}));
+    const a = triageAnswer(r.message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join(""));
+    return { model, split: a.score >= SIZE_SPLIT, score: a.score, reason: a.reason };
   } catch (e) {
-    return { model, split: false, error: (e as Error).message };
+    return { model, split: false, error: signal.aborted ? `no answer within ${TRIAGE_TIMEOUT / 1000} s` : (e as Error).message };
   } finally {
     if (sent) recordUsage(context, { id: p?.id, name: p?.name ?? "Triage", kind: p?.kind ?? "unknown", billing: p?.kind === "ollama" ? "local" : "unknown" }, model,
       { id, started_at, usage: usage ?? noUsage(), status: usage ? "reported" : "unavailable", outcome: completed ? "completed" : "failed" });
@@ -402,7 +468,7 @@ async function epicGate(s: ProjectSettings, command: string, log: ReturnType<typ
   try {
     const sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, sha, wt);
-    sandbox = await openSandbox(id, wt, parseProtected(s.protected_paths), s.image, resourcesOf(s), s.repo_path);
+    sandbox = await openSandbox(id, wt, readOnlyPaths(parseProtected(s.protected_paths), s.protected_mode), s.image, resourcesOf(s), s.repo_path);
     const sh = (c: string) => sandbox!.exec(c, { cwd: wt, timeoutMs: COMMAND_TIMEOUT, signal });
     const setup = s.setup_command.trim() ? await sh(s.setup_command) : undefined;
     await sandbox.endSetup();
@@ -466,7 +532,7 @@ export function pump() {
 
 type RunRow = {
   ticket_id: string; role: string; model: string; attempt: number; provider_id: string | null; prompt_version: number | null; lessons_version: number | null;
-  eval_run_id: string | null; eval_case_id: string | null; wiki_op: string | null; base_sha: string | null; resumed_from: string | null;
+  eval_run_id: string | null; eval_case_id: string | null; wiki_op: string | null; base_sha: string | null; resumed_from: string | null; pinned: number;
 };
 
 // Reflection on the series a run ended, with that run's provider and model, in a fresh no-tools conversation (improve.ts).
@@ -570,7 +636,9 @@ async function execute(runId: string) {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "the ticket's project was deleted");
     // The ticket's own test_command (when set) overrides the project's; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
-    let protectedPaths = parseProtected(cfg.protected_paths);
+    const protectedPaths = parseProtected(cfg.protected_paths);
+    const mode = cfg.protected_mode; // add_only: agents may add files under protectedPaths (POL-29)
+    let fixedPaths: string[] = []; // read-only whatever the mode: the wiki snapshot and workspace skills
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     let base_sha: string;
     if (ev) await addDetached(cfg.repo_path, (base_sha = ev.base_sha), worktree);
@@ -591,13 +659,13 @@ async function execute(runId: string) {
       try {
         wikiTree = await materialize(t.project_id, worktree);
         wiki = await wikiSection(t.project_id, cfg.repo_path, base_sha);
-        protectedPaths = [...protectedPaths, ".polaris/wiki"];
+        fixedPaths = [...fixedPaths, ".polaris/wiki"];
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
       }
     // M17: workspace skills next to the repo's (not for frozen eval cases: a score must not move when someone edits them).
-    if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) protectedPaths = [...protectedPaths, WORKSPACE_SKILLS];
-    sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image, resourcesOf(s), cfg.repo_path); // eval runs too: the size doesn't change results
+    if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) fixedPaths = [...fixedPaths, WORKSPACE_SKILLS];
+    sandbox = await openSandbox(runId, worktree, readOnlyPaths(protectedPaths, mode, fixedPaths), cfg.image, resourcesOf(s), cfg.repo_path); // eval runs too: the size doesn't change results
     log({ type: "setup", payload: { step: "sandbox", sandbox: sandbox.name } });
     const sh = (command: string) => sandbox!.exec(command, { cwd: worktree, timeoutMs: COMMAND_TIMEOUT, signal });
     const abortCheck = () => {
@@ -622,12 +690,13 @@ async function execute(runId: string) {
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
     const task = resumed?.task ?? taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
-      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
+      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths, fixedPaths, protectedMode: mode,
       budget: { turns: limits.max_turns, minutes: limits.max_minutes }, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
     const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
-      model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
+      model: run.model, root: worktree, exec: sandbox.exec, signal,
+      ...(mode === "add_only" ? { protectedPaths: fixedPaths, addOnly: { paths: protectedPaths, existing: await protectedFilesAt(worktree, base_sha, protectedPaths) } } : { protectedPaths: [...protectedPaths, ...fixedPaths] }), cacheKey: t.id, compactAt,
       onEvent: relay(log), onStream: liveStream(runId), // this pipeline writes run_metrics and run_finished
     };
     // A resumed attempt gets what the interrupted one left, with the fix rounds' floors.
@@ -652,7 +721,7 @@ async function execute(runId: string) {
       const first = await run();
       abortCheck();
       // git can't see .polaris/wiki (excluded), so its snapshot is compared directly.
-      const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
+      const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths, mode, fixedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
       const nested = await nestedRepos(worktree);
       const blocked = touched.length > 0 || nested.length > 0;
       const { r: test, ...flake } = blocked ? { r: first } : await rerunFlaky(first, run);
@@ -683,7 +752,7 @@ async function execute(runId: string) {
         gateFixes++;
         const why = gateFailure(result);
         log({ type: "gate_fix", payload: { reason: why } });
-        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}${result.nested ? `\nThese are nested git repositories, which cannot be committed: ${result.nested.join(", ")}. Delete their .git, or move them out of the repository.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
+        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\n${mode === "add_only" ? "You changed or deleted files that existed under protected paths" : "You changed read-only (protected) paths"}: ${result.protected.join(", ")}. Revert these${mode === "add_only" ? " (adding new files there is fine)" : ""}.` : ""}${result.nested ? `\nThese are nested git repositories, which cannot be committed: ${result.nested.join(", ")}. Delete their .git, or move them out of the repository.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
         if (!(await fixRound(why, message))) {
           gateOutput = result.output;
           return false;
@@ -757,7 +826,10 @@ async function execute(runId: string) {
     // Passing ticket runs keep worktree + branch for review; anything else is cleaned up now (output is in the event log).
     if ((status !== "passed" || run.eval_run_id) && cfg) await removeWorktree(cfg.repo_path, worktree, branch ?? null, dataDir());
     if (run.eval_run_id) recordEvalResult(runId, status === "passed", turns);
-    else if (retry) queue(t, run.model, run.attempt + 1, run.provider_id); // same provider and model
+    else if (retry) {
+      const next = nextAttempt(t, s, run, reason); // the same provider and model, unless escalating
+      queue(t, next.model, run.attempt + 1, next.provider_id, false, undefined, undefined, { escalated: next.escalated });
+    }
     // M9: a task that failed for good is split, unless splitting can't help (provider, environment or harness errors, stuck,
     // a spending cap).
     else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck|SpendingCap):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
@@ -813,7 +885,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     const gateCommand = t.test_command ?? s.test_command; // a split epic keeps the command of the ticket it replaced
     await startReady(t.id); // children moved in while the epic was not running
     const task = plannerTask(t, {
-      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
+      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), protectedMode: s.protected_mode, skills,
       lessons: lessons?.body, wiki, round: run.attempt, notes, review: reviewNote(t.id), since,
     });
     const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
@@ -1248,9 +1320,9 @@ export function recoverOrphans() {
     FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
     AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND ${OWN_RUNS})`).all() as { id: string; last: RunStatus | null }[];
   for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
-  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, r.resumed_from, t.project_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
+  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, r.pinned, r.resumed_from, t.project_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {
-    id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; attempt: number; model: string; provider_id: string | null;
+    id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; attempt: number; model: string; provider_id: string | null; pinned: number;
     resumed_from: string | null; project_id: string; parent_id: string | null; eval_repo: string | null;
   }[];
   const dead = orphans.filter((o) => !controllers.has(o.id));
@@ -1287,7 +1359,11 @@ export function recoverOrphans() {
   }
   // Sweep first, or it could remove a fresh run's container.
   background(removeStaleContainers().then(() => {
-    for (const o of retries) queue(ticketRow(o.ticket_id)!, o.model, o.attempt + 1, o.provider_id);
+    for (const o of retries) {
+      const t = ticketRow(o.ticket_id)!;
+      const next = nextAttempt(t, projectSettings(t.project_id), o, "interrupted by server restart");
+      queue(t, next.model, o.attempt + 1, next.provider_id, false, undefined, undefined, { escalated: next.escalated });
+    }
     for (const o of resumes) queue(ticketRow(o.ticket_id)!, o.model, o.attempt, o.provider_id, o.role === "planner", undefined, o.id);
     pump();
   }), "recovery failed");

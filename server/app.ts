@@ -370,7 +370,7 @@ app.on("PUT", ["default", "review", ...MODEL_PHASES].map((p) => `/api/settings/$
   ensureSettings(c.get("workspaceId"));
   const col = c.req.path.split("/").pop()!.replace(/-provider$/, ""); // one of the listed names: safe in the SQL below
   db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
-    m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
+    m.v.provider_id ?? null, m.v.model ?? (col === "triage" ? "" : null), Date.now(), c.get("workspaceId"), // triage_model is NOT NULL, "" = off
   );
   return c.json(settingsFor(c.get("workspaceId")));
 });
@@ -596,13 +596,13 @@ app.post("/api/evals/cases", async (c) => {
   if (!run) return c.json({ error: "This ticket was not approved through review, so there is no base commit to replay it from." }, 409);
   const s = projectSettings(t.project_id)!;
   if (t.eval_case_id) return c.json({ error: "This ticket is already an eval case." }, 409);
-  const frozen = { repo_path: s.repo_path, base_sha: run.base_sha, setup_command: s.setup_command, test_command: t.test_command ?? s.test_command, protected_paths: s.protected_paths, image: s.image };
+  const frozen = { repo_path: s.repo_path, base_sha: run.base_sha, setup_command: s.setup_command, test_command: t.test_command ?? s.test_command, protected_paths: s.protected_paths, image: s.image, protected_mode: s.protected_mode };
   const invalid = await validateCase(frozen).catch((e) => `Validation failed: ${(e as Error).message}`);
   if (invalid) return c.json({ error: invalid }, 400);
   if (ticketIn(c, t.id)?.eval_case_id) return c.json({ error: "This ticket is already an eval case." }, 409); // re-checked after the await
   const id = randomUUID();
-  db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, c.get("workspaceId"), t.id, t.title, t.spec, ...Object.values(frozen));
+  db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image, protected_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, c.get("workspaceId"), t.id, t.title, t.spec, ...Object.values(frozen));
   return c.json(db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(id), 201);
 });
 

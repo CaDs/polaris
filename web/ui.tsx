@@ -295,8 +295,8 @@ export function useProviders() {
 
 // Provider + model selects. "Default" (empty provider) = the workspace default, then the server's env fallback.
 // Picking a provider selects its first model, so the pair is always complete.
-export function ModelPicker({ providers, provider_id, model, onChange, prefix = "" }: {
-  providers: Provider[]; provider_id: string | null; model: string | null; prefix?: string;
+export function ModelPicker({ providers, provider_id, model, onChange, prefix = "", decision }: {
+  providers: Provider[]; provider_id: string | null; model: string | null; prefix?: string; decision?: boolean; // decision: Ollama decision models first, labelled
   onChange: (v: { provider_id: string | null; model: string | null }) => void;
 }) {
   const [models, setModels] = useState<string[]>([]);
@@ -308,7 +308,7 @@ export function ModelPicker({ providers, provider_id, model, onChange, prefix = 
     setError("");
     if (!provider_id) return;
     let live = true;
-    api<{ models: string[]; model_details?: { id: string; name: string }[] }>(`/api/providers/${provider_id}/models`).then(
+    api<{ models: string[]; model_details?: { id: string; name: string }[] }>(`/api/providers/${provider_id}/models${decision ? "?decision=1" : ""}`).then(
       (r) => {
         if (!live) return;
         setModels(r.models);

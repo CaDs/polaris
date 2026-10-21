@@ -16,17 +16,21 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
     await page.getByLabel("Auto-approve child tickets").check();
     await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
     await expect(page.getByLabel("Child size hint")).toHaveValue("at most 3 files and about 60 changed lines, finishable in 20 agent turns");
-    await expect(page.getByLabel("Triage model")).toHaveValue("");
   });
   await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
+  // Triage and escalation are model phases (off by default), next to the other phases.
+  await page.getByRole("link", { name: "Models", exact: true }).click();
+  await expect(page.getByLabel("Triage Provider")).toHaveValue("");
+  await expect(page.getByLabel("Escalation Provider")).toHaveValue("");
 
   await page.getByRole("link", { name: "Board" }).click();
   await newTicket(page, "Big change", "Write both parts. SPLIT-ME");
   await openTicket(page, "Big change");
   await page.getByRole("button", { name: "Run agent" }).click();
 
-  // Three attempts fail the gate (protected path), then the ticket is replaced by a "Split:" epic.
-  await expect(transcript).toContainText("Tests failed: modified protected path tests/broken.txt", { timeout: 60_000 });
+  // Three attempts fail the gate (SPLIT-ME's write to tests/ is refused by the read-only mount, and part1.txt is never made), then
+  // the ticket is replaced by a "Split:" epic.
+  await expect(transcript).toContainText("Tests failed: `test -f part1.txt && test -f part2.txt` exited with code 1", { timeout: 60_000 });
   await expect(page.getByText("Escalated to")).toBeVisible({ timeout: 150_000 });
   await expect(status).toHaveValue("failed");
   await expect(page.getByRole("button", { name: "Show run #3" })).toBeVisible();
@@ -35,7 +39,7 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
   // The epic links back, its planner splits the work into two children with their own gates.
   await expect(page.getByLabel("Title")).toHaveValue("Split: Big change");
   await expect(page.getByText("Split from")).toBeVisible();
-  await expect(page.getByLabel("Spec")).toHaveValue(/## Previous direct attempt[\s\S]*Attempt 3: failed \(modified protected path tests\/broken\.txt\)/);
+  await expect(page.getByLabel("Spec")).toHaveValue(/## Previous direct attempt[\s\S]*Attempt 3: failed \(`test -f part1\.txt && test -f part2\.txt` exited with code 1\)/);
   const kids = page.getByRole("list", { name: "Children" });
   await expect(kids.getByRole("listitem", { name: "APP-3", exact: true })).toContainText("Create part1.txt", { timeout: 60_000 });
   await expect(kids.getByRole("listitem", { name: "APP-4", exact: true })).toContainText("Create part2.txt");

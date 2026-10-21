@@ -20,11 +20,11 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await form.getByLabel("Name").fill("Orchard");
   await expect(form.getByLabel("Key")).toHaveValue("ORC"); // suggested from the name
   await form.getByLabel("Repository path").fill("/nonexistent/repo");
+  await expect(form.getByRole("status")).toContainText("does not exist"); // the rest of the form waits for a repository
+  await expect(form.getByLabel("Test command")).toBeDisabled();
+  await form.getByLabel("Repository path").fill(repo);
   await form.getByLabel("Setup command").fill("");
   await form.getByLabel("Test command").fill("test -f ok.txt");
-  await form.getByRole("button", { name: "Create project" }).click();
-  await expect(form.getByRole("alert")).toContainText("not a git repository");
-  await form.getByLabel("Repository path").fill(repo);
   await form.getByRole("button", { name: "Create project" }).click();
   await expect(page).toHaveURL(/\/p\/ORC$/);
   await page.getByRole("link", { name: "Overview" }).click();

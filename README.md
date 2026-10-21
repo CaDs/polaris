@@ -64,7 +64,7 @@ how long), see tokens and cost per run, and replay any transcript. On a wide scr
 | **Model review** | After the tests pass, the same model (or a reviewer model you pick per workspace) reviews the change with read-only tools and returns findings, which go back to the worker to fix (up to 3 reviews, so 2 fix rounds, per attempt). Any file the reviewer writes is undone. Its budget scales with the size of the diff. |
 | **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. Monthly spending caps per workspace and caps per epic or ticket (cost or tokens). A stuck monitor nudges, then ends an attempt that repeats itself or stops making progress. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
-| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage with a decision model. |
+| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage (a chat model or an Ollama decision model) and an optional escalation model for the last attempt. |
 | **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
 | **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). Failure mining: per-run metrics, failure classes and draft improvement tickets. A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
 | **Tracker** | Labels, priority (the run queue starts urgent tickets first), assignee, estimate, due date, projects with milestones, cycles (sprints), filters as shareable URLs, full-text search, saved views, command palette (Cmd/Ctrl+K), keyboard shortcuts, comments, a notification bell (runs to review, failures, comments) and a live board over a workspace event stream. |
@@ -114,7 +114,13 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
 2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
    with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
-   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
+   The form detects the repository as soon as the folder is set (from a subfolder it offers the repository root), lists its branches
+   (the checked-out one is preselected) and prefills the commands and protected paths from the base branch; it warns when the settings
+   protect or gate nothing.
+   Protected paths are your tests, which agents must not weaken; they default to `tests/,evals/`, and `POST /api/projects/inspect`
+   suggests them (and the commands) from the repository's base branch. **Add-only** (the default) lets agents add new files there,
+   such as regression tests, but not change, delete or rename ones that existed when the run started; **read-only** lets them touch nothing there.
+   Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
    picks the project you work in (a new one is picked for you): new tickets, the home page and the Agent's chats (each chat belongs to one project) follow it.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
@@ -201,9 +207,10 @@ Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARI
 
 ### Workspace settings (Settings page)
 
-One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model),
-**Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
-Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
+One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model, and **Models per phase**: planner, chat, wiki,
+**escalation** (takes a ticket's last attempt, or the retry after a budget ran out, from the default model; never replaces a model you
+picked; off by default) and **triage** (sizes a new ticket before its first run, on any chat model or an Ollama decision model; off by default)),
+**Automation** (auto-approve child tickets (off), automatic splitting (on), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
 minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
 the default. **Appearance** is yours alone: a palette (Black + Blue by default, Graphite, Stone & Ink, Polar Night, Ember,
 Deep Teal) and light/dark/system, saved for your account. Mode and sign-out are also in the account menu at the foot of the sidebar. A project's repository, base branch,
@@ -213,7 +220,7 @@ setup and test commands, protected paths and sandbox image are on its **Overview
 
 - `.polaris/skills/<name>.md` with `name` and `description` frontmatter: agents see the list and read the skills they need.
   Add `phases: worker, reviewer` (any of worker, planner, reviewer, chat) to offer a skill only to those agents; without it,
-  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat and wiki their own model.
+  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat, wiki, escalation and triage their own model.
 - Polaris also creates `.polaris/outputs/`, `.polaris/history/` and `.polaris/wiki/` inside its worktrees. They are
   git-excluded and never committed.
 
@@ -354,7 +361,7 @@ tasks.md          milestone checklist
   and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid with `HOME=/home/polaris` (a tmpfs). Polaris refuses to run sandboxes as root
   (`POLARIS_ALLOW_ROOT_SANDBOX=1` overrides) and stops a sandbox whose worktree passes 5 GB (`POLARIS_WORKTREE_MAX_MB`).
   The built-in image is rebuilt when its `polaris.image.version` label is older than the harness expects.
-  Your protected paths and a throwaway git dir (the run's HEAD, index, branches and objects; no config, remotes or host path) are mounted read-only; the npm cache is a volume per repository. The file tools never
+  Your protected paths (in read-only mode; add-only mode enforces them in the file tools and the gate, so agents can add files there) and a throwaway git dir (the run's HEAD, index, branches and objects; no config, remotes or host path) are mounted read-only; the npm cache is a volume per repository. The file tools never
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.
 - **Host git.** Every git command the harness runs has hooks and fsmonitor off, and addresses a run's worktree by the git

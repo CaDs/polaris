@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { db } from "./db.ts";
 import { metered, withUsage } from "./usage.ts";
 import { LOCAL_MODEL_TIMEOUT } from "./egress.ts";
-import { parseProtected, truncate } from "./agent/tools.ts";
+import { parseProtected, readOnlyPaths, truncate } from "./agent/tools.ts";
 import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
 import { addDetached, removeWorktree } from "./git.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, type Sandbox } from "./sandbox.ts";
@@ -213,7 +213,7 @@ export async function propose(o: { workspaceId: string; provider: Provider; mode
 
 export type EvalCase = {
   id: string; workspace_id: string; ticket_id: string; title: string; spec: string; repo_path: string; base_sha: string;
-  setup_command: string; test_command: string; protected_paths: string; image: string; created_at: number;
+  setup_command: string; test_command: string; protected_paths: string; protected_mode: string; image: string; created_at: number;
 };
 type EvalRun = {
   id: string; workspace_id: string; prompt_id: string; prompt_version: number; lessons_version: number | null; case_ids: string; model: string;
@@ -233,7 +233,7 @@ export async function validateCase(c: Omit<EvalCase, "id" | "workspace_id" | "ti
   try {
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     await addDetached(c.repo_path, c.base_sha, wt);
-    sandbox = await openSandbox(id, wt, parseProtected(c.protected_paths), c.image, undefined, c.repo_path);
+    sandbox = await openSandbox(id, wt, readOnlyPaths(parseProtected(c.protected_paths), c.protected_mode), c.image, undefined, c.repo_path);
     const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: COMMAND_TIMEOUT });
     if (c.setup_command.trim()) {
       const s = await sh(c.setup_command);

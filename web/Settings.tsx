@@ -16,6 +16,8 @@ const PHASES = [
   ["planner", "Planner", "Plans epics into child tickets. Default: the workspace default."],
   ["chat", "Chat", "Answers in the chat panel and proposes tickets. Default: the workspace default."],
   ["wiki", "Wiki", "Keeps the project wiki up to date after each approval. Default: the model of the run it documents."],
+  ["escalation", "Escalation", "Takes the last attempt of a ticket the default model couldn't finish, and the retry after a worker ran out of turns, time or tokens. A model picked on a ticket or with Retry with… is never replaced. Default: off (every attempt uses the same model)."],
+  ["triage", "Triage", "Sizes a new ticket before its first run; large ones are split instead of run. Any chat model, or an Ollama decision model (System One). Needs \"Split tickets that fail\" on (Automation). Default: off."],
 ] as const;
 type Phase = (typeof PHASES)[number][0];
 
@@ -96,7 +98,10 @@ function ModelsTab({ s, saved }: Tab) {
   const [pick, setPick] = useState({ provider_id: s.default_provider_id, model: s.default_model });
   const [reviewer, setReviewer] = useState({ provider_id: s.review_provider_id, model: s.review_model });
   const [review, setReview] = useState(!!s.model_review);
-  const [phases, setPhases] = useState(() => Object.fromEntries(PHASES.map(([p]) => [p, { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] }])));
+  // Triage with no provider of its own runs on the default one: show that provider, so its saved model stays visible.
+  const [phases, setPhases] = useState(() => Object.fromEntries(PHASES.map(([p]) => [p, {
+    provider_id: s[`${p}_provider_id`] ?? (p === "triage" && s.triage_model ? s.default_provider_id : null), model: s[`${p}_model`] || null,
+  }])));
   const also = () => Promise.all([
     api("/api/settings/default-provider", "PUT", pick), api("/api/settings/review-provider", "PUT", reviewer),
     ...PHASES.map(([p]) => api(`/api/settings/${p}-provider`, "PUT", phases[p])),
@@ -127,7 +132,7 @@ function ModelsTab({ s, saved }: Tab) {
         <p className="muted">Give a phase its own model, e.g. a smaller local model for chat and the wiki and your strongest one for the worker.</p>
         {PHASES.map(([p, name, hint]) => (
           <div key={p}>
-            <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
+            <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} decision={p === "triage"} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
             <span className="hint">{hint}</span>
           </div>
         ))}
@@ -138,12 +143,7 @@ function ModelsTab({ s, saved }: Tab) {
 
 function AutomationTab({ s, saved }: Tab) {
   const [split, setSplit] = useState(!!s.auto_split);
-  // Triage runs on the workspace's default provider, which must be Ollama (server/runs.ts triageTicket).
-  const [providers] = useProviders();
-  const ollama = providers?.find((p) => p.id === s.default_provider_id && p.kind === "ollama");
-  const [models, setModels] = useState<string[]>([]);
-  useEffect(() => void (ollama && api<{ models: string[] }>(`/api/providers/${ollama.id}/models`).then((r) => setModels(r.models), () => {})), [ollama?.id]);
-  const options = s.triage_model && !models.includes(s.triage_model) ? [s.triage_model, ...models] : models;
+  // The triage model is picked under Models → Models per phase.
   return (
     <Form s={s} saved={saved}>
       <h2>Epics and planner</h2>
@@ -161,17 +161,10 @@ function AutomationTab({ s, saved }: Tab) {
         A ticket that fails its last attempt is replaced by a "Split:" epic with the same spec and what the attempt left behind; its planner breaks
         it into smaller tickets. Not for children of a sub-epic (depth limit).
       </span>
-      <label>
-        Triage model
-        <select name="triage_model" defaultValue={s.triage_model} disabled={!split || !ollama}>
-          <option value="">Off</option>
-          {options.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
-        <span className="hint">
-          {!split ? "Needs splitting on. " : !ollama ? "Needs an Ollama provider as the default model (Models tab). " : ""}
-          Scores a new ticket's size before its first run; large tickets are split instead of run. Errors never block the run.
-        </span>
-      </label>
+      <span className="hint">
+        {split ? "" : "Triage needs splitting on. "}Triage (a model that scores a new ticket's size before its first run, so large tickets are split instead of run) is set
+        under Models, Models per phase.
+      </span>
       <label>
         Child size hint
         <input name="child_size_hint" defaultValue={s.child_size_hint} spellCheck={false} />
