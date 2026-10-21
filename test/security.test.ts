@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
+import { protectedMounts } from "../server/sandbox.ts";
 import { addWorktree, changedLines, changedPaths, commitAll, git, inspectRepo, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
@@ -169,4 +170,14 @@ test("POL-2: a project repo_path under the data dir is refused before any git co
     delete process.env.POLARIS_REPO_ROOTS;
     delete process.env.POLARIS_DATA_DIR;
   }
+});
+
+test("POL-4: a protected path that does not exist yet is created and mounted read-only; paths outside the worktree are skipped", () => {
+  const wt = tmp("sec-ro-");
+  mkdirSync(join(wt, ".git"));
+  mkdirSync(join(wt, "tests"));
+  const args = protectedMounts(wt, ["tests", "evals", "deep/er", "../escape"]);
+  assert.equal(existsSync(join(wt, "evals")), true);
+  assert.equal(existsSync(join(wt, "../escape")), false);
+  assert.deepEqual(args.filter((a) => a !== "-v").map((a) => a.split(":/work/")[1]), ["tests:ro", "evals:ro", "deep/er:ro", ".git:ro"]);
 });

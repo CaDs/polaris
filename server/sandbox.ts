@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { capture, hostExec, truncate, type Exec } from "./agent/tools.ts";
@@ -79,13 +79,26 @@ export const dockerRunArgs = (name: string, worktree: string, mounts: string[], 
   "--cpus", String(r.cpus), "--memory", `${r.memory_gb}g`, image, "sleep", "infinity",
 ];
 
+// The -v flags that mount protected paths (and .git) read-only. A protected path that doesn't exist yet (evals/ in most repos)
+// is created empty first: otherwise it would be writable and only the diff check would stand between the agent and it.
+export function protectedMounts(worktree: string, protectedPaths: string[]) {
+  for (const p of protectedPaths) {
+    const dir = resolve(worktree, p);
+    if (!dir.startsWith(resolve(worktree) + sep)) continue;
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {} // a file in the way, or a parent that is a file: it exists, so it gets mounted (or the diff check holds)
+  }
+  return [...protectedPaths, ".git"].filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+}
+
 export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string, resources = SANDBOX_RESOURCES): Promise<Sandbox> {
   if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
   if (!IMAGE_REF.test(image)) throw new Error(`not a docker image reference: ${image}`); // rows saved before the settings check
   await ensureImage(image);
   const name = `polaris-${runId}`;
   // .git too: the host's git must not be pointed elsewhere (git.ts also never reads it for worktrees it created).
-  const ro = [...protectedPaths, ".git"].filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+  const ro = protectedMounts(worktree, protectedPaths);
   // A worktree's .git file points at the repo's git dir by its host path: mount that read-only at the same path so
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
   const gitDir = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => "");

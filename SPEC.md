@@ -410,6 +410,13 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
   log work; the harness commits), and the budget (max turns and max minutes for the attempt).
 - **Tool input errors.** `InvalidArguments` about a tool's input shape (missing or mistyped field) ends with
   `Expected input: {command: string, timeout?: number}`, derived from the tool's schema. Path errors do not.
+- **Clean final gate.** The gate above is the in-place one (it drives the fix rounds). The recorded result of a ticket run
+  comes from the commit: after the in-place gate and the review, the agent's container is stopped (a background process
+  can't write on), protected paths are checked again, the work is committed and checked again against the commit, and the
+  setup and test commands run in a fresh container on a clean detached checkout of that commit (`test_result {clean: true}`;
+  the same flaky re-run, no fix round). Files git ignores (`node_modules/.bin`, a planted `conftest.py`) are not in that
+  checkout, so they can't make the tests pass. A failure fails the attempt like any gate failure; the `commit` event comes
+  after it passes. Protected paths that don't exist yet are created empty and mounted read-only. No test command: no clean run.
 - **Per-ticket test command.** The ticket view and New ticket dialog edit `tickets.test_command` (empty = workspace default).
 
 ## Model review (M8)

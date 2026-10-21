@@ -109,7 +109,7 @@ export type EventPayloads = {
   // M3 orchestration (server/runs.ts): sandbox setup, test gate, commit of a passing run, review decision.
   setup: { step: "worktree"; branch: string; base_sha: string } /* branch "" = detached (eval) */ | { step: "sandbox"; sandbox: string } | { step: "context"; window: number; source: string; compact_at: number } | { step: "skills"; skills: { name: string; description: string; path: string }[] } | { step: "command"; command: string; code: number | null; output: string } | { step: "resumed"; from: string; turns: number };
   // flaky: the command failed, then passed on an immediate re-run (first_failure is the first run); the gate passed.
-  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[]; nested?: string[]; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
+  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[]; nested?: string[]; clean?: true; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
   // The test gate failed and the worker's own conversation is resumed to fix it (reason: gateFailure).
   gate_fix: { reason: string };
   commit: { sha: string; branch: string };

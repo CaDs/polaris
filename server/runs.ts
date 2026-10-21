@@ -718,7 +718,44 @@ async function execute(runId: string) {
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
       if (!(await fixRound("model review requested changes", message)) || !(await gate())) return;
     }
-    if (!ev) log({ type: "commit", payload: { sha: await commitAll(worktree, `${t.key}: ${t.title}`), branch: branch! } });
+    if (ev) return;
+    // The recorded gate runs on what is committed, not in the agent's container (POL-4): the container is stopped first (a
+    // background process it left can't write any more), protected paths are checked again before and against the commit, and
+    // the tests then run in a fresh container on a clean checkout of that commit, so git-ignored files the agent planted
+    // (node_modules/.bin, conftest.py) can't make them pass. Costs a second setup + test run.
+    // ponytail: one clean run, no fix round; a failure here is a gate failure of the attempt (retried like any other).
+    await sandbox.close();
+    const touchedNow = async () => [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
+    let sha = "";
+    let failed = await touchedNow();
+    if (!failed.length) failed = (sha = await commitAll(worktree, `${t.key}: ${t.title}`), await touchedNow());
+    const final = { passed: false, command: testCommand, code: null as number | null, timed_out: false, output: "", protected: failed, clean: true as const };
+    if (!failed.length && testCommand.trim()) {
+      const clean = join(dataDir(), "worktrees", `${runId}-gate`);
+      let box: Sandbox | undefined;
+      try {
+        await addDetached(cfg.repo_path, sha, clean);
+        box = await openSandbox(`${runId}-gate`, clean, parseProtected(cfg.protected_paths), cfg.image, resourcesOf(s));
+        const inClean = (command: string) => box!.exec(command, { cwd: clean, timeoutMs: COMMAND_TIMEOUT, signal });
+        const setup = cfg.setup_command.trim() ? await inClean(cfg.setup_command) : undefined;
+        abortCheck();
+        const { r, ...flake } = setup && setup.code !== 0 ? { r: setup } : await rerunFlaky(await inClean(testCommand), () => inClean(testCommand));
+        abortCheck();
+        Object.assign(final, { passed: r.code === 0, code: r.code, timed_out: r.timedOut, output: tail(r), ...flake });
+      } finally {
+        await box?.close();
+        await removeWorktree(cfg.repo_path, clean, null, dataDir());
+      }
+    } else if (!failed.length) final.passed = true; // no test command: nothing to run
+    if (failed.length || testCommand.trim()) log({ type: "test_result", payload: final });
+    if (!final.passed) {
+      res.status = "failed";
+      res.reason = gateFailure(final);
+      gateOutput = final.output;
+      retry = run.attempt < MAX_ATTEMPTS;
+      return;
+    }
+    log({ type: "commit", payload: { sha, branch: branch! } });
   }, async (res, { signal, log }) => {
     const { status, reason, turns } = res;
     // The attempt's budget use (not the last call's) and the change's size, before the worktree goes.

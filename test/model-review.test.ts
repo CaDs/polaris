@@ -52,7 +52,7 @@ test("REVIEW-ONCE: changes requested, the worker fixes in the same run, the gate
   assert.deepEqual(reviews(t.id).map((r) => [r.round, r.verdict, r.attempt]), [[1, "request_changes", 1], [2, "approve", 1]]);
   assert.equal(reviews(t.id)[0].findings[0].file, "notes.txt");
   const gates = db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'test_result'").all(t.runs[0].id) as { payload: string }[];
-  assert.equal(gates.length, 2);
+  assert.equal(gates.length, 2 + 1); // two in-place gates, then the clean run of the commit (POL-4)
   const branch = (db.prepare("SELECT branch FROM runs WHERE id = ?").get(t.runs[0].id) as { branch: string }).branch;
   assert.match(execFileSync("git", ["ls-tree", "-r", "--name-only", branch], { cwd: repo, encoding: "utf8" }), /^fixed\.txt$/m);
 });
