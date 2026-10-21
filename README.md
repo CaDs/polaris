@@ -62,8 +62,9 @@ ticket ──▶ (optional triage) ──▶ run: git worktree + branch polaris/
                               wiki ingest + lessons ──▶ every later run starts with this memory
 ```
 
-Every step is an event in an append-only log, streamed live to the dashboard: you can watch each tool call, see tokens and
-cost per run, and replay any transcript.
+Every step is an event in an append-only log, streamed live to the dashboard: you can watch each tool call and the model's
+reasoning and reply as they are written, see what a run is doing right now (thinking, writing, or running a command and for
+how long), see tokens and cost per run, and replay any transcript. On a wide screen the ticket and its runs sit side by side.
 
 ## What's done
 

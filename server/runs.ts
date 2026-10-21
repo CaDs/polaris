@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { db } from "./db.ts";
 import { capText, checkUsageCaps, metered, monthSpend, normalized, recordUsage, treeSpend, usageCaps, usagePurpose, withUsage } from "./usage.ts";
 export { monthSpend, treeSpend } from "./usage.ts";
-import { createRun, eventLog, touch } from "./agent/events.ts";
+import { createRun, eventLog, liveStream, touch } from "./agent/events.ts";
 import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
@@ -597,7 +597,7 @@ async function execute(runId: string) {
     const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
-      onEvent: relay(log), // this pipeline writes run_metrics and run_finished
+      onEvent: relay(log), onStream: liveStream(runId), // this pipeline writes run_metrics and run_finished
     };
     const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
     let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
@@ -784,7 +784,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
       compactAt,
       finished: () => outcome.notes !== undefined || outcome.summary !== undefined,
       finishHint: "Call finish_round (or complete_epic) now with your notes.",
-      onEvent: relay(log),
+      onEvent: relay(log), onStream: liveStream(runId),
     });
     ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
@@ -986,7 +986,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
       const common = {
         provider: providerFor(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
-        protectedPaths: WIKI_PROTECTED, signal, cacheKey: pid, compactAt, onEvent: relay(log),
+        protectedPaths: WIKI_PROTECTED, signal, cacheKey: pid, compactAt, onEvent: relay(log), onStream: liveStream(runId),
       };
       let a = await runAgent({ ...common, budget: WIKI_BUDGET });
       for (let fix = 0; ; fix++) {

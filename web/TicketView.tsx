@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Popover } from "./Filters.tsx";
 import { Alert, COLUMNS, Confirm, Dialog, Icon, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, useWorkspaceEvents, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket, type TokenSummary } from "./ui.tsx";
 
 // spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
 type Detail = Ticket & { usage?: TokenSummary; background_usage?: TokenSummary; runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
-type Ev = { seq: number; type: string; payload: any };
+type Ev = { seq: number; type: string; payload: any; created_at?: number };
+// A running model call's output, sent live and never stored (server/agent/events.ts liveStream).
+type LivePart = { kind: "text" | "reasoning"; text: string } | { kind: "tool"; id: string; name: string };
 
 export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (key: string) => void }) {
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -97,7 +99,9 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         <span className="mono">{ticket.key}</span>
         {epic && <span className="badge epic">Epic</span>}
       </div>
-      <input className="h-input" aria-label="Title" value={title} onChange={(e) => setTitle(e.target.value)} onBlur={save} maxLength={200} />
+      {/* A textarea so a long title wraps instead of clipping; it stays one line of text (Enter saves). */}
+      <textarea className="h-input" aria-label="Title" rows={1} value={title} onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))} onBlur={save} maxLength={200}
+        onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), e.currentTarget.blur())} />
       <div className="row">
         {waiting(ticket) && <span className="muted" role="status">waiting for children</span>}
         {ticket.escalated_key && <span className="muted">Escalated to {link(ticket.escalated_key)}</span>}
@@ -121,7 +125,10 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         </span>
       </div>
       <Alert error={error} />
-      <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
+      {/* Wide screens: the ticket on the left, its work (review, runs, the live transcript) beside it, not below. */}
+      <div className="ticket-body">
+      <div className="ticket-about">
+      <textarea className="spec" aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
       <label>
         Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={projectTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
         <span className="hint">Overrides the project's for this ticket; empty = project default. Runs: <span className="mono">{testCommand.trim() || projectTest || "(no test command)"}</span></span>
@@ -129,9 +136,11 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       <div className="row">
         <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
       </div>
-      {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
       <Comments ticketId={ticket.id} />
       {epic && detail?.children && <Epic ticket={ticket} detail={detail} items={detail.children} open={open} patch={(b) => patch(b).then(load)} />}
+      </div>
+      <div className="ticket-work">
+      {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
 
       {detail?.usage && <p className="muted" aria-label="Ticket token usage">{fmt(detail.usage.tokens_total)} total processed tokens · {fmt(detail.background_usage?.tokens_total ?? 0)} background{epic && " · includes descendants"}. Input {fmt(detail.usage.input_uncached)} · output {fmt(detail.usage.tokens_out)} · cache read {fmt(detail.usage.tokens_cached)} · cache write {fmt(detail.usage.tokens_cache_write)}{(detail.usage.partial > 0 || detail.usage.unavailable > 0) && " · some request usage is incomplete"}</p>}
       <h3>{epic ? "Planner rounds" : "Runs"}</h3>
@@ -167,6 +176,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       )}
       {/* Keyed on the status too: an approve or reject lands on a finished run's log, so the transcript replays it. */}
       {current && <Transcript key={`${current.id}-${ticket.status}`} run={current} onFinish={() => (reload(), load())} />}
+      </div>
+      </div>
 
       {retrying && providers && (
         <RetryDialog run={retrying} providers={providers} close={() => setRetrying(null)} go={(c) => (setRetrying(null), run(c))} />
@@ -235,15 +246,100 @@ function Prompt({ text }: { text: string }) {
   );
 }
 
+// A model's reasoning: Anthropic and Ollama thinking, an OpenAI reasoning summary. Encrypted-only reasoning has no text.
+const reasoningText = (b: any): string =>
+  b.provider === "anthropic" ? b.data?.thinking ?? "" : b.provider === "openai" ? (b.data?.summary ?? []).map((s: any) => s.text).join("\n\n") : "";
+function Thinking({ text }: { text: string }) {
+  return (
+    <details className="result thinking">
+      <summary>Thinking <span className="muted">{text.trim().split("\n")[0].slice(0, 100)}</span></summary>
+      <p className="msg">{text}</p>
+    </details>
+  );
+}
+
+// What a running run is doing now, from its latest event (usage and metrics are bookkeeping) and the live stream.
+function activity(events: Ev[], live: LivePart[]): { text: ReactNode; title?: string; since?: number; limit?: number } {
+  const last = events.findLast((e) => e.type !== "usage" && e.type !== "run_metrics");
+  if (!events.some((e) => e.type === "run_started")) return { text: "Setting up…", since: last?.created_at };
+  const p = last!.payload;
+  if (last!.type === "tool_call")
+    return p.name === "shell" && typeof p.input?.command === "string"
+      ? { text: <>Running <span className="mono">{p.input.command}</span></>, title: p.input.command, since: last!.created_at, limit: typeof p.input.timeout === "number" ? p.input.timeout * 1000 : undefined }
+      : { text: <>Running <span className="mono">{p.name}</span></>, since: last!.created_at };
+  if (last!.type === "assistant_message" && !p.message.content.some((b: any) => b.type === "tool_use")) return { text: "Checking the change…", since: last!.created_at };
+  const tail = live.at(-1);
+  return { text: tail?.kind === "tool" ? <>Writing a call to <span className="mono">{tail.name}</span>…</> : tail?.kind === "text" ? "Writing…" : "Thinking…", since: last!.created_at };
+}
+const clock = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}`;
+
+// The running run's status line, kept at the bottom of the viewport while its transcript is on screen; elapsed time ticks
+// here (static text, no looping motion: DESIGN.md). Out of view of the latest, it offers a jump back.
+function LiveBar({ run, events, live, unseen, atEnd, jump }: { run: Run; events: Ev[]; live: LivePart[]; unseen: number; atEnd: boolean; jump: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const a = run.status === "queued" && !events.length ? { text: "Queued, waiting for a free slot…" } : activity(events, live);
+  const elapsed = a.since ? Math.max(0, now - a.since) : undefined;
+  return (
+    <div className="live-bar" role="status" aria-label="Run activity">
+      <span className="grow ellipsis" title={a.title}>{a.text}</span>
+      {elapsed !== undefined && <span className="muted mono nowrap">· {clock(elapsed)}{a.limit ? ` of ${clock(a.limit)}` : ""}</span>}
+      {!atEnd && <button className="btn" onClick={jump}>Jump to latest{unseen > 0 && ` · ${unseen} new`}</button>}
+    </div>
+  );
+}
+
 export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }) {
   const [events, setEvents] = useState<Ev[]>([]);
+  const [live, setLive] = useState<LivePart[]>([]);
   const [error, setError] = useState("");
+  // Following: while the end of the transcript is in view, new output keeps it there. Scrolled up, the bar counts what
+  // arrived since (replayed events are older than the page) and offers a jump back.
+  const end = useRef<HTMLDivElement>(null);
+  // Only the reader's own scrolling turns following on: opening a page (its transcript still short while the log replays)
+  // doesn't carry them away from the ticket.
+  const following = useRef(false);
+  const [atEnd, setAtEnd] = useState(true);
+  const [unseen, setUnseen] = useState(0);
+  const opened = useRef(Date.now());
+  const jump = () => end.current?.scrollIntoView({ block: "end" });
+  const inView = () => (end.current?.getBoundingClientRect().top ?? Infinity) <= innerHeight;
+  useEffect(() => {
+    const scrolled = () => {
+      following.current = inView();
+      setAtEnd(following.current);
+      if (following.current) setUnseen(0);
+    };
+    addEventListener("scroll", scrolled, { passive: true });
+    return () => removeEventListener("scroll", scrolled);
+  }, []);
+  useEffect(() => {
+    if (following.current) end.current?.scrollIntoView({ block: "end" });
+    else setAtEnd(inView());
+  }, [events.length, live]);
 
   useEffect(() => {
     const es = new EventSource(`/api/runs/${run.id}/events`);
     let done = false;
     es.onmessage = (m) => {
-      const e: Ev = JSON.parse(m.data);
+      const e = JSON.parse(m.data);
+      if (e.type === "live") {
+        setLive((cur) => {
+          const next = [...cur];
+          for (const p of e.parts as LivePart[]) {
+            const last = next.at(-1);
+            if (p.kind !== "tool" && last?.kind === p.kind) next[next.length - 1] = { ...last, text: last.text + p.text };
+            else next.push(p);
+          }
+          return next;
+        });
+        return;
+      }
+      if (e.type === "assistant_message" || e.type === "run_finished") setLive([]); // the stored turn replaces its live output
+      if (!following.current && e.created_at > opened.current) setUnseen((n) => n + 1);
       setEvents((all) => (all.some((x) => x.seq === e.seq) ? all : [...all, e])); // reconnects replay; de-dupe by seq
       if (e.type === "run_finished") {
         done = true;
@@ -286,7 +382,10 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         const p = e.payload;
         if (e.type === "run_started") return <Prompt key={e.seq} text={p.task} />;
         if (e.type === "assistant_message")
-          return p.message.content.filter((b: any) => b.type === "text" && b.text).map((b: any, i: number) => <p key={`${e.seq}-${i}`} className="msg model">{b.text}</p>);
+          return p.message.content.map((b: any, i: number) =>
+            b.type === "text" && b.text ? <p key={`${e.seq}-${i}`} className="msg model">{b.text}</p>
+            : b.type === "reasoning" && reasoningText(b).trim() ? <Thinking key={`${e.seq}-${i}`} text={reasoningText(b)} />
+            : null);
         if (e.type === "tool_call")
           return <div key={e.seq} className="call mono"><span className="name">{p.name}</span> {compact(p.input)}</div>;
         if (e.type === "tool_result")
@@ -402,7 +501,12 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         if (e.type === "run_finished") return <p key={e.seq} className="muted">Run {p.status}{p.reason && p.reason !== p.status ? ` (${p.reason})` : ""} after {p.turns} turns. Tokens: input {fmt(p.usage.input)}, output {fmt(p.usage.output)}, cache read/write {fmt(p.usage.cache_read)}/{fmt(p.usage.cache_write)}, total {fmt(p.usage.input + p.usage.output + p.usage.cache_read + p.usage.cache_write)}.</p>;
         return null;
       })}
-      {!finished && <p className="muted">{run.status === "queued" && !events.length ? "Queued, waiting for a free slot…" : "Waiting for events…"}</p>}
+      {!finished && live.map((p, i) =>
+        p.kind === "tool" ? <div key={i} className="call mono"><span className="name">{p.name}</span> <span className="muted">…</span></div>
+        : p.kind === "reasoning" ? <div key={i} className="thinking live" aria-label="Thinking"><span className="muted">Thinking</span><p className="msg">{p.text}</p></div>
+        : <p key={i} className="msg model">{p.text}</p>)}
+      {!finished && <LiveBar run={run} events={events} live={live} unseen={unseen} atEnd={atEnd} jump={jump} />}
+      <div ref={end} /> {/* below the bar: scrolled to the end, the bar sits in place under the newest line, not over it */}
     </section>
   );
 }

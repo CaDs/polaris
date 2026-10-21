@@ -5,7 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
-import { subscribe, subscribeWorkspace, touch, type Change, type StoredEvent } from "./agent/events.ts";
+import { subscribe, subscribeWorkspace, touch, type Change, type LiveEvent, type StoredEvent } from "./agent/events.ts";
 import { git, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
@@ -661,7 +661,7 @@ app.get("/api/runs/:id/events", (c) => {
   const r = runIn(c);
   if (!r) return c.json({ error: "not_found" }, 404);
   return streamSSE(c, async (stream) => {
-    const queue: StoredEvent[] = [];
+    const queue: (StoredEvent | LiveEvent)[] = [];
     let wake = () => {};
     let closed = false;
     const unsubscribe = subscribe(r.id, (e) => (queue.push(e), wake()));
@@ -676,6 +676,10 @@ app.get("/api/runs/:id/events", (c) => {
         if (!e) {
           if (finished) break;
           await new Promise<void>((resolve) => (wake = resolve));
+          continue;
+        }
+        if (e.type === "live") {
+          await stream.writeSSE({ data: JSON.stringify(e) }); // no id: a reconnect resumes by the stored seq
           continue;
         }
         if (e.seq <= last) continue;

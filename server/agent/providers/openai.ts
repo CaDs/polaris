@@ -62,6 +62,9 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
         tools: opts.subscription && functions.length ? [{ type: "namespace", name: "polaris", description: "Polaris agent tools", tools: functions }] : functions,
         tool_choice: "auto", stream: true, store: false,
         ...(req.cacheKey ? { prompt_cache_key: req.cacheKey } : {}), include: ["reasoning.encrypted_content"],
+        // Readable reasoning for the run view (the encrypted content is only for replay).
+        // ponytail: plan only; with an API key OpenAI can require a verified organization for summaries. A provider setting if wanted.
+        ...(opts.subscription ? { reasoning: { summary: "auto" } } : {}),
         ...(req.maxTokens && !opts.subscription ? { max_output_tokens: req.maxTokens } : {}),
       };
       let res: Response;

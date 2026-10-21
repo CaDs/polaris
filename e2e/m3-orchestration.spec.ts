@@ -37,7 +37,7 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   await newTicket(page, "Blocker", "this one is slow");
   await openTicket(page, "Blocker");
   await page.getByRole("button", { name: "Run agent" }).click();
-  await expect(transcript.getByText("sleep 30")).toBeVisible({ timeout: 60_000 });
+  await expect(transcript.getByText("sleep 30").first()).toBeVisible({ timeout: 60_000 }); // the call (the status line names it too)
 
   await openTicket(page, "Make ok file");
   await page.getByRole("button", { name: "Run agent" }).click();
