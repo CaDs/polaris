@@ -64,7 +64,7 @@ how long), see tokens and cost per run, and replay any transcript. On a wide scr
 | **Model review** | After the tests pass, the same model (or a reviewer model you pick per workspace) reviews the change with read-only tools and returns findings, which go back to the worker to fix (up to 3 reviews, so 2 fix rounds, per attempt). Any file the reviewer writes is undone. Its budget scales with the size of the diff. |
 | **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. Monthly spending caps per workspace and caps per epic or ticket (cost or tokens). A stuck monitor nudges, then ends an attempt that repeats itself or stops making progress. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
-| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage with a decision model. |
+| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage (a chat model or an Ollama decision model) and an optional escalation model for the last attempt. |
 | **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
 | **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). Failure mining: per-run metrics, failure classes and draft improvement tickets. A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
 | **Tracker** | Labels, priority (the run queue starts urgent tickets first), assignee, estimate, due date, projects with milestones, cycles (sprints), filters as shareable URLs, full-text search, saved views, command palette (Cmd/Ctrl+K), keyboard shortcuts, comments, a notification bell (runs to review, failures, comments) and a live board over a workspace event stream. |
@@ -204,9 +204,10 @@ Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARI
 
 ### Workspace settings (Settings page)
 
-One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model),
-**Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
-Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
+One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model, and **Models per phase**: planner, chat, wiki,
+**escalation** (takes a ticket's last attempt, or the retry after a budget ran out, from the default model; never replaces a model you
+picked; off by default) and **triage** (sizes a new ticket before its first run, on any chat model or an Ollama decision model; off by default)),
+**Automation** (auto-approve child tickets (off), automatic splitting (on), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
 minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
 the default. **Appearance** is yours alone: a palette (Black + Blue by default, Graphite, Stone & Ink, Polar Night, Ember,
 Deep Teal) and light/dark/system, saved for your account. Mode and sign-out are also in the account menu at the foot of the sidebar. A project's repository, base branch,
@@ -216,7 +217,7 @@ setup and test commands, protected paths and sandbox image are on its **Overview
 
 - `.polaris/skills/<name>.md` with `name` and `description` frontmatter: agents see the list and read the skills they need.
   Add `phases: worker, reviewer` (any of worker, planner, reviewer, chat) to offer a skill only to those agents; without it,
-  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat and wiki their own model.
+  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat, wiki, escalation and triage their own model.
 - Polaris also creates `.polaris/outputs/`, `.polaris/history/` and `.polaris/wiki/` inside its worktrees. They are
   git-excluded and never committed.
 

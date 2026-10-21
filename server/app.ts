@@ -324,7 +324,7 @@ app.on("PUT", ["default", "review", ...MODEL_PHASES].map((p) => `/api/settings/$
   ensureSettings(c.get("workspaceId"));
   const col = c.req.path.split("/").pop()!.replace(/-provider$/, ""); // one of the listed names: safe in the SQL below
   db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
-    m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
+    m.v.provider_id ?? null, m.v.model ?? (col === "triage" ? "" : null), Date.now(), c.get("workspaceId"), // triage_model is NOT NULL, "" = off
   );
   return c.json(settingsFor(c.get("workspaceId")));
 });

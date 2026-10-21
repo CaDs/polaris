@@ -16,9 +16,12 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
     await page.getByLabel("Auto-approve child tickets").check();
     await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
     await expect(page.getByLabel("Child size hint")).toHaveValue("at most 3 files and about 60 changed lines, finishable in 20 agent turns");
-    await expect(page.getByLabel("Triage model")).toHaveValue("");
   });
   await expect(page.getByLabel("Split tickets that fail into smaller ones")).toBeChecked();
+  // Triage and escalation are model phases (off by default), next to the other phases.
+  await page.getByRole("link", { name: "Models", exact: true }).click();
+  await expect(page.getByLabel("Triage Provider")).toHaveValue("");
+  await expect(page.getByLabel("Escalation Provider")).toHaveValue("");
 
   await page.getByRole("link", { name: "Board" }).click();
   await newTicket(page, "Big change", "Write both parts. SPLIT-ME");

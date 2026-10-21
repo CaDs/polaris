@@ -196,6 +196,24 @@ export async function ollamaWindow(base: string | null, model: string) {
   } catch {}
 }
 
+// Does this Ollama model answer System One (/v1/systemone)? Its /api/show capabilities say so with "decision". Cached per
+// provider and model for the process lifetime; undefined = could not tell (not cached).
+const decisionModels = new Map<string, boolean>();
+export async function isDecisionModel(p: ProviderRow, model: string) {
+  const key = `${p.id}\0${p.base_url}\0${model}`;
+  if (decisionModels.has(key)) return decisionModels.get(key);
+  try {
+    const res = await providerFetch(`${(p.base_url || OLLAMA_URL).replace(/\/$/, "")}/api/show`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model }) }, 5_000);
+    if (!res.ok) return undefined;
+    const caps = ((await res.json()) as { capabilities?: unknown })?.capabilities;
+    const yes = Array.isArray(caps) && caps.includes("decision");
+    decisionModels.set(key, yes);
+    return yes;
+  } catch {
+    return undefined;
+  }
+}
+
 async function listModels(p: ProviderRow): Promise<string[]> {
   if (p.kind === "anthropic") return ANTHROPIC_MODELS;
   if (p.kind === "ollama") {
@@ -225,7 +243,7 @@ async function listModels(p: ProviderRow): Promise<string[]> {
 
 async function planModels(p: ProviderRow) {
   const t = await freshTokens(p);
-  const res = await fetch(`${openaiPlanBase()}/models`, { headers: { authorization: `Bearer ${t.access}` }, signal: AbortSignal.timeout(15_000) });
+  const res = await providerFetch(`${openaiPlanBase()}/models`, { headers: { authorization: `Bearer ${t.access}` }, signal: AbortSignal.timeout(15_000) }, 15_000);
   if (!res.ok) throw new AgentError("ProviderError", `ChatGPT model discovery failed (HTTP ${res.status}). Check your connection and plan permission.`);
   const j = await res.json() as { models?: { slug: string; display_name: string; visibility: string }[] };
   if (!Array.isArray(j.models)) throw new Error("ChatGPT returned no model catalog");
@@ -336,7 +354,14 @@ providerRoutes.get("/:id/models", async (c) => {
       const models = await openrouterCatalog(p.encrypted_secret ? decrypt(p.encrypted_secret) : undefined);
       return c.json({ models: models.map((m) => m.id), model_details: models.map(({ id, name }) => ({ id, name })) });
     }
-    return c.json({ models: await listModels(p) });
+    const models = await listModels(p);
+    if (p.kind === "ollama" && c.req.query("decision")) {
+      // The triage picker: models that answer System One first, labelled (capabilities are cached per model).
+      const flags = await Promise.all(models.map((m) => isDecisionModel(p, m)));
+      const [yes, rest] = [models.filter((_, i) => flags[i]), models.filter((_, i) => !flags[i])];
+      return c.json({ models: [...yes, ...rest], model_details: [...yes.map((id) => ({ id, name: `${id} (decision model)` })), ...rest.map((id) => ({ id, name: id }))] });
+    }
+    return c.json({ models });
   } catch (e) {
     return c.json({ error: `could not list models: ${scrub((e as Error).message)}` }, 502);
   }

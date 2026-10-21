@@ -482,9 +482,10 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
         if (e.type === "triage")
           return (
             <p key={e.seq} className={p.error ? "warn" : "muted"}>
-              Triage (<span className="mono">{p.model}</span>): {p.error ? `failed, ran directly (${p.error})` : `size ${p.score.toFixed(2)} of 4 → ${p.split ? "split into an epic" : "run directly"}`}
+              Triage (<span className="mono">{p.model}</span>): {p.error ? `failed, ran directly (${p.error})` : `size ${p.score.toFixed(2)} of 4 → ${p.split ? "split into an epic" : "run directly"}${p.reason ? ` (${p.reason})` : ""}`}
             </p>
           );
+        if (e.type === "escalated") return <p key={e.seq} className="note warn">Escalated to <span className="mono">{p.to}</span>: {p.reason}</p>;
         if (e.type === "commit") return <p key={e.seq} className="muted">Committed <span className="mono">{p.sha.slice(0, 8)}</span> on <span className="mono">{p.branch}</span></p>;
         if (e.type === "compaction")
           return (

@@ -126,7 +126,10 @@ export type EventPayloads = {
   // M9: complete_epic first ran this command on the base branch's head (sha); failed → complete_epic was refused.
   epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
   // M9: the triage model scored a new ticket's size (0 trivial … 4 epic); split = it became a "Split:" epic. error: ran directly.
-  triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; error?: string };
+  // reason: a chat model's one sentence (System One gives probabilities and confidence instead).
+  triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; reason?: string; error?: string };
+  // POL-30: this attempt runs on the escalation model instead of the previous attempt's (logged first, before run_started).
+  escalated: { from: string; to: string; reason: string; attempt: number };
   // M10: a wiki maintainer run ended: the wiki commit it made, nothing to commit (unchanged), or the mechanical problems that rejected it.
   wiki: { op: "ingest" | "bootstrap" | "lint"; commit?: string; unchanged?: boolean; problems?: string[] };
 };

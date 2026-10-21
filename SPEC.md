@@ -376,6 +376,16 @@ one handoff, handoffs flowing back to the planner that asked, and recursion thro
 After a worker's loop ends, the gate runs the ticket's test command (its own `test_command`, else the workspace's) and
 checks that no protected path changed. A failed attempt is retried fresh (`MAX_ATTEMPTS` = 3, failure fed back: the
 previous run's `run_finished` reason, its failing gate output, and the last review findings when the review failed it).
+A turn, minute or token budget running out and a `stuck:` stop are retried the same way.
+
+- **Escalation** (POL-30). The workspace's `escalation` phase model (`escalation_provider_id`/`escalation_model`, null = off) takes
+  the last attempt (`MAX_ATTEMPTS`) of a worker ticket, and the retry right after a turn/minute/token budget ran out, so a local
+  model gets its tries and the frontier model only the ticket it could not finish. It never replaces a model the user chose: a
+  run is `pinned` (`runs.pinned`) when its model came from the ticket or Retry with…, and later attempts inherit that. Provider,
+  environment and spending-cap failures never escalate, an attempt already on the escalation model retries on it, and planner,
+  reviewer, wiki and eval runs are untouched. The escalated run's first event is `escalated {from, to, reason, attempt}`
+  (before `run_started`); the ticket's transcript shows "Escalated to <model>: <reason>". A failure of the escalated attempt
+  splits as before (`nextAttempt` in `server/runs.ts`).
 
 - **Restart.** At startup a run left `running` fails with `interrupted by server restart` (its container removed). A
   worker attempt that can be replayed exactly is **resumed** in place (once): a new run with the same attempt number and
@@ -425,7 +435,9 @@ M14: the planner, chat and wiki phases have the same kind of setting: `{planner,
 (migration 022, `PUT /api/settings/<phase>-provider`, Settings → Models → Models per phase). Null falls back: the planner
 and chat to the workspace default, the wiki to the model of the run it documents (as before). An epic's round 1 resolves
 explicit choice → ticket → planner setting → workspace default; later rounds keep round 1's model. Worker runs and the
-reviewer are unchanged (ticket/default, `review_*`). Triage keeps `triage_model`; reflection uses the run's model.
+reviewer are unchanged (ticket/default, `review_*`). POL-30 adds two phases the same way: `escalation` (see the test gate) and
+`triage` (`triage_provider_id`, migration 010, beside the older `triage_model` string; a null provider = the workspace default,
+as before); `PUT /api/settings/triage-provider` stores an empty model as "". Reflection uses the run's model.
 
 - **Reviewer.** A fresh conversation in the same worktree and sandbox, system prompt `prompts/reviewer.md` (a file, not
   versioned), tools `read_file`, `search`, `shell` and `submit_review {verdict: approve | request_changes, findings:
@@ -482,13 +494,17 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
 - **Size hint.** Workspace setting `child_size_hint` (default "at most 3 files and about 60 changed lines, finishable in
   20 agent turns"; empty = none) goes into every round's environment: "the worker model reliably finishes tickets of
   this size: …; make every child at most that size". Meant to be calibrated per model from a benchmark.
-- **Triage** (optional). Workspace setting `triage_model` (default "", off). With `auto_split` on, queueing the first
-  run of a top-level task first asks a System One decision model on the workspace's default provider (must be Ollama):
-  `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>", questions: {size: score 0–4, five criteria}}`,
-  60 s timeout (loading the decision model next to the worker's takes ~45 s). `answers.size.score ≥ 3` → the ticket is split as above (a `## Triage` section instead of the previous
-  attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities,
-  confidence | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error →
-  logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.
+- **Triage** (optional). Phase setting `triage_provider_id` + `triage_model` ("" = off; Settings → Models → Models per
+  phase; the provider defaults to the workspace's). With `auto_split` on, queueing the first run of a top-level task first asks
+  the model how large it is, one of two ways: an Ollama model whose `/api/show` `capabilities` include `"decision"` (cached per
+  provider and model; unreadable = assumed) gets System One, `POST {base_url}/v1/systemone {model, state: "<title>\n\n<spec>",
+  questions: {size: score 0–4, five criteria}}`; any other model, on any provider, gets one request through the provider adapter
+  (no tools) whose system prompt carries the same five criteria and asks for exactly `{"score": 0-4, "reason": "<one sentence>"}`,
+  parsed strictly. Both go through `providerFetch` (egress policy: no redirects, no metadata addresses, capped error bodies) and
+  time out after 60 s (loading a decision model next to the worker's takes ~45 s). Score ≥ 3 → the ticket is split as above (a `## Triage` section instead of the previous
+  attempt; no direct run; the API returns the epic's round 1). Event `triage {model, split, score, probabilities, confidence |
+  reason | error}` is the first event of the run that follows (the direct run, or the epic's round 1). Any error (a malformed
+  reply, a timeout, HTTP) → logged, run directly. Children are not triaged: their planner sized them, and triage would stall its `create_ticket`.
 - **Planner prompt.** Size children by the hint; use per-child `test_command`, mapped from the repo's protected tests;
   when a child fails and the environment says failed children are split, expect a `Split:` child instead of creating a
   same-size follow-up; call `complete_epic` only when the epic gate can pass.
