@@ -771,7 +771,9 @@ A workspace holds projects; a **project is one git repository** with its own boa
 - Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
   non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or
-  `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Changing a
+  `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Auth routes are rate
+  limited per client address (the socket's; with `POLARIS_TRUST_PROXY=1` the last `x-forwarded-for` entry): 5 sign-ins and 5
+  sign-ups a minute, 100 other auth calls, stored in the database; `POLARIS_RATE_LIMIT=0` turns it off (tests). Changing a
   provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it. Provider calls follow the
   egress policy (Providers): https off-network, no metadata addresses, no redirects, scrubbed errors, TLS checks on.
 - The harness never edits its running code; changes land through the review queue.

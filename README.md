@@ -177,6 +177,7 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 | `BETTER_AUTH_URL` | Public URL of the API (default `http://localhost:3000`) |
 | `WEB_ORIGIN` | Origin of the dashboard (default `http://localhost:5173` in dev) |
 | `POLARIS_SECRET_KEY` | 64 hex characters; encrypts provider API keys and OAuth tokens at rest |
+| `POLARIS_TRUST_PROXY=1` | Take the client address for sign-in rate limiting from the last `X-Forwarded-For` entry (only behind a proxy that sets it) |
 | `PORT` | API port (default 3000) |
 | `HOST` | Interface the API listens on (default `127.0.0.1`; `0.0.0.0` exposes it to your network) |
 | `POLARIS_OPEN_SIGNUP=1` | Allow sign-ups after the first account (by default the first account is the owner and sign-up then closes) |
@@ -334,7 +335,9 @@ tasks.md          milestone checklist
 - **Server.** Listens on `127.0.0.1` unless `HOST` says otherwise. The first account is the owner; sign-up then closes
   (`POLARIS_OPEN_SIGNUP=1` reopens it). Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` requests must come from a
   trusted origin (`BETTER_AUTH_URL`, `WEB_ORIGIN` or the API's own host). The ChatGPT sign-in callback listens on
-  `127.0.0.1` only.
+  `127.0.0.1` only. Sign-in and sign-up are limited to 5 a minute per client address (stored in the database, so a restart
+  doesn't reset it). Behind a reverse proxy every client shares the proxy's address: set `POLARIS_TRUST_PROXY=1` and make
+  the proxy set `X-Forwarded-For` itself (Polaris uses the last entry); otherwise leave it unset.
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.

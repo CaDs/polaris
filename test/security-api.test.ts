@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 // Single-user defaults: sign-up closes after the first account, cookie mutations must be same-origin, the API listens on loopback.
 delete process.env.POLARIS_OPEN_SIGNUP; // npm test opens sign-up for the multi-user suites
+process.env.POLARIS_RATE_LIMIT = "1";
 const { call, origin, project, signUp } = await import("./helpers.ts");
 
 test("the first account is the owner; sign-up then closes unless POLARIS_OPEN_SIGNUP=1", async () => {
@@ -63,5 +64,30 @@ test("the server refuses to start with an unset, short or placeholder BETTER_AUT
     const [code] = await once(child, "exit");
     assert.notEqual(code, 0, `secret "${secret}"`);
     assert.match(err, /BETTER_AUTH_SECRET/);
+  }
+});
+
+test("sign-in is rate limited per client address without NODE_ENV=production", async () => {
+  assert.equal(process.env.NODE_ENV, undefined);
+  const attempt = (ip: string) => call("POST", "/api/auth/sign-in/email", "", { email: "owner@x.dev", password: "wrong-password" }, { origin, "x-polaris-client-ip": ip });
+  for (let i = 1; i <= 5; i++) assert.equal((await attempt("203.0.113.9")).status, 401, `attempt ${i}`);
+  assert.equal((await attempt("203.0.113.9")).status, 429, "6th attempt in the window");
+  assert.equal((await attempt("203.0.113.10")).status, 401, "another address has its own bucket");
+});
+
+test("a real server limits by socket address and ignores a client-chosen address header", async () => {
+  const child = spawn(process.execPath, ["server/index.ts"], { env: { ...process.env, PORT: "0", DB_PATH: ":memory:", POLARIS_DATA_DIR: mkdtempSync(join(tmpdir(), "sec-")) } });
+  try {
+    let out = "";
+    while (!/api on \S+/.test(out)) out += (await once(child.stdout, "data"))[0];
+    const url = out.match(/api on (\S+)/)![1];
+    const codes: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const r = await fetch(`${url}/api/auth/sign-in/email`, { method: "POST", headers: { "content-type": "application/json", "x-polaris-client-ip": `198.51.100.${i}` }, body: JSON.stringify({ email: "a@x.dev", password: "wrong-password" }) });
+      codes.push(r.status);
+    }
+    assert.equal(codes[5], 429, codes.join());
+  } finally {
+    child.kill();
   }
 });

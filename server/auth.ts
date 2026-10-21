@@ -8,6 +8,16 @@ const options = {
   database: db,
   emailAndPassword: { enabled: true },
   plugins: [organization(), bearer()], // bearer: API tokens for the MCP server and scripts (npm run token)
+  // Brute-force limits, on by default (Better Auth's own default is production only). Keyed by the address app.ts puts in
+  // x-polaris-client-ip; kept in the database so a restart doesn't reset them. POLARIS_RATE_LIMIT=0 turns them off (the e2e suite signs up from one address).
+  rateLimit: {
+    enabled: process.env.POLARIS_RATE_LIMIT !== "0",
+    storage: "database",
+    window: 60,
+    max: 100,
+    customRules: { "/sign-in/email": { window: 60, max: 5 }, "/sign-up/email": { window: 60, max: 5 } },
+  },
+  advanced: { ipAddress: { ipAddressHeaders: ["x-polaris-client-ip"] } },
   trustedOrigins: [process.env.WEB_ORIGIN ?? "http://localhost:5173"],
   databaseHooks: {
     user: {

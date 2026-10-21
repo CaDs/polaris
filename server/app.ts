@@ -1,5 +1,6 @@
 import { attributedUsage, backfillUsage, treeUsage, usageSummary } from "./usage.ts";
 import { randomUUID } from "node:crypto";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
@@ -35,7 +36,18 @@ app.onError((e, c) => {
   return c.json({ error: "internal error" }, 500);
 });
 
-app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+// The limiter's client address: the socket's, or with POLARIS_TRUST_PROXY=1 the last x-forwarded-for entry (the one a reverse
+// proxy appended, which a client can't forge). Always overwritten, so a client can't pick its own bucket; requests without a
+// socket (tests) keep the header they came with. ponytail: one bucket per address, no per-account lockout.
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
+  const req = new Request(c.req.raw);
+  const socket = (c.env as { incoming?: unknown } | undefined)?.incoming;
+  const proxied = process.env.POLARIS_TRUST_PROXY === "1" ? c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() : undefined;
+  const ip = proxied || (socket ? getConnInfo(c).remote.address : undefined);
+  if (ip) req.headers.set("x-polaris-client-ip", ip);
+  else if (socket) req.headers.delete("x-polaris-client-ip");
+  return auth.handler(req);
+});
 
 // CSRF: cookie-authenticated mutations must come from a trusted origin (BETTER_AUTH_URL, WEB_ORIGIN) or this host.
 // No Origin and no Sec-Fetch-Site means a non-browser client (curl, CLI): allowed only without a cookie.
