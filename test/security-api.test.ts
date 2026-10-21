@@ -29,12 +29,14 @@ test("cookie-authenticated mutations must come from a trusted origin", async () 
   const cookie = (await call("POST", "/api/auth/organization/create", login.cookie, { name: "own", slug: "own" })).cookie;
   const { id: project_id } = await project(cookie, "own");
   const post = (headers: Record<string, string>) => call("POST", "/api/tickets", cookie, { title: "t", project_id }, headers);
+  process.env.POLARIS_ALLOWED_HOSTS = "polaris.lan";
   const evil = await post({ origin: "http://evil.example" });
   assert.equal(evil.status, 403);
   assert.equal(evil.body.error, "forbidden_origin");
   assert.equal((await post({ origin: "http://localhost:3000" })).status, 201); // BETTER_AUTH_URL
   assert.equal((await post({ origin })).status, 201); // WEB_ORIGIN
-  assert.equal((await post({ origin: "http://polaris.lan:3000", host: "polaris.lan:3000" })).status, 201); // the request's own host
+  assert.equal((await post({ origin: "http://polaris.lan:3000", host: "polaris.lan:3000" })).status, 201); // the request's own host (an allowed one)
+  delete process.env.POLARIS_ALLOWED_HOSTS;
   assert.equal((await post({ "sec-fetch-site": "same-origin" })).status, 201);
   assert.equal((await post({ "sec-fetch-site": "cross-site" })).status, 403);
   assert.equal((await post({})).status, 403, "a cookie without Origin/Sec-Fetch-Site is refused");
@@ -90,4 +92,19 @@ test("a real server limits by socket address and ignores a client-chosen address
   } finally {
     child.kill();
   }
+});
+
+test("every response carries the security headers; a foreign Host gets 421", async () => {
+  for (const path of ["/", "/assets/x.js", "/api/tickets"]) {
+    const r = await call("GET", path, "", undefined, { origin, host: "localhost:3000" });
+    const csp = r.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /frame-ancestors 'none'/, path);
+    assert.match(csp, /script-src 'self'(;|$)/, path);
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff", path);
+    assert.equal(r.headers.get("x-frame-options"), "DENY", path);
+    assert.equal(r.headers.get("referrer-policy"), "no-referrer", path);
+  }
+  assert.equal((await call("GET", "/api/tickets", "", undefined, { origin, host: "evil.example:3000" })).status, 421);
+  assert.equal((await call("GET", "/api/tickets", "", undefined, { origin, host: "[::1]:3000" })).status, 401);
+  assert.equal((await call("GET", "/api/tickets", "", undefined, { origin, host: "127.0.0.1" })).status, 401);
 });

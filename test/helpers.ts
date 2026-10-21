@@ -37,7 +37,7 @@ export async function call(method: string, path: string, cookie = "", body?: unk
   try {
     json = JSON.parse(text);
   } catch {}
-  return { status: res.status, text, body: json, cookie: set || cookie };
+  return { status: res.status, text, body: json, cookie: set || cookie, headers: res.headers };
 }
 
 export const signUp = (name: string) => call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { secureHeaders } from "hono/secure-headers";
 import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
@@ -39,6 +40,27 @@ app.onError((e, c) => {
 // The limiter's client address: the socket's, or with POLARIS_TRUST_PROXY=1 the last x-forwarded-for entry (the one a reverse
 // proxy appended, which a client can't forge). Always overwritten, so a client can't pick its own bucket; requests without a
 // socket (tests) keep the header they came with. ponytail: one bucket per address, no per-account lockout.
+// DNS rebinding: a page on another name that resolves to this machine would pass the same-host Origin check below, so only
+// loopback names, the configured public hosts (BETTER_AUTH_URL, WEB_ORIGIN) and POLARIS_ALLOWED_HOSTS (comma-separated names,
+// for reaching a HOST=0.0.0.0 server by its LAN name) are served, else 421. No Host header (tests) passes.
+app.use("*", async (c, next) => {
+  const host = c.req.header("host");
+  const name = host && URL.parse(`http://${host}`)?.hostname;
+  const ok = new Set(["localhost", "127.0.0.1", "[::1]", ...(process.env.POLARIS_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim())]);
+  for (const u of [process.env.BETTER_AUTH_URL, process.env.WEB_ORIGIN]) if (u && URL.canParse(u)) ok.add(new URL(u).hostname);
+  return host && (!name || !ok.has(name)) ? c.json({ error: "bad_host" }, 421) : next();
+});
+
+// Everything, static files and API: no framing (clickjacking Approve), no sniffing, no referrer, and a CSP that only allows our own scripts.
+app.use("*", secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"], connectSrc: ["'self'"],
+    objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'self'"],
+  },
+  xFrameOptions: "DENY",
+  referrerPolicy: "no-referrer",
+}));
+
 app.on(["GET", "POST"], "/api/auth/*", (c) => {
   const req = new Request(c.req.raw);
   const socket = (c.env as { incoming?: unknown } | undefined)?.incoming;
