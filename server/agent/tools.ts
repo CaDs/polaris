@@ -136,6 +136,19 @@ export function resolveIn(root: string, p: string) {
   return real;
 }
 
+// Host-side setup that writes under <root>/.polaris (skills, wiki) must not write through a symlink the repo committed there
+// (`.polaris -> ~/somewhere`): refuses when any of the given repo-relative paths, or a parent of one, is a symlink.
+export function refuseSymlinks(root: string, ...rels: string[]) {
+  for (const rel of rels)
+    for (let p = rel; p !== "."; p = dirname(p)) {
+      try {
+        if (lstatSync(join(root, p)).isSymbolicLink()) throw new AgentError("UnexpectedEnvironment", `${p} in the repository is a symlink; Polaris will not write through it`);
+      } catch (e) {
+        if (e instanceof AgentError) throw e; // not there yet is fine
+      }
+    }
+}
+
 const badInput = (message: string) => Object.assign(new AgentError("InvalidArguments", message), { badInput: true });
 
 function str(input: Record<string, unknown>, key: string, optional = false) {

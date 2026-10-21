@@ -755,7 +755,7 @@ A workspace holds projects; a **project is one git repository** with its own boa
 ## Guardrails
 
 - `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
-  never writable by agent tools, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
+  never writable by agent tools, file tools open only regular files up to 5 MB (a FIFO or sparse file can't hang or fill the server) and re-check after opening that a swapped parent dir didn't redirect them, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
   file is mounted read-only in the sandbox.
 - Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;
   the image's `polaris` 1000:1000 under Docker Desktop, which maps bind-mount ownership), with `--cap-drop ALL`,
@@ -778,7 +778,9 @@ A workspace holds projects; a **project is one git repository** with its own boa
   dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Submodules are ignored, and a nested
   repository the agent made (a directory with its own `.git`) fails the gate and is never committed: host git would read its
   config, filters included. Harness writes into the worktree
-  (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
+  (`.polaris/outputs`, `.polaris/history`) refuse symlinks; so does run setup for `.polaris/workspace-skills` and
+  `.polaris/wiki` (a symlinked `.polaris` fails the run), and skills are read through the root-bounded file tools'
+  path check (a symlink leaving the checkout is skipped). The sandbox image setting must be a plain docker image reference.
 - Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
   non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or

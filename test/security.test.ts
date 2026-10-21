@@ -4,7 +4,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
+import { listSkills } from "../server/agent/context.ts";
+import { writeWorkspaceSkills } from "../server/skills.ts";
+import { hostExec, isProtected, readAt, refuseSymlinks, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
 import { addWorktree, changedLines, changedPaths, commitAll, git, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
@@ -181,4 +183,35 @@ test("a parent dir swapped for a symlink never lets a file tool touch a file out
   assert.equal(leaked, 0);
   assert.equal(readFileSync(join(outside, "x"), "utf8"), "SENTINEL");
   assert.deepEqual(readdirSync(outside), ["x"]);
+});
+
+test("a symlinked .polaris fails skill/wiki setup and nothing outside is touched (POL-20)", () => {
+  const target = tmp("sec-polaris-target-");
+  mkdirSync(join(target, "workspace-skills"));
+  writeFileSync(join(target, "workspace-skills/keep.md"), "keep");
+  const root = tmp("sec-polaris-");
+  symlinkSync(target, join(root, ".polaris"));
+  assert.throws(() => writeWorkspaceSkills("ws-none", root), /\.polaris in the repository is a symlink/);
+  assert.throws(() => refuseSymlinks(root, ".polaris/wiki"), /symlink/);
+  assert.deepEqual(readdirSync(target), ["workspace-skills"]);
+  assert.equal(readFileSync(join(target, "workspace-skills/keep.md"), "utf8"), "keep");
+  // a symlinked child, and a fine tree
+  const r2 = tmp("sec-polaris-");
+  mkdirSync(join(r2, ".polaris"));
+  symlinkSync(target, join(r2, ".polaris/wiki"));
+  assert.throws(() => refuseSymlinks(r2, ".polaris/wiki"), /\.polaris\/wiki in the repository is a symlink/);
+  refuseSymlinks(r2, ".polaris/workspace-skills"); // absent: fine
+});
+
+test("skills that are symlinks leaving the checkout are skipped (POL-20)", () => {
+  const outside = tmp("sec-skill-out-");
+  writeFileSync(join(outside, "secret.md"), "---\nname: stolen\ndescription: host file\n---\n");
+  const root = tmp("sec-skill-");
+  mkdirSync(join(root, ".polaris/skills"), { recursive: true });
+  writeFileSync(join(root, ".polaris/skills/ok.md"), "---\nname: ok\ndescription: fine\n---\n");
+  symlinkSync(join(outside, "secret.md"), join(root, ".polaris/skills/x.md"));
+  assert.deepEqual(listSkills(root, "worker").map((s) => s.name), ["ok"]);
+  rmSync(join(root, ".polaris/skills"), { recursive: true });
+  symlinkSync(outside, join(root, ".polaris/skills"));
+  assert.deepEqual(listSkills(root, "worker"), []);
 });

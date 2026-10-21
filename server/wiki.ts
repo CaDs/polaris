@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { resolveIn, truncate } from "./agent/tools.ts";
+import { refuseSymlinks, resolveIn, truncate } from "./agent/tools.ts";
 import { AgentError } from "./agent/types.ts";
 import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
@@ -242,6 +242,7 @@ async function snapshotTo(pid: string, dest: string) {
 // Exports the wiki's HEAD to <worktree>/.polaris/wiki and returns its content: wikiTampered compares against it at the gate
 // (the dir is git-excluded, so git can't see a write there; the sandbox mounts it read-only, the host sandbox does not).
 export async function materialize(pid: string, worktree: string) {
+  refuseSymlinks(worktree, ".polaris/wiki");
   const dest = join(worktree, ".polaris/wiki");
   rmSync(dest, { recursive: true, force: true }); // a resumed attempt's worktree has one: what the agent left there must not become "original"
   await snapshotTo(pid, dest);

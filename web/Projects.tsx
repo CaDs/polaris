@@ -117,11 +117,11 @@ function RepoFields({ r }: { r?: Repo }) {
         <label>
           Sandbox network
           <select name="sandbox_network" defaultValue={r?.sandbox_network ?? "setup-only"}>
-            <option value="setup-only">Setup command only (default)</option>
+            <option value="setup-only">During setup only (default)</option>
             <option value="none">None</option>
             <option value="full">Full (agents and tests too)</option>
           </select>
-          <span className="hint">Agents run prompt-injectable text; with a network they can send the worktree anywhere or reach services on your machine. Setup (<span className="mono">npm ci</span>) needs the registry; <em>None</em> needs a warm cache.</span>
+          <span className="hint">Agents run prompt-injectable text; with a network they can send the worktree anywhere or reach services on your machine. The install step (<span className="mono">npm ci</span>) needs the registry; <em>None</em> needs a warm cache.</span>
         </label>
         <span className="hint">Per run. Test runners use the CPU count: <span className="mono">node --test</span> runs one test file per CPU at a time. Docker Desktop's own memory limit caps the total.</span>
       </details>
