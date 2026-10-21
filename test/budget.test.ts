@@ -61,8 +61,9 @@ test("worker runs use the workspace max_turns; the planner and the reviewer keep
   const t = await w.create({ title: "Small", spec: "Do it" });
   await call("POST", `/api/tickets/${t.id}/runs`, w.cookie);
   const failed = await w.is(t.id, "failed");
-  assert.equal(failed.runs.length, 1); // running out of budget is not retried
-  assert.equal(finished(failed.runs[0].id).reason, "turn budget exhausted (3)");
+  // Running out of budget is retried like a gate failure (a fresh attempt, the reason fed back), up to the last attempt.
+  assert.deepEqual(failed.runs.map((r: any) => [r.attempt, finished(r.id).reason]), [1, 2, 3].map((n) => [n, "turn budget exhausted (3)"]));
+  assert.match(events(failed.runs[1].id).find((e) => e.type === "run_started")!.p.task, /Previous attempt failed: turn budget exhausted \(3\)/);
 
   // The planner of an epic is not bound by it (its round takes more than 3 turns); its children are workers and are.
   const e = await w.create({ title: "Epic", spec: "x", kind: "epic" });
@@ -78,4 +79,22 @@ test("worker runs use the workspace max_turns; the planner and the reviewer keep
   const done = await w.is(r.id, "review");
   assert.equal(events(done.runs[0].id).find((x) => x.type === "model_review_started")!.p.budget, 8);
   assert.equal(finished(done.runs[0].id).status, "passed");
+});
+
+test("max_tokens: a workspace setting (default 2M) the worker's budget uses; the last budget failure splits the ticket", async () => {
+  const w = await workspace("bt", { test_command: "true", auto_split: true, model_review: false, wiki: false });
+  assert.equal((await call("GET", "/api/settings", w.cookie)).body.max_tokens, 2_000_000);
+  assert.equal((await w.settings({ max_tokens: "500000" })).body.max_tokens, 500_000); // form strings
+  for (const bad of [99_999, 20_000_001, 1.5, "lots"]) assert.match((await w.settings({ max_tokens: bad })).body.error, /Max tokens per attempt must be a whole number/);
+  assert.equal((await w.settings({ max_tokens: null })).body.max_tokens, 2_000_000);
+
+  // The demo worker spends 120 tokens a turn and needs 5 turns: a 300-token budget runs out on every attempt. (Below the
+  // API's minimum, so set directly.) The third failure splits the ticket into an epic instead of failing it.
+  const ws = (await call("GET", "/api/settings", w.cookie)).body.workspace_id;
+  db.prepare("UPDATE workspace_settings SET max_tokens = 300 WHERE workspace_id = ?").run(ws);
+  const t = await w.create({ title: "Thirsty", spec: "Do it" });
+  await call("POST", `/api/tickets/${t.id}/runs`, w.cookie);
+  const split = await until("split", async () => (await w.get(t.id)).escalated_key && (await w.get(t.id)));
+  assert.deepEqual(split.runs.map((r: any) => events(r.id).find((e) => e.type === "run_finished")!.p.reason.replace(/\(\d+ >= 300\)/, "")), [1, 2, 3].map(() => "token budget exhausted "));
+  await idle(ws);
 });

@@ -445,7 +445,9 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
             </div>
           );
         if (e.type === "reflection")
-          return "error" in p
+          return "skipped" in p
+            ? <p key={e.seq} className="muted">Reflection: skipped ({p.skipped === "provider_error" ? "a provider error" : "an environment failure"} teaches nothing about the work)</p>
+            : "error" in p
             ? <p key={e.seq} className="warn">Reflection: {p.error}</p>
             : <p key={e.seq} className="muted">Reflection: lessons {p.unchanged ? "unchanged" : "updated"} (v{p.version}, {p.chars} chars)</p>;
         if (e.type === "handoff")

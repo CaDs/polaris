@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 // M6: reflection → lessons, eval cases + eval runs, prompt versions with eval-gated promotion. POLARIS_SANDBOX=host (no docker).
 process.env.POLARIS_PROVIDER = "fake";
+process.env.POLARIS_RETRY_BASE_MS = "1"; // the dead provider below: retries don't wait seconds
 process.env.POLARIS_CONCURRENCY = "2";
 const { configure, fileTicket, app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf } = await import("./helpers.ts");
 const { activePrompt, addPrompt, promote, promotion, REFLECT_SYSTEM, seriesDigest, LESSONS_MAX } = await import("../server/improve.ts");
@@ -377,4 +378,17 @@ test("a changed worker.md reaches a workspace on the stock built-in; one on its 
   promote(stock, db.prepare("SELECT * FROM prompts WHERE workspace_id = ? AND version = 1").get(stock) as any);
   assert.equal(activePrompt(stock).body, old);
   assert.deepEqual([versions(stock).length, versions(custom).length], [2, 3]);
+});
+
+test("no reflection on a provider failure: it teaches nothing about the work, and adds no lessons version", async () => {
+  const cookie = await user("rinfra");
+  assert.equal((await configure(cookie, { repo_path: tempRepo(), setup_command: "", test_command: "true", auto_split: false, model_review: false, wiki: false })).status, 200);
+  const dead = (await call("POST", "/api/providers", cookie, { name: "Dead", kind: "ollama", base_url: "http://127.0.0.1:1" })).body.id;
+  const t = (await fileTicket(cookie, { title: "dead provider", provider_id: dead, model: "m" })).body;
+  assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, cookie)).status, 201);
+  const done = await waitFor(cookie, t.id, "failed");
+  const ev = events(done.runs.at(-1).id);
+  assert.match(ev.find((e) => e.type === "run_finished")!.p.reason, /^(ProviderError|UnexpectedEnvironment):/);
+  assert.ok(["provider_error", "environment"].includes(ev.find((e) => e.type === "reflection")!.p.skipped), JSON.stringify(ev.find((e) => e.type === "reflection")));
+  assert.equal((await call("GET", "/api/lessons", cookie)).body.versions.length, 0);
 });
