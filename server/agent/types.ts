@@ -43,6 +43,9 @@ export type ProviderResponse = { message: Msg; usage: Usage; stopReason: string;
 
 export interface Provider {
   stream(req: ProviderRequest, onEvent: (e: StreamEvent) => void): Promise<ProviderResponse>;
+  // A self-hosted model (Ollama, a LiteLLM proxy on this network): it may be loading, swapping or prefilling a long prompt
+  // before the first byte, so callers wait LOCAL_MODEL_TIMEOUT instead of their usual deadline.
+  local?: boolean;
 }
 
 // Anything not one of these is a harness bug and reported as "Unknown".

@@ -43,7 +43,7 @@ export function requestBody(req: ProviderRequest) {
   };
 }
 
-export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider {
+export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeoutMs?: number }): Provider {
   const url = `${(opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "")}/v1/messages`;
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void) {
     let raw: Record<string, number> = {};
@@ -57,7 +57,7 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string }): Provider 
         headers: { "content-type": "application/json", "x-api-key": opts.apiKey, "anthropic-version": "2023-06-01" },
         body: JSON.stringify(body),
         signal: req.signal,
-      });
+      }, opts.headersTimeoutMs);
     } catch (e) {
       if (req.signal?.aborted) throw e;
       if (e instanceof EgressError) throw new AgentError("ProviderError", e.message); // policy: a retry would be refused too

@@ -39,6 +39,19 @@ const isLocal = (a: string) => local.check(plain(a), family(plain(a)));
 // A host name that can only mean this machine or the local network (docker service names, mDNS, .internal).
 const localName = (h: string) => h === "localhost" || h.endsWith(".localhost") || !h.includes(".") || /\.(local|internal|lan|home\.arpa)$/.test(h);
 
+// How long a local model may take to answer (headers, or a one-off request): Ollama swapping a 120B model in is ~45 s, and
+// prefilling a 60k-token prompt can take minutes. Hosted providers keep providerFetch's 120 s.
+export const LOCAL_MODEL_TIMEOUT = 600_000;
+// A base URL on this machine or the local network, by its host alone (no DNS).
+export function isLocalUrl(raw: string) {
+  try {
+    const host = new URL(raw).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return isIP(host) ? isLocal(host) : localName(host);
+  } catch {
+    return false;
+  }
+}
+
 // The parts of the policy that need no DNS: for validating a base URL when it is saved.
 export function checkUrl(raw: string): URL {
   let u: URL;

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Hono, type Context } from "hono";
 import type { SQLInputValue } from "node:sqlite";
 import { db } from "./db.ts";
@@ -8,6 +9,19 @@ import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
 import { IMAGE_REF, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
+
+// Projects whose repository is the checkout this server runs from. A server started with --watch there restarts on every
+// merge or edit in it, and a restart fails every running run (server/index.ts warns; README "Working on Polaris with Polaris").
+export function ownCheckoutProjects(root = fileURLToPath(new URL("..", import.meta.url))) {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p; // a repository that is gone is not this checkout
+    }
+  };
+  return (db.prepare("SELECT key, repo_path FROM projects").all() as { key: string; repo_path: string }[]).filter((p) => real(p.repo_path) === real(root));
+}
 
 // M11 tracker (see SPEC "Tracker (M11)"): labels, priority, assignee, estimate, due date, projects + milestones, cycles,
 // filters + ranked search over tickets, saved views. Workspace-scoped like everything else: every id a body or a filter
