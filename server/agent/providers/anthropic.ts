@@ -1,5 +1,5 @@
 import { AgentError, stable, type Block, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, withRetry } from "./retry.ts";
+import { httpError, responseBudget, retryable, streamIndex, withRetry } from "./retry.ts";
 import { cappedText, EgressError, providerFetch, scrub } from "../../egress.ts";
 
 // Anthropic Messages API over fetch + SSE. The same adapter talks to Ollama's
@@ -74,6 +74,7 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
     const json: string[] = [];
     let stopReason = "";
     const handle = (e: ApiBlock) => {
+      if (e.index !== undefined) streamIndex(e.index);
       switch (e.type) {
         case "message_start":
           raw = { ...e.message.usage };
@@ -124,7 +125,9 @@ export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeo
 
     try {
       let buf = "";
+      const budget = responseBudget();
       for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        budget(chunk);
         buf += chunk.replace(/\r\n/g, "\n");
         for (let i; (i = buf.indexOf("\n\n")) >= 0; ) {
           const data = buf.slice(0, i).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");

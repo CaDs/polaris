@@ -1,5 +1,5 @@
 import { AgentError, noUsage, type Block, type Msg, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, secretsOf, withRetry } from "./retry.ts";
+import { httpError, responseBudget, retryable, secretsOf, streamIndex, withRetry } from "./retry.ts";
 import { cappedText, EgressError, providerFetch } from "../../egress.ts";
 
 type Item = Record<string, any>;
@@ -98,7 +98,7 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
             break;
           case "response.output_text.delta": onEvent({ type: "text", text: e.delta }); break;
           case "response.reasoning_summary_text.delta": onEvent({ type: "reasoning", text: e.delta }); break;
-          case "response.output_item.done": items[e.output_index] = e.item; break;
+          case "response.output_item.done": items[streamIndex(e.output_index)] = e.item; break;
           case "response.completed": done = e.response; completed = true; break;
           case "response.incomplete": done = e.response; break;
           case "response.failed": throw responseError(e.response?.error?.code ?? "failed", e.response?.error?.message ?? "OpenAI response failed", requestId);
@@ -107,7 +107,9 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
       };
       try {
         let buf = "";
-        for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        const budget = responseBudget();
+      for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        budget(chunk);
           buf += chunk;
           for (;;) {
             const match = /\r?\n\r?\n/.exec(buf);

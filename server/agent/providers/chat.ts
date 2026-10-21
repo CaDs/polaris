@@ -1,5 +1,5 @@
 import { AgentError, noUsage, type Block, type Msg, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, secretsOf, withRetry } from "./retry.ts";
+import { httpError, reportedCost, responseBudget, retryable, secretsOf, streamIndex, withRetry } from "./retry.ts";
 import { cappedText, EgressError, providerFetch, scrub } from "../../egress.ts";
 
 // OpenAI Chat Completions over fetch + SSE: what OpenRouter and the LiteLLM proxy (and most OpenAI-compatible servers)
@@ -70,7 +70,7 @@ export function chatCompletions(opts: { url: string; headers: Record<string, str
           const thought = d.reasoning ?? d.reasoning_content; // OpenRouter / LiteLLM
           if (typeof thought === "string" && thought) onEvent({ type: "reasoning", text: thought });
           for (const tc of d.tool_calls ?? []) {
-            const i = typeof tc.index === "number" ? tc.index : calls.length;
+            const i = streamIndex(typeof tc.index === "number" ? tc.index : calls.length);
             const c = (calls[i] ??= { id: "", name: "", args: "" });
             if (tc.id) c.id = tc.id;
             if (tc.function?.name && !c.name) (c.name = tc.function.name), onEvent({ type: "tool_use", id: c.id || `call_${i}`, name: c.name });
@@ -81,7 +81,9 @@ export function chatCompletions(opts: { url: string; headers: Record<string, str
       };
       try {
         let buf = "";
-        for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        const budget = responseBudget();
+      for await (const chunk of res.body.pipeThrough(new TextDecoderStream())) {
+        budget(chunk);
           buf += chunk;
           for (;;) {
             const match = /\r?\n\r?\n/.exec(buf);
@@ -109,7 +111,7 @@ export function chatCompletions(opts: { url: string; headers: Record<string, str
       const status = typeof raw?.prompt_tokens === "number" && typeof raw?.completion_tokens === "number" ? "reported" as const : raw ? "partial" as const : "unavailable" as const;
       return {
         message: { role: "assistant" as const, content }, usage: usageOf(raw), usageStatus: status,
-        stopReason: tools.length ? "tool_use" : STOP[finish] ?? finish, ...(typeof raw?.cost === "number" ? { costUsd: raw.cost } : {}),
+        stopReason: tools.length ? "tool_use" : STOP[finish] ?? finish, ...(reportedCost(raw?.cost) === undefined ? {} : { costUsd: reportedCost(raw?.cost) }),
       };
     } catch (error) {
       const e = error instanceof AgentError ? error : new AgentError(req.signal?.aborted ? "UserAborted" : "ProviderError", (error as Error).message);

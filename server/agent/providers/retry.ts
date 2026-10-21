@@ -37,6 +37,24 @@ export function httpError(res: Response, body: string) {
 // Header values of a request without the "Bearer " prefix: the secrets to scrub from what the endpoint says back.
 export const secretsOf = (headers: Record<string, string>) => Object.entries(headers).filter(([k]) => /auth|key|token/i.test(k)).map(([, v]) => v.replace(/^Bearer /, ""));
 
+// Bounds on what an endpoint may make us hold: the whole response (SSE buffer and accumulators are slices of it), the
+// block/tool index it names (a sparse array is walked by .filter: index 4e8 stalled the event loop), and the cost it
+// reports (a negative one would lower the spend ledger, a huge one lock the workspace out).
+const RESPONSE_MAX = 32 * 1024 * 1024;
+const MAX_INDEX = 1000;
+export const MAX_COST_USD = 100;
+export function responseBudget() {
+  let n = 0;
+  return (chunk: string) => {
+    if ((n += chunk.length) > RESPONSE_MAX) throw new AgentError("ProviderError", `response larger than ${RESPONSE_MAX >> 20} MB: refused`);
+  };
+}
+export function streamIndex(i: unknown) {
+  if (!Number.isInteger(i) || (i as number) < 0 || (i as number) > MAX_INDEX) throw new AgentError("ProviderError", `stream sent an unusable index (0 to ${MAX_INDEX} allowed)`);
+  return i as number;
+}
+export const reportedCost = (c: unknown) => (typeof c === "number" && Number.isFinite(c) && c >= 0 ? Math.min(c, MAX_COST_USD) : undefined);
+
 // Runs one request attempt; `once` gets an onEvent that marks the attempt as having produced output.
 // `secrets` (the request's credentials) are scrubbed from the retry events emitted here, before any outer wrapper sees them.
 export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: AbortSignal | undefined, once: (on: (e: StreamEvent) => void) => Promise<T>, metering = false, secrets: string[] = []): Promise<T> {
