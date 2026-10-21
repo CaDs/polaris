@@ -292,11 +292,9 @@ nav a.active { background: var(--hover); font-weight: 500; }
 /* Title and spec grow with their text instead of clipping it (Firefox, without field-sizing, keeps their rows and scrolls). */
 textarea.h-input { resize: none; overflow: hidden; field-sizing: content; line-height: 1.35; }
 .ticket-view textarea.spec { field-sizing: content; min-height: calc(5lh + 14px); max-height: 40vh; }
-@media (min-width: 1500px) {
-  .ticket-body { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 24px; align-items: start; }
-  .ticket-view textarea.spec { max-height: 70vh; }
-  .ticket-work > :first-child { margin-top: 4px; }
-}
+.ticket-about, .ticket-view > .row { max-width: 860px; } /* prose reads best at about 80 characters a line; runs and transcripts below use the full width */
+.spec-view { display: grid; justify-items: start; gap: 8px; margin-bottom: 8px; }
+.spec-view > [role="region"] { justify-self: stretch; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .crumbs { margin-bottom: 8px; }
 .crumbs .link { padding: 0; }
 .h-input { font-size: 18px; font-weight: 600; border-color: transparent; background: transparent; margin: 0; padding: 4px 6px; margin-left: -6px; width: calc(100% + 6px); }

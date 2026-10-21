@@ -25,6 +25,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const [error, setError] = useState("");
   const [retrying, setRetrying] = useState<Run | null>(null);
   const [validating, setValidating] = useState(false);
+  const [editing, setEditing] = useState(false); // the spec shows rendered; Edit (or a double-click) switches to its Markdown
   const [providers] = useProviders();
 
   const load = () => api<Detail>(`/api/tickets/${ticket.id}`).then(setDetail, () => {});
@@ -33,6 +34,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
     setSpec(ticket.spec);
     setTestCommand(ticket.test_command ?? "");
     setSelected(null);
+    setEditing(false);
   }, [ticket.id]);
   useEffect(() => {
     setProjectTest("");
@@ -152,7 +154,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), e.currentTarget.blur())} />
       {!reviewing && actions}
       <Alert error={error} />
-      {/* Wide screens outside review: the ticket on the left, its runs and live transcript beside it. */}
+      {/* One column: the spec and comments at a reading width, then the runs and transcript at full width. */}
       <div className={reviewing ? "ticket-review" : "ticket-body"}>
       {reviewing && <>
         <Review key={`${ticket.id}-${diff?.run_id ?? ""}`} ticket={ticket} reload={reload} d={diff} diffError={diffError} runs={runs} protectedPaths={protectedPaths} />
@@ -161,7 +163,20 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       <div className="ticket-about">
       <Disclosure key={`${ticket.id}-ticket`} enabled={reviewing} title="Ticket">
       {reviewing && actions}
-      <textarea className="spec" aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
+      {editing ? (
+        <>
+          <textarea className="spec" aria-label="Spec" placeholder="Describe what the agent should do… (Markdown)" rows={5} value={spec} autoFocus onChange={(e) => setSpec(e.target.value)} onBlur={save}
+            onKeyDown={(e) => e.key === "Escape" && (e.preventDefault(), e.currentTarget.blur(), setEditing(false))} />
+          <div className="row"><button className="btn" onClick={() => setEditing(false)}>Done</button><span className="hint">Markdown. Esc or Done to preview; changes save as you leave the box.</span></div>
+        </>
+      ) : (
+        <div className="spec-view">
+          <div role="region" aria-label="Spec" onDoubleClick={() => setEditing(true)} title="Double-click to edit">
+            {spec.trim() ? <Markdown text={spec} /> : <p className="muted">No spec yet.</p>}
+          </div>
+          <button className="btn" onClick={() => setEditing(true)}>{spec.trim() ? "Edit spec" : "Write a spec"}</button>
+        </div>
+      )}
       <label>
         Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={projectTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
         <span className="hint">Overrides the project's for this ticket; empty = project default. Runs: <span className="mono">{testCommand.trim() || projectTest || "(no test command)"}</span></span>

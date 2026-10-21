@@ -119,5 +119,12 @@ test("M12: failure classes on the Improvement page; Mine failures drafts a ticke
   await stuck.getByRole("button", { name: "APP-3" }).click();
   await expect(page.getByText("mined from stuck")).toBeVisible();
   await expect(page.getByLabel("Status")).toHaveValue("todo");
+  // The spec shows rendered; Edit spec shows its Markdown, Esc goes back.
+  const spec = page.getByRole("region", { name: "Spec" });
+  await expect(spec.getByRole("heading", { name: "Mined from failures" })).toBeVisible();
+  await expect(spec.locator("code").filter({ hasText: /^stuck$/ }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Edit spec" }).click();
   await expect(page.getByLabel("Spec")).toHaveValue(/## Mined from failures\n\nClass `stuck`/);
+  await page.getByLabel("Spec").press("Escape");
+  await expect(spec.getByRole("heading", { name: "Mined from failures" })).toBeVisible();
 });
