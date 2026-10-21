@@ -9,10 +9,10 @@ import { listSkills, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
-import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
+import { parseProtected, readOnlyPaths, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type EventPayloads, type Msg, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, protectedFilesAt, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun, failureClass } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_TOOLS, type Sandbox } from "./sandbox.ts";
@@ -65,12 +65,12 @@ export const settingsFor = (ws: string) =>
   ({ ...SETTINGS_DEFAULTS, ...MODEL_DEFAULTS, workspace_id: ws, ...(db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as object | undefined) }) as Settings;
 // What a run of a project's ticket uses: the workspace's settings plus the project's repository.
 export type ProjectSettings = Settings & {
-  project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
+  project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; protected_mode: string; image: string;
   sandbox_cpus: number; sandbox_memory_gb: number;
 };
 export const resourcesOf = (s: ProjectSettings | undefined) => (s ? { cpus: s.sandbox_cpus, memory_gb: s.sandbox_memory_gb } : undefined);
 export function projectSettings(projectId: string) {
-  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, sandbox_cpus, sandbox_memory_gb FROM projects WHERE id = ?").get(projectId) as
+  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, protected_mode, image, sandbox_cpus, sandbox_memory_gb FROM projects WHERE id = ?").get(projectId) as
     | { workspace_id: string }
     | undefined;
   return p && ({ ...settingsFor(p.workspace_id), ...p } as ProjectSettings);
@@ -149,12 +149,19 @@ export async function runWindow(stored: ReturnType<typeof providerById>, model: 
   return detected || { window: stored.context_window, source: auto ? "default" : "provider setting" };
 }
 
+// The worker's environment lines for the protected paths (the planner's line is in planner.ts, same wording). `fixed`:
+// read-only whatever the mode.
+export const protectedLines = (paths: string[], mode: string, fixed: string[] = []) => [
+  ...(mode === "add_only" && paths.length ? [`- Protected paths (add new files there, e.g. regression tests; changing or deleting existing files fails the run): ${paths.join(", ")}`] : []),
+  ...((mode === "add_only" ? fixed : [...paths, ...fixed]).length ? [`- Read-only paths (changes there fail the run): ${(mode === "add_only" ? fixed : [...paths, ...fixed]).join(", ")}`] : []),
+];
+
 // The first user message. Everything that differs per run goes here, ahead of the ticket, never into the system prompt or
 // the tools, so those stay byte-identical across runs and repos (prompt-cache prefix): environment, skills, the workspace's
 // lessons, the project wiki's index (M10) and feedback (see below).
 // The environment block is the one place for these facts; worker.md only points at it.
 function taskFor(t: { title: string; spec: string; header?: string }, info: {
-  sandbox: string; repo: string; base: string; test: string; protectedPaths: string[]; budget: { turns: number; minutes: number }; skills: Skill[]; lessons?: string; wiki?: string;
+  sandbox: string; repo: string; base: string; test: string; protectedPaths: string[]; fixedPaths: string[]; protectedMode: string; budget: { turns: number; minutes: number }; skills: Skill[]; lessons?: string; wiki?: string;
 }, feedback: string[]) {
   const parts = [
     [
@@ -162,7 +169,7 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
       `- Sandbox: ${info.sandbox || "unknown"}; ${SANDBOX_TOOLS}: don't install them, skip acceptance criteria that need them and say so in your reply`,
       `- Repository: ${info.repo}, branched from ${info.base}. It is at /work in the sandbox, which is also every shell command's working directory; tool paths are relative to it (absolute /work/... is accepted too)`,
       `- Test command: ${info.test.trim() ? `\`${info.test}\`. The harness runs it after you finish and it must exit 0` : "none (the harness runs no tests)"}`,
-      ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
+      ...protectedLines(info.protectedPaths, info.protectedMode, info.fixedPaths),
       "- git is read-only: status, diff and log work; commit and other writes fail. The harness commits your change after the tests pass",
       `- Budget: ${info.budget.turns} turns and ${info.budget.minutes} minutes for this attempt (fix rounds after failed tests or a review use what is left); a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
@@ -390,7 +397,7 @@ async function epicGate(s: ProjectSettings, command: string, log: ReturnType<typ
   try {
     const sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, sha, wt);
-    sandbox = await openSandbox(id, wt, parseProtected(s.protected_paths), s.image, resourcesOf(s));
+    sandbox = await openSandbox(id, wt, readOnlyPaths(parseProtected(s.protected_paths), s.protected_mode), s.image, resourcesOf(s));
     const sh = (c: string) => sandbox!.exec(c, { cwd: wt, timeoutMs: COMMAND_TIMEOUT, signal });
     const setup = s.setup_command.trim() ? await sh(s.setup_command) : undefined;
     const broken = setup && setup.code !== 0; // a failing setup command fails the gate
@@ -557,7 +564,9 @@ async function execute(runId: string) {
     if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "the ticket's project was deleted");
     // The ticket's own test_command (when set) overrides the project's; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
-    let protectedPaths = parseProtected(cfg.protected_paths);
+    const protectedPaths = parseProtected(cfg.protected_paths);
+    const mode = cfg.protected_mode; // add_only: agents may add files under protectedPaths (POL-29)
+    let fixedPaths: string[] = []; // read-only whatever the mode: the wiki snapshot and workspace skills
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     let base_sha: string;
     if (ev) await addDetached(cfg.repo_path, (base_sha = ev.base_sha), worktree);
@@ -578,13 +587,13 @@ async function execute(runId: string) {
       try {
         wikiTree = await materialize(t.project_id, worktree);
         wiki = await wikiSection(t.project_id, cfg.repo_path, base_sha);
-        protectedPaths = [...protectedPaths, ".polaris/wiki"];
+        fixedPaths = [...fixedPaths, ".polaris/wiki"];
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
       }
     // M17: workspace skills next to the repo's (not for frozen eval cases: a score must not move when someone edits them).
-    if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) protectedPaths = [...protectedPaths, WORKSPACE_SKILLS];
-    sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image, resourcesOf(s)); // eval runs too: the size doesn't change results
+    if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) fixedPaths = [...fixedPaths, WORKSPACE_SKILLS];
+    sandbox = await openSandbox(runId, worktree, readOnlyPaths(protectedPaths, mode, fixedPaths), cfg.image, resourcesOf(s)); // eval runs too: the size doesn't change results
     log({ type: "setup", payload: { step: "sandbox", sandbox: sandbox.name } });
     const sh = (command: string) => sandbox!.exec(command, { cwd: worktree, timeoutMs: COMMAND_TIMEOUT, signal });
     const abortCheck = () => {
@@ -608,12 +617,13 @@ async function execute(runId: string) {
     const prompt = (run.prompt_version && promptAt(t.workspace_id, run.prompt_version)) || activePrompt(t.workspace_id);
     db.prepare("UPDATE runs SET prompt_version = ?, lessons_version = ? WHERE id = ?").run(prompt.version, lessons?.version ?? null, runId);
     const task = resumed?.task ?? taskFor(ev ?? { ...t, header: trackerHeader(t.id) }, {
-      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths,
+      sandbox: env.stdout.trim().split("\n").join(", node "), repo: basename(cfg.repo_path), base: ev ? base_sha.slice(0, 8) : s!.base_branch, test: testCommand, protectedPaths, fixedPaths, protectedMode: mode,
       budget: { turns: limits.max_turns, minutes: limits.max_minutes }, skills, lessons: lessons?.body, wiki,
     }, ev ? [] : feedback(t, runId, run.attempt));
     const { stored, compactAt, providerFor } = await modelFor(run, s?.compact_at_tokens, log);
     const common = {
-      model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
+      model: run.model, root: worktree, exec: sandbox.exec, signal,
+      ...(mode === "add_only" ? { protectedPaths: fixedPaths, addOnly: { paths: protectedPaths, existing: await protectedFilesAt(worktree, base_sha, protectedPaths) } } : { protectedPaths: [...protectedPaths, ...fixedPaths] }), cacheKey: t.id, compactAt,
       onEvent: relay(log), onStream: liveStream(runId), // this pipeline writes run_metrics and run_finished
     };
     // A resumed attempt gets what the interrupted one left, with the fix rounds' floors.
@@ -638,7 +648,7 @@ async function execute(runId: string) {
       const first = await run();
       abortCheck();
       // git can't see .polaris/wiki (excluded), so its snapshot is compared directly.
-      const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
+      const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths, mode, fixedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
       const nested = await nestedRepos(worktree);
       const blocked = touched.length > 0 || nested.length > 0;
       const { r: test, ...flake } = blocked ? { r: first } : await rerunFlaky(first, run);
@@ -669,7 +679,7 @@ async function execute(runId: string) {
         gateFixes++;
         const why = gateFailure(result);
         log({ type: "gate_fix", payload: { reason: why } });
-        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}${result.nested ? `\nThese are nested git repositories, which cannot be committed: ${result.nested.join(", ")}. Delete their .git, or move them out of the repository.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
+        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\n${mode === "add_only" ? "You changed or deleted files that existed under protected paths" : "You changed read-only (protected) paths"}: ${result.protected.join(", ")}. Revert these${mode === "add_only" ? " (adding new files there is fine)" : ""}.` : ""}${result.nested ? `\nThese are nested git repositories, which cannot be committed: ${result.nested.join(", ")}. Delete their .git, or move them out of the repository.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
         if (!(await fixRound(why, message))) {
           gateOutput = result.output;
           return false;
@@ -799,7 +809,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     const gateCommand = t.test_command ?? s.test_command; // a split epic keeps the command of the ticket it replaced
     await startReady(t.id); // children moved in while the epic was not running
     const task = plannerTask(t, {
-      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), skills,
+      repo: basename(s.repo_path), base: s.base_branch, sha: base_sha, gate: gateCommand, sizeHint: s.child_size_hint, autoSplit: !!s.auto_split, protectedPaths: parseProtected(s.protected_paths), protectedMode: s.protected_mode, skills,
       lessons: lessons?.body, wiki, round: run.attempt, notes, review: reviewNote(t.id), since,
     });
     const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);

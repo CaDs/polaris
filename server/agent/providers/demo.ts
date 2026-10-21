@@ -224,6 +224,16 @@ function demoMine(req: ProviderRequest): ProviderResponse {
   };
 }
 
+// PROT-* in a ticket: what the shell does to tests/ (add-only mode, POL-29). The test repo has tests/existing.txt; OWN edits a
+// file the run itself added.
+const PROTECTED_CHANGE: Record<string, string> = {
+  ADD: "mkdir -p tests && echo new > tests/new.test.ts",
+  EDIT: "echo changed >> tests/existing.txt",
+  DEL: "rm tests/existing.txt",
+  MV: "mv tests/existing.txt tests/moved.txt",
+  OWN: "mkdir -p tests && echo a > tests/own.txt && echo b >> tests/own.txt",
+};
+
 // The scripted turns. ok: also create ok.txt; why says so in the first turn's text.
 function script(task: string, ok: boolean, why: string) {
   const ticket = task.includes("# Task") ? task.slice(task.lastIndexOf("# Task")) : task;
@@ -255,6 +265,7 @@ function script(task: string, ok: boolean, why: string) {
             use("1", "edit_file", { path: "notes.txt", old_string: "", new_string: "hello from the demo agent\n" }),
             ...(ok ? [use("1b", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })] : []),
             ...(ticket.includes("SPLIT-ME") ? [use("1c", "shell", { command: "mkdir -p tests && echo broken > tests/broken.txt" })] : []),
+            ...(PROTECTED_CHANGE[/PROT-(ADD|EDIT|DEL|MV|OWN)/.exec(ticket)?.[1] ?? ""] ? [use("1e", "shell", { command: PROTECTED_CHANGE[/PROT-(ADD|EDIT|DEL|MV|OWN)/.exec(ticket)![1]] })] : []),
             ...(ticket.includes("WIKI-WRITE") ? [use("1d", "shell", { command: "echo tampered > .polaris/wiki/x" })] : []),
           ],
           [use("2", "shell", { command: "ls" })],

@@ -8,8 +8,10 @@ import { AgentError, type ErrorKind, type ToolDef, type ToolUseBlock } from "./t
 export type ExecResult = { stdout: string; stderr: string; code: number | null; timedOut: boolean };
 export type Exec = (command: string, opts: { cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<ExecResult>;
 // protectedPaths: repo-relative dirs/files edit_file must not write (tests/, evals/). The sandbox also mounts them read-only.
+// addOnly: the project's protected paths in add-only mode: new files may be written there, but not the `existing` ones
+// (case-folded paths that existed at the run's base commit, see foldPath).
 // turn/callId/tool name the spill file of a long result (see spill below). reads: read_file outputs of the current conversation (loop.ts).
-type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
+type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; addOnly?: { paths: string[]; existing: Set<string> }; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
 export type Tool = { def: ToolDef; run: (input: Record<string, unknown>, ctx: ToolContext) => Promise<string> };
 
 const MAX_OUTPUT = 30_000; // read_file only: shell/search output over SPILL_AT goes to a file instead
@@ -168,6 +170,9 @@ export const hostExec: Exec = (command, { cwd, timeoutMs, signal }) => {
   return capture(child, kill, { timeoutMs, signal });
 };
 
+// The paths to mount read-only (sandbox.ts openSandbox): add-only mode leaves the project's paths writable, since new files
+// must be creatable there; the fixed ones (.polaris/wiki, workspace skills, ...) are read-only whatever the mode.
+export const readOnlyPaths = (paths: string[], mode: string, fixed: string[] = []) => [...(mode === "add_only" ? [] : paths), ...fixed];
 // "tests/, ./evals" → ["tests", "evals"]. Entries are repo-relative; settings reject "..".
 export const parseProtected = (list: string) =>
   list.split(",").map((p) => p.trim().replace(/^(\.\/)+|\/+$/g, "")).filter(Boolean);
@@ -183,6 +188,7 @@ const caseless = (() => {
   }
 })();
 const fold = (s: string) => (caseless ? s.toLowerCase() : s);
+export const foldPath = fold;
 
 // True if `rel` (repo-relative, "/"-separated) is or is under one of the (parsed) protected paths.
 export function isProtected(rel: string, protectedPaths: string[]) {
@@ -192,10 +198,12 @@ export function isProtected(rel: string, protectedPaths: string[]) {
 
 // Path for writing: inside root, not protected, and no .git anywhere in it (a .git file or dir is what the host's git
 // reads: pointed at agent-written config, it runs commands on the host). Returns the real path.
-function writable(root: string, p: string, protectedPaths: string[]) {
+function writable(root: string, p: string, protectedPaths: string[], addOnly?: ToolContext["addOnly"]) {
   const file = resolveIn(root, p);
   const rel = relative(realpathSync.native(root), file).split(sep).join("/");
   if (isProtected(rel, protectedPaths) || rel.split("/").some((s) => fold(s) === ".git")) throw new AgentError("InvalidArguments", `${p} is read-only (protected path)`);
+  if (addOnly?.existing.has(fold(rel)) && isProtected(rel, addOnly.paths))
+    throw new AgentError("InvalidArguments", `${p} existed before this run under a protected path: add new files instead of changing it`);
   return file;
 }
 
@@ -253,11 +261,11 @@ const editFile: Tool = {
       required: ["path", "old_string", "new_string"],
     },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const p = str(input, "path")!;
     const oldS = str(input, "old_string")!;
     const newS = str(input, "new_string")!;
-    const file = writable(root, p, protectedPaths);
+    const file = writable(root, p, protectedPaths, addOnly);
     const text = readAt(file)?.toString("utf8");
     if (oldS === "") {
       if (text !== undefined) throw new AgentError("InvalidArguments", `${p} already exists; old_string must be non-empty to edit it`);
@@ -283,9 +291,9 @@ const deleteFile: Tool = {
     description: "Delete a file.",
     input_schema: { type: "object", properties: { path: { type: "string", description: "Path relative to the workspace root" } }, required: ["path"] },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const p = str(input, "path")!;
-    const file = writable(root, p, protectedPaths);
+    const file = writable(root, p, protectedPaths, addOnly);
     unlinkAt(file, p);
     return `deleted ${p}`;
   },
@@ -331,7 +339,7 @@ const applyPatch: Tool = {
     description: `Add, update or delete files with one patch. ${PATCH_HELP} Context lines must match the file; paths are relative to the workspace root.`,
     input_schema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const lines = str(input, "patch")!.replace(/\r\n/g, "\n").split("\n");
     while (lines.at(-1) === "") lines.pop();
     if (lines[0]?.trim() !== "*** Begin Patch" || lines.at(-1)?.trim() !== "*** End Patch") throw new AgentError("InvalidArguments", `patch must start with '*** Begin Patch' and end with '*** End Patch'. ${PATCH_HELP}`);
@@ -343,7 +351,7 @@ const applyPatch: Tool = {
       const m = /^\*\*\* (Add|Delete|Update) File: (.+)$/.exec(lines[i].trim());
       if (!m) throw new AgentError("InvalidArguments", `unexpected line in patch: ${lines[i]}. ${PATCH_HELP}`);
       const [, op, p] = m;
-      const file = writable(root, p.trim(), protectedPaths);
+      const file = writable(root, p.trim(), protectedPaths, addOnly);
       let j = i + 1;
       while (j < lines.length - 1 && !lines[j].startsWith("*** ")) j++;
       const body = lines.slice(i + 1, j).filter((l) => l !== "*** End of File");

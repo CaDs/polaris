@@ -114,7 +114,10 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
 2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
    with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
-   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
+   Protected paths are your tests, which agents must not weaken; they default to `tests/,evals/`, and `POST /api/projects/inspect`
+   suggests them (and the commands) from the repository's base branch. **Add-only** (the default) lets agents add new files there,
+   such as regression tests, but not change, delete or rename ones that existed when the run started; **read-only** lets them touch nothing there.
+   Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
    picks the project you work in (a new one is picked for you): new tickets, the home page and the Agent's chats (each chat belongs to one project) follow it.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
@@ -343,7 +346,7 @@ tasks.md          milestone checklist
   gid, so files agents create in the worktree are yours; under Docker Desktop it is the image's `polaris` (1000:1000),
   and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid, so it needs a writable `HOME`.
   The built-in image is rebuilt when its `polaris.image.version` label is older than the harness expects.
-  Your protected paths, the worktree's `.git` file and the repo's git dir are mounted read-only. The file tools never
+  Your protected paths (in read-only mode; add-only mode enforces them in the file tools and the gate, so agents can add files there), the worktree's `.git` file and the repo's git dir are mounted read-only. The file tools never
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.
 - **Host git.** Every git command the harness runs has hooks and fsmonitor off, and addresses a run's worktree by the git

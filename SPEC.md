@@ -152,7 +152,7 @@ never changed mid-conversation either (cache prefix, model behaviour).
   prompt (the workspace's active prompt version, v1 = `prompts/worker.md`; static, no per-run or per-repo text) → messages.
   The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node
   and what it has and lacks, `SANDBOX_TOOLS`: no Docker, browser or Playwright, so don't install them; the planner gets
-  the same line for its child tickets), repo, base branch, test command, read-only paths, git read-only, turn and minute budget), the skills list, `# Lessons
+  the same line for its child tickets), repo, base branch, test command, protected paths ("Read-only paths (changes there fail the run)", or in add-only mode "Protected paths (add new files there, e.g. regression tests; changing or deleting existing files fails the run)"; the planner and the gate-fix message say the same), git read-only, turn and minute budget), the skills list, `# Lessons
   from earlier runs` (M6), the wiki index (M10), the epic's handoff request (M7), the latest reviewer note, the previous
   attempt's failure, then `# Task`. The environment block is the one place for those facts; `worker.md` only points at it.
 - **Cache breakpoints** (Anthropic, 3 of the 4 allowed): end of tools, end of system, and a moving one on the last content
@@ -717,7 +717,7 @@ is a 400 in a body and matches nothing in a filter).
 A workspace holds projects; a **project is one git repository** with its own board, cycles, wiki and ticket keys
 (Linear's team). Code: `server/tracker.ts` (routes), `projectSettings()` in `server/runs.ts`.
 
-- **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, image}`. The key
+- **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, protected_mode, image}`. The key
   (2-5 capitals or digits, a capital first, unique in the workspace) prefixes ticket keys: `tickets.number` counts per
   project (`KEY-12`); `ticketKey()` reads the project's key, so renaming a key renames its tickets. Repository fields are
   validated like the old settings (`inspectRepo`: the root of a repo with commits, the base branch exists, empty = its
@@ -763,7 +763,16 @@ A workspace holds projects; a **project is one git repository** with its own boa
 
 ## Guardrails
 
-- `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
+- A project's protected paths (default `tests/,evals/`) bind agents in one of two modes (`projects.protected_mode`). **add_only**
+  (the default for new projects): agents may add files there (regression tests) but a file that existed at the run's base
+  commit may not be modified, deleted, renamed away or have its type changed: `edit_file`/`apply_patch` refuse it ("existed
+  before this run under a protected path: add new files instead of changing it", from the set of base-commit files built once
+  per run), the gate's `protectedChanges` fails M/D/T entries of `git diff --name-status --no-renames <base>` there (added and
+  untracked files pass, so does editing a file the run added), and the sandbox does not mount them read-only (new files must be
+  creatable); the tools and the gate are the enforcement. **read_only** (what projects had before; the migration keeps
+  existing ones on it): nothing under them changes, enforced by the tools, the gate and a read-only mount (a path missing from
+  the worktree is made an empty directory first, so it is read-only too). Whatever the mode, `.polaris/wiki` (M10), the workspace skills dir and
+  `WIKI_PROTECTED` stay fully read-only, kept apart from the project's paths. Eval cases store the mode they were made with. Any `.git` path is
   never writable by agent tools, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
   file is mounted read-only in the sandbox.
 - Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;

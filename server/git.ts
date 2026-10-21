@@ -3,7 +3,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readd
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { isProtected } from "./agent/tools.ts";
+import { foldPath, isProtected } from "./agent/tools.ts";
 
 // All git work happens on the host via the git CLI; the sandbox never sees the repo's .git (see README).
 const execFileP = promisify(execFile);
@@ -157,8 +157,23 @@ export async function changedLines(worktree: string, baseSha: string) {
   return fresh.reduce((n, f) => n + count(f), sum);
 }
 
-export const protectedChanges = async (worktree: string, baseSha: string, protectedPaths: string[]) =>
-  (await changedPaths(worktree, baseSha)).filter((f) => isProtected(f, protectedPaths));
+// The changed paths that break the protection. read_only: anything under a protected path. add_only: a file under one that
+// existed at base and was modified, deleted or had its type changed (a rename is a delete plus an add); added and untracked
+// files are fine. `fixed` (.polaris/..., see runs.ts) are read-only in both modes.
+export async function protectedChanges(worktree: string, baseSha: string, protectedPaths: string[], mode = "read_only", fixed: string[] = []) {
+  const all = await changedPaths(worktree, baseSha);
+  if (mode !== "add_only") return all.filter((f) => isProtected(f, [...protectedPaths, ...fixed]));
+  const status = (await git(worktree, ["diff", "--name-status", "--no-renames", "-z", baseSha])).split("\0");
+  const edited = new Set<string>();
+  for (let i = 0; i + 1 < status.length; i += 2) if (status[i] !== "A") edited.add(status[i + 1]);
+  return all.filter((f) => isProtected(f, fixed) || (edited.has(f) && isProtected(f, protectedPaths)));
+}
+
+// Files under the protected paths at `baseSha`, case-folded: what add-only mode keeps agents from changing.
+export async function protectedFilesAt(worktree: string, baseSha: string, protectedPaths: string[]) {
+  const all = (await git(worktree, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0");
+  return new Set(all.filter((f) => f && isProtected(f, protectedPaths)).map(foldPath));
+}
 
 // Untracked nested repositories: directories with their own .git (or a .git file), which git lists with a trailing slash.
 // `add -A` would record one as a gitlink, and host git then reads that repo's agent-written config (filters, ...).

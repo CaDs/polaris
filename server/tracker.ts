@@ -37,11 +37,12 @@ export const ESTIMATES = [1, 2, 3, 5, 8];
 const SORTS = ["manual", "priority", "updated", "created", "due"];
 export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
 export const KINDS = ["task", "epic"];
+const PROTECTED_MODES = ["add_only", "read_only"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 // A project's ticket key prefix: 2-5 capitals or digits, a capital first.
 const KEY = /^[A-Z][A-Z0-9]{1,4}$/;
 // A project's repository settings when not given (a new project, PATCH with null). The DB columns repeat them.
-export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE };
+export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", protected_mode: "add_only", image: SANDBOX_IMAGE };
 // The sandbox's size, a whole number in range (form posts send strings; empty or null = the default).
 const PROJECT_RESOURCES: Record<string, [number, number, number, string]> = {
   sandbox_cpus: [1, 32, SANDBOX_RESOURCES.cpus, "Sandbox CPUs"],
@@ -384,6 +385,7 @@ async function projectBody(ws: string, b: Record<string, any>, cur?: Record<stri
   if (b.target_date !== undefined) v.target_date = date(b.target_date, "target_date");
   for (const k of Object.keys(PROJECT_DEFAULTS))
     if (b[k] !== undefined) v[k] = b[k] === null ? PROJECT_DEFAULTS[k] : typeof b[k] === "string" && b[k].length <= 2000 ? b[k].trim() : fail(`${k} must be a string of at most 2000 chars`);
+  if (v.protected_mode !== undefined && !PROTECTED_MODES.includes(v.protected_mode as string)) fail(`protected_mode must be one of ${PROTECTED_MODES.join(", ")}`);
   if (v.image === "") v.image = PROJECT_DEFAULTS.image;
   for (const [k, [lo, hi, def, label]] of Object.entries(PROJECT_RESOURCES)) {
     if (b[k] === undefined) continue;
@@ -417,7 +419,7 @@ trackerRoutes.post("/projects/inspect", async (c) => {
 trackerRoutes.post("/projects", async (c) => {
   const v = await projectBody(c.get("workspaceId"), await body(c));
   const projectId = randomUUID();
-  insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), ...v });
+  insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), protected_mode: PROJECT_DEFAULTS.protected_mode, ...v });
   setCurrent(c.get("userId"), c.get("workspaceId"), projectId); // a new project is where its maker works next
   return c.json(project(c.get("workspaceId"), projectId), 201);
 });

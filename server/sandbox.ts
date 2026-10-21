@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -8,7 +8,7 @@ import { capture, hostExec, truncate, type Exec } from "./agent/tools.ts";
 import { git } from "./git.ts";
 
 // One Docker container per run: the worktree is bind-mounted at /work, protected paths are re-mounted read-only on
-// top, and every shell command (tool calls, setup, tests) is a `docker exec`. POLARIS_SANDBOX=host runs commands on
+// top (not in add-only mode: see tools.ts readOnlyPaths), and every shell command (tool calls, setup, tests) is a `docker exec`. POLARIS_SANDBOX=host runs commands on
 // the host instead (unit tests only: no isolation at all).
 const execFileP = promisify(execFile);
 export const SANDBOX_IMAGE = "polaris-sandbox:1";
@@ -79,13 +79,16 @@ export const dockerRunArgs = (name: string, worktree: string, mounts: string[], 
   "--cpus", String(r.cpus), "--memory", `${r.memory_gb}g`, image, "sleep", "infinity",
 ];
 
-export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string, resources = SANDBOX_RESOURCES): Promise<Sandbox> {
+// readOnly: the paths to mount read-only (tools.ts readOnlyPaths). One missing from the worktree is made an empty directory
+// first, so it is read-only too instead of something the agent can create.
+export async function openSandbox(runId: string, worktree: string, readOnly: string[], image: string, resources = SANDBOX_RESOURCES): Promise<Sandbox> {
   if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
   if (!IMAGE_REF.test(image)) throw new Error(`not a docker image reference: ${image}`); // rows saved before the settings check
   await ensureImage(image);
   const name = `polaris-${runId}`;
   // .git too: the host's git must not be pointed elsewhere (git.ts also never reads it for worktrees it created).
-  const ro = [...protectedPaths, ".git"].filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+  for (const p of readOnly) if (!existsSync(join(worktree, p)) && resolve(worktree, p).startsWith(worktree + "/")) mkdirSync(join(worktree, p), { recursive: true });
+  const ro = [...readOnly, ".git"].filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
   // A worktree's .git file points at the repo's git dir by its host path: mount that read-only at the same path so
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
   const gitDir = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => "");
