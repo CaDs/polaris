@@ -26,7 +26,7 @@ export type Prompt = { id: string; workspace_id: string; version: number; body: 
 type Final = { status: string; reason?: string; turns: number };
 
 export const gateFailure = (r: EventPayloads["test_result"]) =>
-  r.protected.length ? `modified protected path ${r.protected.join(", ")}` : `\`${r.command}\` ${r.timed_out ? "timed out" : `exited with code ${r.code}`}`;
+  r.protected.length ? `modified protected path ${r.protected.join(", ")}` : r.nested ? `nested git repository ${r.nested.join(", ")}` :`\`${r.command}\` ${r.timed_out ? "timed out" : `exited with code ${r.code}`}`;
 
 // --- lessons: the latest version is the active one ---
 

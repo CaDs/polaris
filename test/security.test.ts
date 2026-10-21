@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
-import { addWorktree, changedPaths, commitAll, git } from "../server/git.ts";
+import { addWorktree, changedLines, changedPaths, commitAll, git, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
@@ -64,6 +64,30 @@ test("host git ignores a hostile .git pointer in the worktree and never runs its
   const commit = await commitAll(wt, "msg");
   assert.equal(existsSync(marker), false, "fsmonitor ran on the host");
   assert.equal(sh(repo, "git rev-parse polaris/x"), commit, "committed in the real repository");
+});
+
+test("host git never runs a nested repo's filter, and commitAll refuses nested repos", async () => {
+  const base = tmp("sec-nested-");
+  const repo = repoWith(join(base, "repo"));
+  const wt = join(base, "wt");
+  const sha = await addWorktree(repo, "main", wt, "polaris/nested");
+  // What the agent can do in the sandbox: a repo of its own with a clean filter, then a change git must re-hash.
+  const marker = join(base, "MARKER");
+  const sub = repoWith(join(wt, "sub"));
+  sh(sub, `git config filter.x.clean "sh -c 'touch ${marker}; cat'" && echo '* filter=x' > .gitattributes && git add -A && git -c user.name=t -c user.email=t@t commit -q -m f`);
+  sh(sub, "sleep 1 && echo changed >> a && rm -f " + marker);
+
+  assert.deepEqual(await nestedRepos(wt), ["sub/"]);
+  await changedPaths(wt, sha);
+  await changedLines(wt, sha);
+  await protectedChanges(wt, sha, ["tests/"]);
+  await restore(wt, await snapshot(wt));
+  await assert.rejects(commitAll(wt, "msg"), /nested git repositories: sub\//);
+  // Second layer: a gitlink that did reach the index (one appeared after the gate) is not recursed into either.
+  await git(wt, ["add", "-A"]);
+  await git(wt, ["diff", "--name-only", sha]);
+  await git(wt, ["status", "--porcelain"]);
+  assert.equal(existsSync(marker), false, "the nested repo's filter ran on the host");
 });
 
 test("host git never runs a repo-local core.fsmonitor", async () => {

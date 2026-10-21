@@ -200,7 +200,7 @@ function RetryDialog({ run, providers, close, go }: {
 
 // Mirrors gateFailure in server/improve.ts.
 const gateFailure = (p: any) =>
-  p.protected.length ? `modified protected path ${p.protected.join(", ")}` : `\`${p.command}\` ${p.timed_out ? "timed out" : `exited with code ${p.code}`}`;
+  p.protected.length ? `modified protected path ${p.protected.join(", ")}` : p.nested ? `nested git repository ${p.nested.join(", ")}` :`\`${p.command}\` ${p.timed_out ? "timed out" : `exited with code ${p.code}`}`;
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const pct = (n: number | null) => (n === null ? "" : ` (${Math.round(n)}%)`);

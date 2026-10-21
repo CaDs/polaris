@@ -728,7 +728,9 @@ A workspace holds projects; a **project is one git repository** with its own boa
   labelled `polaris.image.version`, and rebuilt when the label is missing or older than `IMAGE_VERSION` (bump it with the
   Dockerfile); the shared npm cache volume is chowned to the sandbox user once per harness start if it isn't theirs.
 - Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
-  dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Harness writes into the worktree
+  dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Submodules are ignored, and a nested
+  repository the agent made (a directory with its own `.git`) fails the gate and is never committed: host git would read its
+  config, filters included. Harness writes into the worktree
   (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
 - Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated

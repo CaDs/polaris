@@ -12,7 +12,7 @@ import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, type RunStatus, type Usage } from "./agent/types.ts";
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
-import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
+import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
@@ -616,9 +616,11 @@ async function execute(runId: string) {
       abortCheck();
       // git can't see .polaris/wiki (excluded), so its snapshot is compared directly.
       const touched = [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
-      const { r: test, ...flake } = touched.length ? { r: first } : await rerunFlaky(first, run);
+      const nested = await nestedRepos(worktree);
+      const blocked = touched.length > 0 || nested.length > 0;
+      const { r: test, ...flake } = blocked ? { r: first } : await rerunFlaky(first, run);
       abortCheck();
-      const result = { passed: test.code === 0 && !touched.length, command: testCommand, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched, ...flake };
+      const result = { passed: test.code === 0 && !blocked, command: testCommand, code: test.code, timed_out: test.timedOut, output: tail(test), protected: touched, ...(nested.length ? { nested } : {}), ...flake };
       log({ type: "test_result", payload: result });
       return { result, test };
     };
@@ -644,7 +646,7 @@ async function execute(runId: string) {
         gateFixes++;
         const why = gateFailure(result);
         log({ type: "gate_fix", payload: { reason: why } });
-        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
+        const message = `# Tests failed\n\nThe harness ran ${testCommand.trim() ? `\`${testCommand}\`` : "its checks"} after you finished: ${result.timed_out ? "it timed out" : `exit code ${result.code}`}.${result.protected.length ? `\nYou changed read-only (protected) paths: ${result.protected.join(", ")}. Revert these.` : ""}${result.nested ? `\nThese are nested git repositories, which cannot be committed: ${result.nested.join(", ")}. Delete their .git, or move them out of the repository.` : ""}\nOutput (tail):\n\`\`\`\n${tail(test)}\n\`\`\`\n\nFix it and finish; the tests run again.`;
         if (!(await fixRound(why, message))) {
           gateOutput = result.output;
           return false;

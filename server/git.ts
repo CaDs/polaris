@@ -27,7 +27,9 @@ export async function git(cwd: string, args: string[], extraEnv?: Record<string,
   const dir = gitDirs.get(cwd);
   try {
     // Hooks and fsmonitor off: a hooksPath inside the work tree (husky etc.) is agent-writable and would run on the host.
-    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-C", cwd, ...(dir ? [`--git-dir=${dir}`, `--work-tree=${cwd}`] : []), ...args], { env: { ...env, ...extraEnv }, maxBuffer: 50e6 });
+    // Submodules ignored: diff/status recurse into a gitlink's repo with *its* config, and a nested repo is agent-made
+    // (nestedRepos), so a filter it defines would run here too.
+    const { stdout } = await execFileP("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-c", "diff.ignoreSubmodules=all", "-c", "submodule.recurse=false", "-C", cwd, ...(dir ? [`--git-dir=${dir}`, `--work-tree=${cwd}`] : []), ...args], { env: { ...env, ...extraEnv }, maxBuffer: 50e6 });
     return stdout.trimEnd();
   } catch (e) {
     const err = e as Error & { stderr?: string };
@@ -122,7 +124,15 @@ export async function changedLines(worktree: string, baseSha: string) {
 export const protectedChanges = async (worktree: string, baseSha: string, protectedPaths: string[]) =>
   (await changedPaths(worktree, baseSha)).filter((f) => isProtected(f, protectedPaths));
 
+// Untracked nested repositories: directories with their own .git (or a .git file), which git lists with a trailing slash.
+// `add -A` would record one as a gitlink, and host git then reads that repo's agent-written config (filters, ...).
+// The gate fails on them; commitAll refuses them in case one appeared after the gate.
+export const nestedRepos = async (worktree: string) =>
+  (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f.endsWith("/"));
+
 export async function commitAll(worktree: string, message: string) {
+  const nested = await nestedRepos(worktree);
+  if (nested.length) throw new Error(`refusing to commit nested git repositories: ${nested.join(", ")}`);
   await git(worktree, ["add", "-A"]);
   await git(worktree, ["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ...POLARIS_SCRATCH]); // in case exclude is missing
   await git(worktree, ["commit", "-q", "--allow-empty", "-m", message]);
