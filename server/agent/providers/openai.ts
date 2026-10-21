@@ -52,7 +52,7 @@ function responseError(code: string, message: string, requestId?: string) {
   e.requestId = requestId;
   return /unavailable$/.test(code) ? retryable(e) : e;
 }
-export function openai(opts: { url: string; headers: () => Promise<Record<string, string>>; subscription?: boolean }): Provider {
+export function openai(opts: { url: string; headers: () => Promise<Record<string, string>>; subscription?: boolean; headersTimeoutMs?: number }): Provider {
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void, headers: Record<string, string>) {
     let rawUsage: Item | undefined;
     try {
@@ -69,7 +69,7 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
       };
       let res: Response;
       try {
-        res = await providerFetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: req.signal });
+        res = await providerFetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: req.signal }, opts.headersTimeoutMs);
       } catch (e) {
         if (req.signal?.aborted) throw e;
         if (e instanceof EgressError) throw new AgentError("ProviderError", e.message); // policy: a retry would be refused too

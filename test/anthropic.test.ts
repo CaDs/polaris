@@ -203,3 +203,21 @@ test("truncated tool input is flagged invalid_input and never sent back", async 
   assert.deepEqual(s.requests[1].body.messages[1].content, [{ type: "tool_use", id: "tu_9", name: "edit_file", input: {}, cache_control: { type: "ephemeral" } }]);
   s.close();
 });
+
+test("a local model's deadline: the adapter passes its headers timeout to the fetch (Ollama gets LOCAL_MODEL_TIMEOUT)", async () => {
+  const { isLocalProvider } = await import("../server/providers.ts");
+  const { metered } = await import("../server/usage.ts");
+  const srv = createServer(() => {}); // never answers
+  await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
+  const baseUrl = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  try {
+    const req = { system, messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }], tools, model: "m" };
+    await assert.rejects(anthropic({ apiKey: "k", baseUrl, headersTimeoutMs: 150 }).stream(req, () => {}), /no response within/);
+  } finally {
+    srv.close();
+  }
+  const rows: Parameters<typeof isLocalProvider>[0][] = [{ kind: "ollama", base_url: "https://gpu.example.com" }, { kind: "litellm", base_url: "http://127.0.0.1:4000" }, { kind: "litellm", base_url: "http://litellm:4000" },
+    { kind: "litellm", base_url: "https://litellm.example.com" }, { kind: "openai", base_url: null }];
+  assert.deepEqual(rows.map(isLocalProvider), [true, true, true, false, false]);
+  assert.equal(metered({ local: true, stream: async () => { throw new Error("unused"); } }, { name: "x", kind: "ollama", billing: "local" }).local, true); // ask() reads it through metered
+});
