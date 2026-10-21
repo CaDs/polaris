@@ -1,5 +1,5 @@
 import { test, expect, type Route } from "@playwright/test";
-import { git, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
+import { git, more, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 test("M5: spilled output, compaction, skills, cache hit rate and the Usage page", async ({ page }) => {
   test.setTimeout(180_000);
@@ -98,7 +98,7 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
     { ...row, day: today, model: "demo", runs: 4, passed: 2, failed: 1, cancelled: 1, measured: 4, sum_turns_pct: 120, tool_calls: 40, tool_errors: 4, mean_files_changed: 2 },
     { ...row, day: today, model: "other-model", runs: 2, passed: 0, failed: 2, stuck: 2, measured: 2, sum_turns_pct: 200, tool_calls: 0, tool_errors: 0 },
   ] } }));
-  await page.getByRole("link", { name: "Usage" }).click();
+  await more(page, "Usage");
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
   const totals = page.getByRole("region", { name: "Totals" });
   await expect(totals).toContainText("Cache hit rate");
@@ -112,7 +112,7 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await expect(days.locator("tbody tr").first()).toContainText(new Date().toISOString().slice(0, 10));
   await expect(days.locator("tbody tr").first()).toContainText(completeHitRate);
   await expect(page.getByRole("region", { name: "Per model" })).toContainText("demo");
-  await expect(page.getByRole("region", { name: "Top tickets" })).toContainText("CON-1");
+  await expect(page.getByRole("region", { name: "Top tickets" })).toContainText("APP-1");
   await expect(page.getByRole("region", { name: "Top tickets" })).toContainText("Long session");
 
   // Runs: per model pass rate, stuck, mean turns %, tool-error rate, mean files (weighted by runs); bars by status per day.
@@ -141,7 +141,7 @@ test("Spending caps: a monthly cap in Settings, its bar on the Usage page, a tic
   await expect(page.getByLabel("Monthly cap (tokens)")).toHaveValue("500");
   await saveTab(page, "Models", () => page.getByLabel("Model review before human review").uncheck());
 
-  await page.getByRole("link", { name: "Usage" }).click();
+  await more(page, "Usage");
   const cap = page.getByRole("region", { name: "Spending cap" });
   await expect(cap).toContainText("Tokens: 0 of 500");
 
@@ -156,7 +156,7 @@ test("Spending caps: a monthly cap in Settings, its bar on the Usage page, a tic
   await expect(transcript).toContainText(`Run failed (SpendingCap: spending cap reached: workspace ${month} tokens 520/500) after 4 turns.`);
   await expect(page.getByRole("table").locator("tbody tr")).toHaveCount(1); // not retried
 
-  await page.getByRole("link", { name: "Usage" }).click();
+  await more(page, "Usage");
   await expect(cap).toContainText("Tokens: 520 of 500 — reached, new runs are refused");
   await expect(cap.getByRole("meter", { name: "Tokens cap used" })).toHaveAttribute("aria-valuenow", "100");
 

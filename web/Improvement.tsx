@@ -51,8 +51,8 @@ type Mining = {
   skipped: { class: string; why: string }[];
 };
 
-// open: a ticket by number; changed: mining made tickets or lessons (the board and the Lessons section reload).
-export function Improvement({ open, changed }: { open: (n: number) => void; changed: () => void }) {
+// open: a ticket by key; changed: mining made tickets or lessons (the board and the Lessons section reload).
+export function Improvement({ open, changed }: { open: (key: string) => void; changed: () => void }) {
   const [d, setD] = useState<Data | null>(null);
   const [error, setError] = useState("");
   const load = () =>
@@ -90,11 +90,11 @@ export function Improvement({ open, changed }: { open: (n: number) => void; chan
 
 type Act = (fn: () => Promise<unknown>) => Promise<void>;
 
-function FailureClasses({ open, changed }: { open: (n: number) => void; changed: () => void }) {
+function FailureClasses({ open, changed }: { open: (key: string) => void; changed: () => void }) {
   const { data, error, setError, reload } = useApi<Failures>("/api/failures?days=30");
   const [mining, setMining] = useState(false);
   const [result, setResult] = useState<Mining | null>(null);
-  const link = (key: string) => <button className="link mono" onClick={() => open(Number(key.split("-").at(-1)))}>{key}</button>;
+  const link = (key: string) => <button className="link mono" onClick={() => open(key)}>{key}</button>;
   const mine = async () => {
     setMining(true);
     setError("");

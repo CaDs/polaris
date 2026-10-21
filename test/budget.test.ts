@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // Worker budget settings (max_turns, max_minutes) and what uses them. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, idle, until, workspace } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events, idle, until, workspace } = await import("./helpers.ts");
 
 test("settings: max_turns / max_minutes default, round-trip, accept form strings, validate range and integers, omitted = unchanged", async () => {
   const w = await workspace("bs", { test_command: "true" });
@@ -32,7 +32,7 @@ test("settings: max_turns / max_minutes default, round-trip, accept form strings
 test("settings PUT merges: omitted fields keep their value, null resets to the default, a GET body round-trips", async () => {
   const w = await workspace("merge", { test_command: "true" });
   const put = async (b: object) => {
-    const r = await call("PUT", "/api/settings", w.cookie, b);
+    const r = await configure(w.cookie, b);
     assert.equal(r.status, 200, JSON.stringify(r.body));
     return r.body;
   };
@@ -72,7 +72,7 @@ test("worker runs use the workspace max_turns; the planner and the reviewer keep
   await idle(ws);
 
   // The reviewer: budget 8..25 from the change size, whatever max_turns says.
-  assert.equal((await call("PUT", "/api/settings", w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", max_turns: 10 })).status, 200);
+  assert.equal((await configure(w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", max_turns: 10 })).status, 200);
   const r = await w.create({ title: "Reviewed", spec: "Create review.txt" });
   await call("POST", `/api/tickets/${r.id}/runs`, w.cookie);
   const done = await w.is(r.id, "review");

@@ -8,6 +8,8 @@ builds its own remaining milestones (`tasks.md`).
 
 - **One TypeScript process**: Hono API + N concurrent agent loops. Split workers out only when one process can't keep up.
 - **SQLite** via `node:sqlite`. Raw SQL, no ORM. Our migrations: `server/migrations/NNN_*.sql`, run once in order (`PRAGMA user_version`).
+  M15 squashed migrations 001–022 into one `001_init.sql` (there was no data to keep: delete an older `polaris.db`); "migration
+  NNN" below names where a feature's schema first landed.
 - **Auth**: Better Auth (email/password) + organization plugin. **Workspace = organization.** The UI creates one workspace
   per account and has no invite or workspace switcher yet; members (the assignee and lead pickers) come from the plugin's
   tables.
@@ -19,6 +21,7 @@ builds its own remaining milestones (`tasks.md`).
 ## Core abstractions (do not bypass)
 
 1. **Workspace scoping.** Every resource has `workspace_id` (directly, or via its ticket). Every `/api/*` route except auth goes through the session + membership middleware in `server/app.ts` and filters by `c.get("workspaceId")`.
+   Inside a workspace, a **project** is one git repository: its tickets, cycles, wiki and chats belong to it (see Projects (M15)).
 2. **Transcript events and usage measurements are persisted.** The append-only `usage_ledger` is the accounting source of truth; run counters and usage events are compatible projections and never charge the same request twice. A run appends `events(run_id, seq, type, payload)`; dashboard views, token totals, replays and evals are projections. Never store state only in memory.
 3. **Ticket → Run → Event.** A ticket has many runs (retries, other models). A run records role, model, worktree, attempt, status, token totals.
 4. **Secrets** (provider keys, OAuth tokens) are encrypted at rest with a key from env and never enter agent context or events.
@@ -430,7 +433,7 @@ Per-project memory as an "LLM wiki" (Karpathy): a persistent, interlinked markdo
 with their normal tools. Workspace setting `wiki` (migration 011, default on); off = no snapshot, no section, no ingest, no
 bootstrap (existing pages stay readable in the UI).
 
-- **Storage.** A git repository per workspace at `<dataDir>/wikis/<workspace_id>/`, created with an initial commit on first use,
+- **Storage.** A git repository per project at `<dataDir>/wikis/<project_id>/`, created with an initial commit on first use,
   owned by the harness (`server/wiki.ts`). Files: `SCHEMA.md` (conventions, seeded from `prompts/wiki-schema.md`, humans may
   edit), `index.md` (one line per page: `- [Title](path.md) — summary`; ≤ 6,000 chars), `log.md` (append-only,
   `## [date] ingest | KEY Title (merge sha8)` / `lint | …` / `edit | path by user`; **written by the harness**, never by the agent:
@@ -451,8 +454,8 @@ bootstrap (existing pages stay readable in the UI).
   queues a **wiki ingest**: a run with `role = 'wiki'`, `wiki_op = 'ingest'`, `base_sha` = the merge commit, on the ticket
   (listed in its run list as "wiki", never the default transcript, not counted in its status or totals), with the approved
   run's provider and model (else the workspace default). It goes through the normal FIFO queue and concurrency slots (but stays queued
-  while another wiki run of its workspace runs, so it never holds a slot just to wait), and `wikiSerial` makes runs of one
-  workspace (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
+  while another wiki run of its project runs, so it never holds a slot just to wait), and `wikiSerial` makes runs of one
+  project (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
   the wiki repo). Tools: `read_file`, `search`, `edit_file`, `delete_file` only; `code/` and `wiki/.git` (its config could run commands on the host) are protected paths, so `edit_file` and `delete_file` there fail. **No
   shell**: a host shell could write anywhere, and the planner works the same way. System prompt `prompts/wiki.md` (static).
   First message: environment, ticket title and spec, the files changed, the merged diff (15,000 chars), the worker's final reply
@@ -468,19 +471,20 @@ bootstrap (existing pages stay readable in the UI).
   a content page; page and index size caps; only root `.md` files, `modules/*.md` and `howto/*.md` exist (no other files, no
   symlinks). On commit (maintainer and human edit) also: each page's `verified` is a commit of the project repo and each of its
   `sources` exists at that commit.
-- **Bootstrap** (**Build wiki**, `POST /api/wiki/bootstrap`): the same flow on the base branch head, task: overview, a page per main
+- **Bootstrap** (**Build wiki**, `POST …/wiki/bootstrap`): the same flow on the base branch head, task: overview, a page per main
   part, howto pages (from README/AGENTS.md/CLAUDE.md and the code), gotchas. Commit `bootstrap: <repo> at <branch> <sha8>`.
-  **Refresh stale pages** (`POST /api/wiki/lint`, 409 when nothing is stale): the task lists the pages stale against the base head;
+  **Refresh stale pages** (`POST …/wiki/lint`, 409 when nothing is stale): the task lists the pages stale against the base head;
   the maintainer re-verifies each against the code and fixes or deletes it. Commit `lint: re-verify N stale pages at <sha8>`. A
   lint run that finds nothing stale when it starts (an earlier run or an edit fixed it) passes with `wiki {unchanged}`.
-  Bootstrap and lint runs have no ticket: they hang off one hidden ticket per workspace (`tickets.hidden`, number -1).
+  Bootstrap and lint runs have no ticket: they hang off one hidden ticket per project (`tickets.hidden`, number -1).
 - **UI.** The **Wiki** nav entry (`web/Wiki.tsx`): the index with stale flags, a page viewer (small markdown subset, internal links)
   and editor (`PUT` with the page as opened as `base`, refused if the page changed since → mechanical lint → commit
   `edit <path> by <email>` + log entry), history with a per-commit diff, the maintainer
   runs with their transcripts, the buttons above. Transcripts show a "First message" disclosure for each conversation.
-- **API** (workspace-scoped; page paths are checked against the allowed layout and resolved with `resolveIn`): `GET /api/wiki`
-  (index, pages with stale flags, log, lint problems of HEAD, recent maintainer runs), `GET|PUT /api/wiki/page`,
-  `GET /api/wiki/history`, `GET /api/wiki/diff?sha=`, `POST /api/wiki/bootstrap`, `POST /api/wiki/lint`. Humans can edit existing
+- **API** (under `/api/projects/:id/wiki`, a project of the caller's workspace, else 404; page paths are checked against the
+  allowed layout and resolved with `resolveIn`): `GET …/wiki` (index, pages with stale flags, log, lint problems of HEAD,
+  recent maintainer runs), `GET|PUT …/wiki/page`, `GET …/wiki/history`, `GET …/wiki/diff?sha=`, `POST …/wiki/bootstrap`,
+  `POST …/wiki/lint`. Humans can edit existing
   pages only (new pages come from the maintainer; `log.md` is the harness's).
 - **Demo provider.** The maintainer is recognized by its system prompt. Ingest writes `modules/demo.md` (sources = the files the
   merged diff touched, verified = the merge sha) and lists it in the index; bootstrap writes `overview.md`; lint re-verifies the first
@@ -497,13 +501,13 @@ A side panel (Cmd/Ctrl+J, or **Ask Polaris** in the top bar) where a member talk
 AI chat. The agent reads the code and the wiki, asks what is unclear and **proposes** tickets; nothing becomes a ticket
 until the member files it. Migration 021, server in `server/chat.ts`, prompt `server/agent/prompts/chat.md`.
 
-- **Data.** `chats(id, workspace_id, user_id, title, messages, …)`: private to their member; `title` is the first line of
+- **Data.** `chats(id, workspace_id, project_id, user_id, title, messages, …)`: private to their member, about one project; `title` is the first line of
   the first message; `messages` is the provider conversation, resumed by the next message. `chat_events(chat_id, seq,
   type, payload)`: what the panel shows, append-only (`user_message {text, context}`, the loop's `assistant_message`,
   `tool_call`, `tool_result`, `error`, `compaction`, `stuck`, `proposal {proposal_id, number}`, `turn_finished {status,
   reason}`). `chat_proposals(id, chat_id, number, payload, status open|filed|dismissed|superseded, ticket_id)`.
 - **A turn** (one per user message, one at a time per chat): `runAgent` with the chat prompt, `read_file`/`search` on a
-  fresh detached checkout of the base branch head (removed afterwards; the wiki materialized into `.polaris/wiki`), and
+  fresh detached checkout of its project's base branch head (removed afterwards; the wiki materialized into `.polaris/wiki`), and
   the tools `list_tickets`, `read_ticket`, `propose_ticket`. The workspace's default provider and model
   (`metaProvider`); usage is background, purpose `chat` (workspace caps apply). Budget: 40 turns and 10 minutes per
   message. The first message carries the environment and the wiki index; later ones resume the conversation unchanged
@@ -565,35 +569,36 @@ is a 400 in a body and matches nothing in a filter).
 - **Data model.** `labels {name 1–40 chars, unique per workspace case-insensitively (Unicode, plus a NOCASE index), color
   from a fixed palette}` ↔ tickets via `ticket_labels`. On tickets: `priority` (Linear's numbers: 0 none, 1 urgent, 2 high,
   3 medium, 4 low), `assignee_id` (a workspace member: the human who owns the outcome and the review; agents run either
-  way), `estimate` (1, 2, 3, 5, 8 points), `due_date`, `project_id`, `milestone_id` (a milestone of that project; moving
-  the ticket to another project clears it), `cycle_id` and `cycle_added_at`. `projects {name, description, status
-  planned|started|paused|completed|canceled, lead (member), target_date}` with ordered `milestones {name, target_date,
-  position}`. `cycles {number (per workspace), name?, starts_at, ends_at}`: calendar days (UTC), both ends included, never
-  overlapping within a workspace; current / upcoming / past come from the dates. `views {name, filters (the query params),
+  way), `estimate` (1, 2, 3, 5, 8 points), `due_date`, `project_id` (required, fixed: see Projects (M15)), `milestone_id`
+  and `cycle_id` (of the ticket's project) and `cycle_added_at`. `projects {key, name, description, status
+  planned|started|paused|completed|canceled, lead (member), target_date, repository}` with ordered `milestones {name, target_date,
+  position}`. `cycles {project, number (per project), name?, starts_at, ends_at}`: calendar days (UTC), both ends included, never
+  overlapping within a project; current / upcoming / past come from the dates. `views {name, filters (the query params),
   sort, layout board|list, shared}`: a personal view is seen only by its owner, a shared one by the workspace; only the
-  owner changes or deletes it. Deleting a label/project/milestone/cycle unsets it on its tickets. Dates are `YYYY-MM-DD`.
-- **Ticket JSON** adds `priority, estimate, due_date, labels [{id, name, color}], project {id, name}, milestone {id, name},
+  owner changes or deletes it. Deleting a label/milestone/cycle unsets it on its tickets. Dates are `YYYY-MM-DD`.
+- **Ticket JSON** adds `priority, estimate, due_date, labels [{id, name, color}], project {id, name, key}, milestone {id, name},
   cycle {id, number, name}, assignee {id, name, email}`; `POST/PATCH /api/tickets` take `priority, estimate, due_date,
   assignee_id, project_id, milestone_id, cycle_id, label_ids` (null clears) with 400s naming the field.
 - **Parent epic by hand** (`parent_id`): only a todo task without runs moves (the planner owns everything else), into an
-  epic that is todo or running and has fewer than `MAX_CHILDREN` children; never out of an epic when a sibling depends on
+  epic of the same project that is todo or running and has fewer than `MAX_CHILDREN` children; never out of an epic when a sibling depends on
   it, or when it is the last open child of a running epic (its planner would wait forever). Moving clears `depends_on`
   (sibling ids); a task moved into a running epic is queued at once (into a todo epic: when its next round starts).
 - **Filters** on `GET /api/tickets` (AND across fields, OR within one, comma-separated): `status`, `label` + `label_mode`
-  any|all, `priority`, `assignee` (ids, `me`, `none`), `project`, `milestone`, `cycle` (ids, `current`, `none`), `kind`,
+  any|all, `priority`, `assignee` (ids, `me`, `none`), `project`, `milestone`, `cycle` (ids, `current` = each project's
+  current cycle, `none`), `kind`,
   `parent` (id, `none`), `due_before` / `due_after` (inclusive). Unknown params are ignored (the UI keeps `layout` and
   `group` in the same query); bad values are a 400. **Sort**: `manual` (number; the default), `priority` (urgent → low, none
   last), `updated`, `created`, `due` (undated last).
 - **Search** `q`: SQLite FTS5 (`tickets_fts`, external content kept by triggers, `unicode61 remove_diacritics`) over title
   + spec, every word prefix-matched and quoted (no FTS syntax gets through), ranked by bm25 with title weighted 10:1;
-  `ABC-12` (this workspace's prefix) or a bare number also matches that ticket and ranks it first. An explicit sort
+  `ABC-12` (a project's key) or a bare number (in any project) also matches that ticket and ranks it first. An explicit sort
   replaces relevance.
-- **Projects / cycles API.** `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:id` (with lead, milestones and
-  progress = total, done, points, by status), `POST /api/projects/:id/milestones`, `PUT …/milestones/order {ids}`,
-  `PATCH/DELETE /api/milestones/:id`; `GET/POST /api/cycles`, `GET/PATCH/DELETE /api/cycles/:id` (`current` works as an
-  id), each with state, progress and `added_after_start` (scope change: tickets that entered after it started);
-  `POST /api/cycles/:id/move-unfinished` moves every ticket that is not done to the next cycle (the first starting after
-  this one ends; none → 400). `GET /api/tracker` returns what the pickers need in one request (me, members, labels,
+- **Projects / cycles API.** `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:id` (with lead, milestones,
+  repository and progress = total, done, points, by status), `POST /api/projects/:id/milestones`, `PUT …/milestones/order {ids}`,
+  `PATCH/DELETE /api/milestones/:id`; `GET /api/cycles[?project=]`, `POST /api/cycles {project_id, …}`,
+  `GET/PATCH/DELETE /api/cycles/:id` (`current?project=<id>` works as an id), each with state, progress and
+  `added_after_start` (scope change: tickets that entered after it started); `POST /api/cycles/:id/move-unfinished` moves
+  every ticket that is not done to the project's next cycle (the first starting after this one ends; none → 400). `GET /api/tracker` returns what the pickers need in one request (me, members, labels,
   projects with milestones, cycles); `GET /api/members`; `GET/POST/PATCH/DELETE /api/labels`, `/api/views`.
 - **UI.** Board and **List** layouts share a filter bar: search (`/` focuses it; Enter on a key opens the ticket), a chip
   per active filter (click to edit, × to remove, labels toggle any/all), **+ Filter** menu, Clear, sort, layout, group
@@ -602,13 +607,15 @@ is a 400 in a body and matches nothing in a filter).
   Cards and dense list rows show priority, labels, due date, assignee (initials); rows also key, status, parent epic,
   project, cycle. The ticket page has a **properties sidebar** (status, priority, assignee, labels with "create label",
   project, milestone, cycle, estimate, due date, parent epic) with shortcuts `s` `p` `a` `l`; run controls and transcript
-  are unchanged. **Command palette** (Cmd/Ctrl+K): tickets by key prefix or title, Create ticket, Go to pages. Pages:
-  Projects (list + project page with progress, milestones, tickets), Cycles (current/upcoming/past + cycle page with
-  progress, scope change, Move unfinished), Current cycle shortcut, Views; labels are managed in Settings. New ticket
-  dialog takes every field (prefilled with the project or cycle whose page is open). Native selects and date inputs
+  are unchanged. **Command palette** (Cmd/Ctrl+K): tickets by key prefix or title, Create ticket, Go to pages (each
+  project's board, cycles, current cycle, wiki). Pages: see Projects (M15) for the sidebar; a project's Cycles
+  (current/upcoming/past + cycle page with progress, scope change, Move unfinished) and Overview (progress, milestones,
+  repository); Views; labels are managed in Settings. New ticket dialog takes every field (prefilled with the project or
+  cycle whose page is open; the project is required). Native selects and date inputs
   only: keyboard-friendly, both themes, phone width.
 - **Agents.** The first user message of a worker (`# Task`) and of a planner round (`# Epic`) has a header line under the
-  title: `Priority: Urgent · Labels: bug, ui · Project: Core › v1 · Due: 2026-11-30` (only what is set; eval case runs keep
+  title: `Priority: Urgent · Labels: bug, ui · Milestone: v1 · Due: 2026-11-30` (only what is set; the project is the repo
+  the agent is in, so it is not repeated; eval case runs keep
   their frozen text). The run queue starts ticket work (worker and planner runs; not eval cases or wiki runs) by the
   ticket's priority, urgent first, then FIFO; no priority comes after low. Planner `create_ticket` takes optional `labels`
   (names, matched case-insensitively, unknown ones created), `priority` (default: the epic's) and `estimate`; children
@@ -616,6 +623,40 @@ is a 400 in a body and matches nothing in a filter).
 - **Not built, on purpose:** comments (separate work), custom workflow states (statuses are the harness's run states),
   drag-and-drop ordering (manual order = ticket number), sub-issue trees beyond epics, notifications, project/cycle
   history charts (progress is computed live), and per-viewer time zones for cycles (UTC calendar days).
+
+## Projects (M15)
+
+A workspace holds projects; a **project is one git repository** with its own board, cycles, wiki and ticket keys
+(Linear's team). Code: `server/tracker.ts` (routes), `projectSettings()` in `server/runs.ts`.
+
+- **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, image}`. The key
+  (2-5 capitals or digits, a capital first, unique in the workspace) prefixes ticket keys: `tickets.number` counts per
+  project (`KEY-12`); `ticketKey()` reads the project's key, so renaming a key renames its tickets. Repository fields are
+  validated like the old settings (`inspectRepo`: the root of a repo with commits, the base branch exists, empty = its
+  current branch; image reference; protected paths relative) on create and whenever given; `null` resets a command to
+  `PROJECT_DEFAULTS`.
+- **What stays workspace-wide** (`workspace_settings`, `GET/PUT /api/settings`): models (default, reviewer, per phase),
+  model review, auto-approve, auto-split + triage, child size hint, the wiki toggle, budgets, compaction, spending caps;
+  providers, labels, views, lessons, prompts, evals, failure mining, usage, notifications. A run's settings are
+  `projectSettings(project)`: the workspace's plus its project's repository.
+- **Tickets** name their project on create (`project_id` required) and stay there: their branches live in that repo, so
+  `PATCH` refuses another project. Milestone, cycle and parent epic must be of the same project; planner children, Split
+  epics and chat proposals land in the epic's, ticket's or chat's project; mined tickets in the project of the newest
+  example run.
+- **Cycles** belong to a project (numbered and non-overlapping per project). **Wiki**: one per project at
+  `<dataDir>/wikis/<project_id>/`, under `/api/projects/:id/wiki`; maintainer runs are serialized per project.
+  **Chats** belong to a project (`POST /api/chats {…, project_id}`): its checkout, wiki and tickets (`list_tickets`); a
+  bare `@12` means the chat's project, `@KEY-12` any project.
+- **Delete** only an empty project (no tickets, no run in flight); its milestones, cycles, chats and wiki go with it, the
+  repository is never touched.
+- **UI.** Sidebar: My issues, Reviews (count), then Workspace (Projects, All issues, Views, More → Usage, Learning), then
+  Your projects, each a collapsible group (Board, Cycles + Current cycle, Wiki, Overview), Settings at the bottom. Routes:
+  `/my-issues`, `/reviews`, `/issues`, `/projects`, `/p/KEY` (board), `/p/KEY/cycles[/id|current]`, `/p/KEY/wiki`,
+  `/p/KEY/overview` (fields, milestones, repository, delete), `/t/KEY-12`; `/` opens the first project's board (none:
+  Projects, to create one). A board's filter bar keeps its project as a fixed scope (a view saved from it includes it).
+  Settings tabs: Models, Automation, Limits, Labels.
+- **CLI.** `npm run seed-tasks -- --workspace <slug> --project <KEY>`; `npm run agent -- --task` files into a `CLI`
+  project of the `cli` workspace. The MCP `create_ticket` takes `project` (a key; optional when the workspace has one).
 
 ## Guardrails
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Dialog, StatusIcon, type Ticket } from "./ui.tsx";
+import { useTracker } from "./tracker.tsx";
 
 // Cmd/Ctrl+K: jump to a ticket by key or title, create a ticket, go to a page. Arrow keys move, Enter runs, Esc closes.
 type Item = { id: string; name: string; hint?: string; ticket?: Ticket; run: () => void };
@@ -13,16 +14,19 @@ export const matchTickets = (tickets: Ticket[], q: string, max = 8) => {
 };
 
 export function Palette({ tickets, go, create, close }: { tickets: Ticket[]; go: (to: string) => void; create: () => void; close: () => void }) {
+  const { tracker } = useTracker();
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const s = q.trim().toLowerCase();
   const commands: Item[] = [
     { id: "new", name: "Create ticket", hint: "C", run: create },
-    ...([["Board", "/"], ["Projects", "/projects"], ["Cycles", "/cycles"], ["Current cycle", "/cycles/current"], ["Views", "/views"], ["Usage", "/usage"], ["Wiki", "/wiki"], ["Settings", "/settings"]] as const).map(
-      ([name, to]): Item => ({ id: to, name: `Go to ${name}`, run: () => go(to) }),
-    ),
-  ].filter((c) => c.name.toLowerCase().includes(s));
-  const items = [...matchTickets(tickets, s).map((t): Item => ({ id: t.id, name: t.title, ticket: t, run: () => go(`/t/${t.number}`) })), ...commands];
+    ...[
+      ["My issues", "/my-issues"], ["Reviews", "/reviews"], ["All issues", "/issues"], ["Projects", "/projects"], ["Views", "/views"], ["Usage", "/usage"], ["Settings", "/settings"],
+      ...(tracker?.projects ?? []).flatMap((p) => [[`${p.key} board`, `/p/${p.key}`], [`${p.key} cycles`, `/p/${p.key}/cycles`], [`${p.key} current cycle`, `/p/${p.key}/cycles/current`], [`${p.key} wiki`, `/p/${p.key}/wiki`]]),
+    ].map(([name, to]): Item => ({ id: to, name: `Go to ${name}`, run: () => go(to) })),
+  ].filter((c) => c.name.toLowerCase().includes(s))
+    .sort((a, b) => Number(!a.name.toLowerCase().replace(/^go to /, "").startsWith(s)) - Number(!b.name.toLowerCase().replace(/^go to /, "").startsWith(s))); // "views": Views before Reviews
+  const items = [...matchTickets(tickets, s).map((t): Item => ({ id: t.id, name: t.title, ticket: t, run: () => go(`/t/${t.key}`) })), ...commands];
   const at = Math.min(sel, items.length - 1);
   useEffect(() => setSel(0), [s]);
 

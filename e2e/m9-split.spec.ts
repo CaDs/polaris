@@ -30,24 +30,24 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
   await expect(page.getByText("Escalated to")).toBeVisible({ timeout: 150_000 });
   await expect(status).toHaveValue("failed");
   await expect(page.getByRole("button", { name: "Show run #3" })).toBeVisible();
-  await page.getByText("Escalated to").getByRole("button", { name: "SPL-2" }).click();
+  await page.getByText("Escalated to").getByRole("button", { name: "APP-2" }).click();
 
   // The epic links back, its planner splits the work into two children with their own gates.
   await expect(page.getByLabel("Title")).toHaveValue("Split: Big change");
   await expect(page.getByText("Split from")).toBeVisible();
   await expect(page.getByLabel("Spec")).toHaveValue(/## Previous direct attempt[\s\S]*Attempt 3: failed \(modified protected path tests\/broken\.txt\)/);
   const kids = page.getByRole("list", { name: "Children" });
-  await expect(kids.getByRole("listitem", { name: "SPL-3", exact: true })).toContainText("Create part1.txt", { timeout: 60_000 });
-  await expect(kids.getByRole("listitem", { name: "SPL-4", exact: true })).toContainText("Create part2.txt");
+  await expect(kids.getByRole("listitem", { name: "APP-3", exact: true })).toContainText("Create part1.txt", { timeout: 60_000 });
+  await expect(kids.getByRole("listitem", { name: "APP-4", exact: true })).toContainText("Create part2.txt");
 
   // Children pass their own gates and are merged; the epic gate passes on main; the epic waits for a human.
   await expect(status).toHaveValue("review", { timeout: 180_000 });
-  for (const key of ["SPL-3", "SPL-4"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
+  for (const key of ["APP-3", "APP-4"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
   await expect(transcript).toContainText("Epic gate passed: test -f part1.txt && test -f part2.txt");
-  await expect(page.getByLabel("Summary")).toContainText("Done: SPL-3 Create part1.txt; SPL-4 Create part2.txt.");
+  await expect(page.getByLabel("Summary")).toContainText("Done: APP-3 Create part1.txt; APP-4 Create part2.txt.");
   expect(git(repo, "ls-tree", "-r", "--name-only", "main").split("\n")).toEqual(["README.md", "part1.txt", "part2.txt"]);
 
-  await page.getByText("Split from").getByRole("button", { name: "SPL-1" }).click();
+  await page.getByText("Split from").getByRole("button", { name: "APP-1" }).click();
   await expect(page.getByLabel("Title")).toHaveValue("Big change");
-  await expect(page.getByText("Escalated to")).toContainText("SPL-2");
+  await expect(page.getByText("Escalated to")).toContainText("APP-2");
 });

@@ -7,12 +7,12 @@ import { join } from "node:path";
 
 // Gate fix round, flaky re-run and the reviewer's budget, with the demo provider as worker and reviewer.
 process.env.POLARIS_PROVIDER = "fake";
-const { call, db, events: all, until, workspace } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events: all, until, workspace } = await import("./helpers.ts");
 
 const { cookie: me, settings } = await workspace("gf", { test_command: "test -f ok.txt", protected_paths: "tests", model_review: false, auto_split: false, wiki: false });
 
 async function ticketRun(title: string, test_command?: string) {
-  const t = (await call("POST", "/api/tickets", me, { title, test_command })).body;
+  const t = (await fileTicket(me, { title, test_command })).body;
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, me)).status, 201);
   return until("review or failed", async () => {
     const ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;

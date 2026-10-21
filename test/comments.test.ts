@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 // M12: ticket comments, notifications (bell) and the workspace change stream behind the live board.
 process.env.POLARIS_PROVIDER = "fake";
-const { app, call, db, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, app, call, db, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
 
 const a = await user("ca");
 const b = (await call("POST", "/api/auth/sign-up/email", "", { email: "cb@x.dev", password: "password-123", name: "cb" })).cookie;
@@ -12,11 +12,12 @@ const bId = (db.prepare("SELECT id FROM user WHERE email = 'cb@x.dev'").get() as
 db.prepare("INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES ('m-cb', ?, ?, 'member', ?)").run(wsOf("ca"), bId, new Date().toISOString());
 const bIn = (await call("POST", "/api/auth/organization/set-active", b, { organizationId: wsOf("ca") })).cookie || b;
 const other = await user("cz");
+await configure(a, { repo_path: tempRepo(), setup_command: "" }); // a's project, where fileTicket files
 
 const notifications = (cookie: string) => call("GET", "/api/notifications", cookie).then((r) => r.body as { id: string; kind: string; text: string; key: string; number: number }[]);
 
 test("comments: validated, listed in order with the author, scoped to the workspace", async () => {
-  const t = (await call("POST", "/api/tickets", a, { title: "talk" })).body;
+  const t = (await fileTicket(a, { title: "talk" })).body;
   assert.equal((await call("POST", `/api/tickets/${t.id}/comments`, a, { body: "   " })).status, 400);
   assert.equal((await call("POST", `/api/tickets/${t.id}/comments`, a, { body: "x".repeat(5001) })).status, 400);
   const c1 = await call("POST", `/api/tickets/${t.id}/comments`, a, { body: "first\nline two" });
@@ -34,7 +35,7 @@ test("comments: validated, listed in order with the author, scoped to the worksp
 });
 
 test("notifications: a comment reaches the other members but not its author; reading clears them", async () => {
-  const t = (await call("POST", "/api/tickets", a, { title: "notify me" })).body;
+  const t = (await fileTicket(a, { title: "notify me" })).body;
   await call("POST", `/api/tickets/${t.id}/comments`, a, { body: "ping\nsecond line is not in the bell" });
   assert.deepEqual(await notifications(a), []);
   const forB = await notifications(bIn);
@@ -53,14 +54,14 @@ test("notifications: a comment reaches the other members but not its author; rea
 });
 
 test("a run that passes notifies 'ready for review'; one that fails says why", async () => {
-  await call("PUT", "/api/settings", a, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false, auto_split: false });
+  await configure(a, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false, auto_split: false });
   await call("POST", "/api/notifications/read", a, {});
-  const ok = (await call("POST", "/api/tickets", a, { title: "passes" })).body;
+  const ok = (await fileTicket(a, { title: "passes" })).body;
   await call("POST", `/api/tickets/${ok.id}/runs`, a);
   await waitFor(a, ok.id, "review");
   const n = await notifications(a);
   assert.deepEqual(n.map((x) => [x.kind, x.text]), [["review", `${ok.key} is ready for review`]]);
-  const bad = (await call("POST", "/api/tickets", a, { title: "FAIL-GATE: no notes", spec: "FAIL-GATE" })).body;
+  const bad = (await fileTicket(a, { title: "FAIL-GATE: no notes", spec: "FAIL-GATE" })).body;
   await call("PATCH", `/api/tickets/${bad.id}`, a, { test_command: "false" });
   await call("POST", `/api/tickets/${bad.id}/runs`, a);
   await waitFor(a, bad.id, "failed", 120_000);
@@ -75,7 +76,7 @@ test("GET /api/events streams a ticket ping when a ticket changes, and a notific
   assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
   const reader = res.body!.getReader();
   const next = async () => new TextDecoder().decode((await reader.read()).value);
-  const t = (await call("POST", "/api/tickets", a, { title: "live" })).body;
+  const t = (await fileTicket(a, { title: "live" })).body;
   const first = await next();
   assert.match(first, /^event: ticket\n/m);
   assert.ok(first.includes(`"id":"${t.id}"`));

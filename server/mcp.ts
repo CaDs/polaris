@@ -24,19 +24,29 @@ export async function api(method: string, path: string, body?: unknown) {
   return json;
 }
 
-// "POL-12", "pol-12" or "12" → the ticket's id.
+// "POL-12", "pol-12" or "12" (when only one project has a #12) → the ticket's id.
 async function idOf(key: string) {
-  const n = Number(/(\d+)\s*$/.exec(key)?.[1]);
-  const t = ((await api("GET", "/api/tickets")) as Ticket[]).find((t) => t.number === n);
-  if (!t) throw new Error(`no ticket ${key}`);
-  return t.id;
+  const k = key.trim().toUpperCase();
+  const all = (await api("GET", "/api/tickets")) as Ticket[];
+  const ts = /^\d+$/.test(k) ? all.filter((t) => t.number === Number(k)) : all.filter((t) => t.key === k);
+  if (ts.length > 1) throw new Error(`${key} is ambiguous: ${ts.map((t) => t.key).join(", ")}`);
+  if (!ts.length) throw new Error(`no ticket ${key}`);
+  return ts[0].id;
+}
+
+// A project key → its id. No key: the workspace's only project.
+async function projectOf(key?: string) {
+  const ps = (await api("GET", "/api/projects")) as { id: string; key: string }[];
+  const p = key ? ps.find((p) => p.key === key.trim().toUpperCase()) : ps.length === 1 ? ps[0] : undefined;
+  if (!p) throw new Error(key ? `no project ${key}: ${ps.map((p) => p.key).join(", ") || "none yet"}` : `name the project: ${ps.map((p) => p.key).join(", ") || "create one in the dashboard first"}`);
+  return p.id;
 }
 
 const line = (t: Ticket) => `${t.key} [${t.status}${t.run_status && t.status === "running" ? `/${t.run_status}` : ""}] ${t.kind === "epic" ? "(epic) " : ""}${t.title}`;
 
 async function status(key: string) {
   const t = (await api("GET", `/api/tickets/${await idOf(key)}`)) as Ticket & { children?: Ticket[] };
-  const out = [line(t), `Dashboard: ${WEB}/t/${t.number}`];
+  const out = [line(t), `Dashboard: ${WEB}/t/${t.key}`];
   const run = t.runs?.filter((r) => r.role === "worker" || r.role === "planner").at(-1);
   if (run) {
     out.push(`Latest run: ${run.role} attempt ${run.attempt}, ${run.status}, ${run.model}${run.finished?.reason ? ` — ${run.finished.reason}` : ""}`);
@@ -58,9 +68,9 @@ const TOOLS: { name: string; description: string; inputSchema: any; run: (a: any
     name: "create_ticket",
     description:
       "File a Polaris ticket and (by default) start an agent on it. Write the spec from the conversation: the goal, the relevant files, constraints and how to tell it is done. Use kind 'epic' for work too big for one agent: a planner splits it.",
-    inputSchema: { type: "object", properties: { title: str("Short imperative title"), spec: str("What to do, in Markdown"), kind: { type: "string", enum: ["task", "epic"] }, run: { type: "boolean", description: "Start an agent right away (default true)" } }, required: ["title", "spec"] },
+    inputSchema: { type: "object", properties: { title: str("Short imperative title"), spec: str("What to do, in Markdown"), project: str("Project key, e.g. POL (needed when the workspace has more than one project)"), kind: { type: "string", enum: ["task", "epic"] }, run: { type: "boolean", description: "Start an agent right away (default true)" } }, required: ["title", "spec"] },
     run: async (a) => {
-      const t = (await api("POST", "/api/tickets", { title: a.title, spec: a.spec, kind: a.kind ?? "task" })) as Ticket;
+      const t = (await api("POST", "/api/tickets", { title: a.title, spec: a.spec, kind: a.kind ?? "task", project_id: await projectOf(a.project) })) as Ticket;
       if (a.run === false) return `Created ${t.key}.`;
       await api("POST", `/api/tickets/${t.id}/runs`);
       return `Created ${t.key} and started ${t.kind === "epic" ? "the planner" : "an agent"}. Check it with ticket_status.`;

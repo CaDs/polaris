@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 // M6: reflection → lessons, eval cases + eval runs, prompt versions with eval-gated promotion. POLARIS_SANDBOX=host (no docker).
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf } = await import("./helpers.ts");
 const { activePrompt, addPrompt, promote, promotion, REFLECT_SYSTEM, seriesDigest, LESSONS_MAX } = await import("../server/improve.ts");
 
 const worker = readFileSync(new URL("../server/agent/prompts/worker.md", import.meta.url), "utf8");
@@ -32,11 +32,11 @@ test.after(() => srv.close());
 // A workspace whose runs use the mock (repo with no setup/test command).
 async function mockWorkspace(name: string) {
   const cookie = await user(name);
-  await call("PUT", "/api/settings", cookie, { repo_path: tempRepo(), setup_command: "", test_command: "", model_review: false });
+  await configure(cookie, { repo_path: tempRepo(), setup_command: "", test_command: "", model_review: false });
   const provider = (await call("POST", "/api/providers", cookie, { name: "mock", kind: "anthropic", base_url: mockUrl, api_key: "k" })).body.id;
   await call("PUT", "/api/settings/default-provider", cookie, { provider_id: provider, model: "claude-sonnet-5-5" });
   const run = async (title: string, wait = true) => {
-    const t = (await call("POST", "/api/tickets", cookie, { title })).body;
+    const t = (await fileTicket(cookie, { title })).body;
     const r = (await call("POST", `/api/tickets/${t.id}/runs`, cookie)).body;
     if (wait) await waitFor(cookie, t.id, "review");
     return { ticket: t, run: r };
@@ -109,8 +109,8 @@ test("lessons: a human edit and a restore each create a version; size cap; other
 
 test("a reject with a note is reflected on too; the event lands after run_finished and is still replayed", async () => {
   const rex = await user("rex");
-  await call("PUT", "/api/settings", rex, { repo_path: tempRepo(), setup_command: "", test_command: "", model_review: false });
-  const t = (await call("POST", "/api/tickets", rex, { title: "too much" })).body;
+  await configure(rex, { repo_path: tempRepo(), setup_command: "", test_command: "", model_review: false });
+  const t = (await fileTicket(rex, { title: "too much" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, rex);
   const run = (await waitFor(rex, t.id, "review")).runs[0];
   await call("POST", `/api/tickets/${t.id}/reject`, rex, { note: "keep it smaller" });
@@ -127,8 +127,8 @@ let shared: { repo: string; ticket: any; caseId: string; baseSha: string; v1: st
 
 test("eval cases: an approved ticket that fails at base_sha is accepted, one that passes there is rejected", async () => {
   const repo = tempRepo();
-  await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt", model_review: false, wiki: false }); // no ingest run: the tests delete tickets and count worktrees
-  const t = (await call("POST", "/api/tickets", alice, { title: "make ok", spec: "create ok.txt" })).body;
+  await configure(alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt", model_review: false, wiki: false }); // no ingest run: the tests delete tickets and count worktrees
+  const t = (await fileTicket(alice, { title: "make ok", spec: "create ok.txt" })).body;
   assert.equal((await call("POST", "/api/evals/cases", alice, { ticket_id: t.id })).status, 409); // not done yet
   await call("POST", `/api/tickets/${t.id}/runs`, alice);
   const done = await waitFor(alice, t.id, "review");
@@ -154,7 +154,7 @@ test("eval cases: an approved ticket that fails at base_sha is accepted, one tha
   assert.equal(sh(repo, "git worktree list").split("\n").length, 1); // validation cleaned up
 
   // main now has ok.txt: the next ticket passes at its base commit, so it can't be a case.
-  const t2 = (await call("POST", "/api/tickets", alice, { title: "already ok" })).body;
+  const t2 = (await fileTicket(alice, { title: "already ok" })).body;
   await call("POST", `/api/tickets/${t2.id}/runs`, alice);
   await waitFor(alice, t2.id, "review");
   await call("POST", `/api/tickets/${t2.id}/approve`, alice);
@@ -162,7 +162,7 @@ test("eval cases: an approved ticket that fails at base_sha is accepted, one tha
   assert.equal(bad.status, 400);
   assert.match(bad.body.error, /`test -f ok.txt` already passes at [0-9a-f]{8} .*can't tell/);
   // A ticket's own test_command is the one a case freezes (and validates at the base commit).
-  const t3 = (await call("POST", "/api/tickets", alice, { title: "own gate", test_command: "test -f README.md" })).body;
+  const t3 = (await fileTicket(alice, { title: "own gate", test_command: "test -f README.md" })).body;
   await call("POST", `/api/tickets/${t3.id}/runs`, alice);
   await waitFor(alice, t3.id, "review");
   await call("POST", `/api/tickets/${t3.id}/approve`, alice);
@@ -224,7 +224,7 @@ test("propose → eval → promote: the proposal wins on the evals and the next 
   assert.equal((await call("POST", `/api/prompts/${v2.id}/promote`, alice)).status, 200);
   assert.equal((await view()).active, 1);
 
-  const t = (await call("POST", "/api/tickets", alice, { title: "after promotion" })).body;
+  const t = (await fileTicket(alice, { title: "after promotion" })).body;
   const run = (await call("POST", `/api/tickets/${t.id}/runs`, alice)).body;
   assert.equal(run.prompt_version, 2);
   await waitFor(alice, t.id, "review");
@@ -233,6 +233,7 @@ test("propose → eval → promote: the proposal wins on the evals and the next 
 
 test("promotion rule: no eval / other case set / not better are blocked; strictly better or equal with ≥10% fewer tokens pass", async () => {
   const cookie = await user("pia");
+  await configure(cookie, { repo_path: tempRepo() });
   const ws = wsOf("pia");
   const v1 = activePrompt(ws);
   const v2 = addPrompt(ws, "prompt two", { source: "human", author: "pia@x.dev" });
@@ -241,7 +242,7 @@ test("promotion rule: no eval / other case set / not better are blocked; strictl
   assert.match(rule().reason, /No eval cases yet/);
   assert.match(promotion(ws, v1).reason, /active version/);
 
-  const ticket = async () => (await call("POST", "/api/tickets", cookie, { title: "case" })).body.id;
+  const ticket = async () => (await fileTicket(cookie, { title: "case" })).body.id;
   const addCase = async () => {
     const id = crypto.randomUUID();
     db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image)
@@ -284,10 +285,11 @@ test("promotion rule: no eval / other case set / not better are blocked; strictl
 
 test("promotion compares only evals run with the same model, and none with a cancelled case", async () => {
   const cookie = await user("mona");
+  await configure(cookie, { repo_path: tempRepo() });
   const ws = wsOf("mona");
   const v1 = activePrompt(ws);
   const v2 = addPrompt(ws, "prompt two", { source: "human", author: "mona@x.dev" });
-  const t = (await call("POST", "/api/tickets", cookie, { title: "case" })).body.id;
+  const t = (await fileTicket(cookie, { title: "case" })).body.id;
   const c1 = crypto.randomUUID();
   db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image)
     VALUES (?, ?, ?, 'c', '', '/x', 'abc', '', 'true', '', 'img')`).run(c1, ws, t);

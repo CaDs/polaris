@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { addProvider, git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { addProvider, git, more, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // Opt-in: REAL_MODEL=qwen3.8:27b-mlx npm run e2e:headed
 // A real model makes a protected test pass inside the Docker sandbox; a human approves the merge.
@@ -49,14 +49,14 @@ test("slugify", () => {
   await expect(page.getByLabel("Diff")).toContainText("slugify.js");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("done");
-  expect(git(repo, "log", "--format=%s", "main")).toContain("REA-1: Implement slugify");
+  expect(git(repo, "log", "--format=%s", "main")).toContain("APP-1: Implement slugify");
   expect(git(repo, "diff", "--name-only", "HEAD~1", "HEAD")).not.toContain("tests/");
 
   // M6 with the real model: the reflection wrote lessons; the approved ticket becomes an eval case
   // (slugify.js is absent at its base commit, so `npm test` fails there); v1 is evaluated; the model proposes v2.
   await page.getByRole("button", { name: "Add to evals" }).click();
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 120_000 });
-  await page.getByRole("link", { name: "Learning" }).click();
+  await more(page, "Learning");
   await expect(page.getByRole("textbox", { name: "Lessons" })).not.toHaveValue("");
   const v1 = page.getByRole("article", { name: "Prompt v1" });
   await v1.getByRole("button", { name: "Run eval" }).click();

@@ -107,7 +107,7 @@ export function usageCaps(c: UsageContext) {
   }
   if (c.ticketId) {
     const ancestors = db.prepare(`WITH RECURSIVE a(id) AS (SELECT ? UNION ALL SELECT t.parent_id FROM tickets t JOIN a ON t.id=a.id WHERE t.parent_id IS NOT NULL)
-      SELECT t.id,t.cap_usd usd,t.cap_tokens tokens,upper(substr(o.slug,1,3))||'-'||t.number AS key FROM tickets t JOIN organization o ON o.id=t.workspace_id
+      SELECT t.id,t.cap_usd usd,t.cap_tokens tokens,(SELECT key FROM projects WHERE id=t.project_id)||'-'||t.number AS key FROM tickets t
       WHERE t.id IN (SELECT id FROM a) AND t.workspace_id=? AND (t.cap_usd IS NOT NULL OR t.cap_tokens IS NOT NULL)`).all(c.ticketId, c.workspaceId) as { id: string; key: string; usd: number | null; tokens: number | null }[];
     for (const a of ancestors) push(a.key, a, treeSpend(a.id));
   }
@@ -162,8 +162,8 @@ export function usageSummary(ws: string) {
   });
   const models = q("provider_id,provider_name,provider_kind,model,billing_mode,", "GROUP BY provider_id,provider_name,provider_kind,model,billing_mode ORDER BY SUM(input+output+cache_read+cache_write) DESC").map(rates);
   const purposes = q("purpose,background,", "GROUP BY purpose,background ORDER BY background,purpose").map(rates);
-  const tickets = db.prepare(`SELECT t.id,upper(substr(o.slug,1,3))||'-'||t.number AS key,t.title,${SUMS}
-    FROM usage_ledger l JOIN tickets t ON t.id=l.ticket_id JOIN organization o ON o.id=t.workspace_id WHERE l.workspace_id=? AND t.hidden=0
+  const tickets = db.prepare(`SELECT t.id,(SELECT key FROM projects WHERE id=t.project_id)||'-'||t.number AS key,t.title,${SUMS}
+    FROM usage_ledger l JOIN tickets t ON t.id=l.ticket_id WHERE l.workspace_id=? AND t.hidden=0
     GROUP BY t.id ORDER BY SUM(input+output+cache_read+cache_write) DESC LIMIT 10`).all(ws).map((r) => rates(r as Record<string, any>));
   return { totals, execution: rates(q("", "AND background=0")[0]), background: rates(q("", "AND background=1")[0]), days, models, purposes, tickets,
     completeness: { complete_since: (db.prepare("SELECT complete_since FROM usage_accounting WHERE id=1").get() as { complete_since: number }).complete_since,

@@ -7,7 +7,7 @@ import { join } from "node:path";
 // M5: spilled tool output, compaction, skills, cache-friendly prefix, usage API, reliability fixes.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, listen, reply, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, keyOf, call, db, events, listen, reply, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
 const { runAgent } = await import("../server/agent/loop.ts");
 const { fakeProvider } = await import("../server/agent/providers/fake.ts");
 const { listSkills, skillsText } = await import("../server/agent/context.ts");
@@ -270,8 +270,8 @@ test("provider/workspace context settings: defaults per kind, editable, validate
 
   assert.equal((await call("GET", "/api/settings", pam)).body.compact_at_tokens, 150_000);
   const repo = tempRepo();
-  assert.equal((await call("PUT", "/api/settings", pam, { repo_path: repo, compact_at_tokens: "20000" })).body.compact_at_tokens, 20_000);
-  assert.equal((await call("PUT", "/api/settings", pam, { repo_path: repo, compact_at_tokens: 5 })).status, 400);
+  assert.equal((await configure(pam, { repo_path: repo, compact_at_tokens: "20000" })).body.compact_at_tokens, 20_000);
+  assert.equal((await configure(pam, { repo_path: repo, compact_at_tokens: 5 })).status, 400);
   assert.equal((await call("GET", "/api/settings", pam)).body.compact_at_tokens, 20_000);
 
   delete process.env.POLARIS_COMPACT_AT;
@@ -300,9 +300,9 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
   const setup = async (name: string, files: Record<string, string>) => {
     const cookie = await user(name);
     const repo = tempRepo(files);
-    await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", test_command: "", model_review: false });
+    await configure(cookie, { repo_path: repo, setup_command: "", test_command: "", model_review: false });
     const provider = (await call("POST", "/api/providers", cookie, { name: "mock", kind: "anthropic", base_url: mock, api_key: "k" })).body.id;
-    const t = (await call("POST", "/api/tickets", cookie, { title: `ticket of ${name}`, spec: "do it", provider_id: provider, model: "claude-sonnet-5-5" })).body;
+    const t = (await fileTicket(cookie, { title: `ticket of ${name}`, spec: "do it", provider_id: provider, model: "claude-sonnet-5-5" })).body;
     await call("POST", `/api/tickets/${t.id}/runs`, cookie);
     const done = await waitFor(cookie, t.id, "review");
     return { repo, run: done.runs[0], first: bodies.find((b) => b.messages[0].content[0].text.includes(`ticket of ${name}`)) };
@@ -339,8 +339,8 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
   process.env.POLARIS_COMPACT_AT = "1000";
   const cookie = await user("frank");
   const repo = tempRepo({ "README.md": "hi\n", ".polaris/skills/deploy.md": "---\nname: deploy\ndescription: Deploy\n---\n" });
-  await call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false });
-  const t = (await call("POST", "/api/tickets", cookie, { title: "long session", spec: "please compact along the way" })).body;
+  await configure(cookie, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false });
+  const t = (await fileTicket(cookie, { title: "long session", spec: "please compact along the way" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, cookie);
   const done = await waitFor(cookie, t.id, "review", 30_000);
   delete process.env.POLARIS_COMPACT_AT;
@@ -375,7 +375,10 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
 test("GET /api/usage: totals, 14 days, models, top tickets, hit rate; isolated per workspace", async () => {
   const gina = await user("gina");
   const hank = await user("hank");
-  const ticket = (slug: string, id: string, title: string) => db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES (?, ?, ?)").run(id, wsOf(slug), title);
+  const ticket = (slug: string, id: string, title: string) => {
+    db.prepare("INSERT OR IGNORE INTO projects (id, workspace_id, key, name, repo_path, base_branch) VALUES (?, ?, ?, 'p', '/', 'main')").run(`p-${slug}`, wsOf(slug), keyOf(slug));
+    db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title) VALUES (?, ?, ?, ?)").run(id, wsOf(slug), `p-${slug}`, title);
+  };
   ticket("gina", "ug1", "big one");
   ticket("gina", "ug2", "small one");
   ticket("hank", "uh1", "hank's");

@@ -7,12 +7,12 @@ import { join } from "node:path";
 // M3 pipeline without docker: POLARIS_SANDBOX=host runs setup/test/shell commands in the worktree on the host.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, projectOf, call, db, events, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
 const { addWorktree, protectedChanges, removeWorktree } = await import("../server/git.ts");
 const { parseProtected } = await import("../server/agent/tools.ts");
 const { parseTasks, seedTasks } = await import("../server/cli/seed-tasks.ts");
 
-const ticket = async (cookie: string, title: string, spec = "") => (await call("POST", "/api/tickets", cookie, { title, spec })).body;
+const ticket = async (cookie: string, title: string, spec = "") => (await fileTicket(cookie, { title, spec })).body;
 const branches = (repo: string) => sh(repo, "git for-each-ref --format='%(refname:short)' refs/heads/polaris");
 
 const alice = await user("alice");
@@ -47,17 +47,13 @@ test("worktree + branch per run, protected-path detection, cleanup", async () =>
   assert.doesNotMatch(sh(repo, "git worktree list"), /wt-unit/);
 });
 
-test("settings: validation, defaults, per-workspace; runs need a valid repo", async () => {
-  const t = await ticket(alice, "needs repo");
-  const noRepo = await call("POST", `/api/tickets/${t.id}/runs`, alice);
-  assert.equal(noRepo.status, 400);
-  assert.match(noRepo.body.error, /No repository configured/);
+test("project repository: validation, defaults, per-workspace; runs need a valid repo", async () => {
+  // No project, no repository: a ticket cannot even be filed.
+  assert.match((await fileTicket(alice, { title: "needs repo" })).body.error, /project_id is required/);
 
+  // The repository is a project's, not the workspace's.
   const defaults = (await call("GET", "/api/settings", alice)).body;
-  assert.deepEqual(
-    [defaults.configured, defaults.setup_command, defaults.test_command, defaults.protected_paths, defaults.image],
-    [false, "npm ci", "npm test", "tests/,evals/", "polaris-sandbox:1"],
-  );
+  assert.deepEqual([defaults.repo_path, defaults.test_command, defaults.max_turns], [undefined, undefined, 120]);
 
   const empty = realpathSync(mkdtempSync(join(tmpdir(), "empty-")));
   sh(empty, "git init -q");
@@ -71,32 +67,32 @@ test("settings: validation, defaults, per-workspace; runs need a valid repo", as
     [{ repo_path: repo, protected_paths: "../x" }, /relative/],
     [{ repo_path: 5 }, /string/],
   ] as const) {
-    const r = await call("PUT", "/api/settings", alice, body);
+    const r = await configure(alice, body);
     assert.equal(r.status, 400, JSON.stringify(body));
     assert.match(r.body.error, error);
   }
-  const saved = await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt" });
+  const saved = await configure(alice, { repo_path: repo, setup_command: "", test_command: "test -f ok.txt" });
   assert.equal(saved.status, 200);
   assert.equal(saved.body.base_branch, "main"); // defaults to the checked-out branch
   assert.equal(saved.body.setup_command, "");
-  assert.equal((await call("GET", "/api/settings", alice)).body.repo_path, repo);
-  assert.equal((await call("GET", "/api/settings", bob)).body.configured, false);
+  assert.equal((await call("GET", `/api/projects/${projectOf(alice)}`, alice)).body.repo_path, repo);
+  assert.deepEqual((await call("GET", "/api/projects", bob)).body, []);
 
-  // The repo vanishing later is caught when queueing too.
+  // A project's repository defaults; the repo vanishing later is caught when queueing too.
   const gone = tempRepo();
-  await call("PUT", "/api/settings", bob, { repo_path: gone });
+  const b = (await configure(bob, { repo_path: gone })).body;
+  assert.deepEqual([b.setup_command, b.test_command, b.protected_paths, b.image], ["npm ci", "npm test", "tests/,evals/", "polaris-sandbox:1"]);
   rmSync(gone, { recursive: true });
   const bt = await ticket(bob, "repo gone");
   const r = await call("POST", `/api/tickets/${bt.id}/runs`, bob);
   assert.equal(r.status, 400);
   assert.match(r.body.error, /Repository settings are invalid/);
-  await call("DELETE", `/api/tickets/${t.id}`, alice);
 });
 
 test("queue: FIFO, at most POLARIS_CONCURRENCY running, queued runs can be cancelled", async () => {
   const carol = await user("carol");
   const repo = tempRepo();
-  await call("PUT", "/api/settings", carol, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" });
+  await configure(carol, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" });
   const ts: any[] = [];
   for (const n of [1, 2, 3, 4]) ts.push(await ticket(carol, `q${n}`));
   let max = 0;
@@ -127,7 +123,7 @@ test("queue: FIFO, at most POLARIS_CONCURRENCY running, queued runs can be cance
 let retried: any;
 
 test("gate failure retries with the failure fed back; pass commits on the run branch", async () => {
-  const repo = (await call("GET", "/api/settings", alice)).body.repo_path;
+  const repo = (await call("GET", `/api/projects/${projectOf(alice)}`, alice)).body.repo_path;
   const t = await ticket(alice, "make ok");
   await call("POST", `/api/tickets/${t.id}/runs`, alice);
   const done = await waitFor(alice, t.id, "review");
@@ -180,7 +176,7 @@ test("approve when the base branch is not checked out leaves the user's checkout
   const dave = await user("dave");
   const repo = tempRepo();
   sh(repo, "git checkout -q -b feature");
-  await call("PUT", "/api/settings", dave, { repo_path: repo, base_branch: "main", setup_command: "", test_command: "true" });
+  await configure(dave, { repo_path: repo, base_branch: "main", setup_command: "", test_command: "true" });
   const t = await ticket(dave, "elsewhere");
   await call("POST", `/api/tickets/${t.id}/runs`, dave);
   await waitFor(dave, t.id, "review");
@@ -195,7 +191,7 @@ test("approve when the base branch is not checked out leaves the user's checkout
 });
 
 test("reject cleans up, returns to todo, and the note reaches the next run's task", async () => {
-  const repo = (await call("GET", "/api/settings", alice)).body.repo_path; // main now has ok.txt: attempt 1 passes
+  const repo = (await call("GET", `/api/projects/${projectOf(alice)}`, alice)).body.repo_path; // main now has ok.txt: attempt 1 passes
   const t = await ticket(alice, "to reject");
   await call("POST", `/api/tickets/${t.id}/runs`, alice);
   const inReview = await waitFor(alice, t.id, "review");
@@ -242,7 +238,7 @@ test("other workspaces cannot see settings, diffs, or approve/reject", async () 
   await waitFor(alice, t.id, "review");
   for (const [m, p] of [["GET", "diff"], ["POST", "approve"], ["POST", "reject"]])
     assert.equal((await call(m, `/api/tickets/${t.id}/${p}`, bob)).status, 404, p);
-  assert.notEqual((await call("GET", "/api/settings", bob)).body.repo_path, (await call("GET", "/api/settings", alice)).body.repo_path);
+  assert.notEqual((await call("GET", "/api/projects", bob)).body[0].repo_path, (await call("GET", "/api/projects", alice)).body[0].repo_path);
   assert.equal((await call("GET", `/api/tickets/${t.id}`, alice)).body.status, "review");
 });
 
@@ -253,9 +249,9 @@ test("seed-tasks: one ticket per unchecked milestone item, idempotent", async ()
     { title: "M4: A", spec: "M4 — Providers\n\n- A" },
     { title: "M4: B", spec: "M4 — Providers\n\n- B" },
   ]);
-  const ws = wsOf("bob");
-  assert.equal(seedTasks(ws, md), 3);
-  assert.equal(seedTasks(ws, md), 0);
+  const p = { id: projectOf(bob)!, workspace_id: wsOf("bob") };
+  assert.equal(seedTasks(p, md), 3);
+  assert.equal(seedTasks(p, md), 0);
   const titles = (await call("GET", "/api/tickets", bob)).body.map((t: any) => t.title);
   assert.ok(["M3: open thing", "M4: A", "M4: B"].every((x) => titles.includes(x)));
 });

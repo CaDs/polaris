@@ -6,7 +6,7 @@ import { streamSSE } from "hono/streaming";
 import { db } from "./db.ts";
 import { addDetached, git, removeWorktree } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
-import { metaProvider, settingsFor } from "./runs.ts";
+import { metaProvider, projectSettings, type ProjectSettings } from "./runs.ts";
 import { OWN_RUNS } from "./planner.ts";
 import { ESTIMATES, KINDS, ticketKey, trackerHeader } from "./tracker.ts";
 import { withUsage } from "./usage.ts";
@@ -16,8 +16,8 @@ import { runAgent } from "./agent/loop.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type AgentEvent, type Msg } from "./agent/types.ts";
 
-// M13 chat (see SPEC "Chat (M13)"). A member's private conversation with the project: each message is one agent turn on
-// a fresh read-only checkout of the base branch, resuming the stored conversation. The agent proposes tickets; only the
+// M13 chat (see SPEC "Chat (M13)"). A member's private conversation with a project: each message is one agent turn on
+// a fresh read-only checkout of its base branch, resuming the stored conversation. The agent proposes tickets; only the
 // member files them (POST /api/chats/proposals/:id/file in app.ts, which shares the New ticket validation).
 
 export const CHAT_PROMPT = readFileSync(new URL("./agent/prompts/chat.md", import.meta.url), "utf8");
@@ -26,7 +26,7 @@ const MESSAGE_MAX = 20_000;
 const SPEC_MAX = 4000; // chars of a ticket's spec in a context block
 
 type Env = { Variables: { userId: string; workspaceId: string } };
-type Chat = { id: string; workspace_id: string; user_id: string; title: string; messages: string };
+type Chat = { id: string; workspace_id: string; project_id: string; user_id: string; title: string; messages: string };
 export type PageContext = { ticket?: string; project?: string; cycle?: string };
 export type ChatEvent = { seq: number; type: string; payload: any; created_at: number };
 type Live = ChatEvent | { type: "delta"; text: string };
@@ -66,10 +66,12 @@ export function recoverChats() {
 
 // --- context: what the user is looking at and the tickets they @-mention, resolved in their workspace ---
 
-const ticketByKey = (ws: string, key: string) => {
-  const n = /^(?:([A-Za-z]{1,3})-)?(\d+)$/.exec(key.trim());
-  const t = n ? (db.prepare(`SELECT t.*, ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.workspace_id = ? AND t.number = ? AND t.hidden = 0`).get(ws, Number(n[2])) as Record<string, any> | undefined) : undefined;
-  return t && (!n![1] || t.key.startsWith(`${n![1].toUpperCase()}-`)) ? t : undefined;
+// "POL-12" (any project of the workspace) or "12" (the chat's project).
+const ticketByKey = (chat: Chat, key: string) => {
+  const n = /^(?:([A-Za-z][A-Za-z0-9]{1,4})-)?(\d+)$/.exec(key.trim());
+  if (!n) return undefined;
+  const p = n[1] ? (db.prepare("SELECT id FROM projects WHERE workspace_id = ? AND key = ?").get(chat.workspace_id, n[1].toUpperCase()) as { id: string } | undefined)?.id : chat.project_id;
+  return db.prepare(`SELECT t.*, ${ticketKey()} AS key FROM tickets t WHERE t.project_id = ? AND t.number = ? AND t.hidden = 0`).get(p ?? "", Number(n[2])) as Record<string, any> | undefined;
 };
 
 function ticketText(t: Record<string, any>) {
@@ -81,7 +83,7 @@ function ticketText(t: Record<string, any>) {
   if (run) lines.push(`- Latest run: attempt ${run.attempt}, ${run.status}${reason ? ` (${reason})` : ""}`);
   if (header) lines.push(header);
   if (t.kind === "epic") {
-    const kids = db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.title FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.parent_id = ? ORDER BY t.number`).all(t.id) as Record<string, string>[];
+    const kids = db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.title FROM tickets t WHERE t.parent_id = ? ORDER BY t.number`).all(t.id) as Record<string, string>[];
     lines.push(`- Children: ${kids.length ? kids.map((k) => `${k.key} [${k.status}] ${k.title}`).join("; ") : "none yet"}`);
   }
   if (t.spec) lines.push("", truncate(t.spec, SPEC_MAX, "head", "[… truncated]"));
@@ -89,20 +91,21 @@ function ticketText(t: Record<string, any>) {
 }
 
 const openTickets = (ws: string, where: string, id: string) =>
-  (db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.title FROM tickets t JOIN organization o ON o.id = t.workspace_id
+  (db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.title FROM tickets t
     WHERE t.workspace_id = ? AND t.${where} = ? AND t.status <> 'done' AND t.hidden = 0 ORDER BY t.number`).all(ws, id) as Record<string, string>[]).map((t) => `- ${t.key} [${t.status}] ${t.title}`);
 
 // The "# Context" block ahead of a message ("" when there is none). Unknown ids and keys are left out.
-export function contextText(ws: string, text: string, ctx: PageContext = {}) {
+export function contextText(chat: Chat, text: string, ctx: PageContext = {}) {
+  const ws = chat.workspace_id;
   const parts: string[] = [];
-  const page = ctx.ticket ? ticketByKey(ws, ctx.ticket) : undefined;
+  const page = ctx.ticket ? ticketByKey(chat, ctx.ticket) : undefined;
   if (page) parts.push(`The user is looking at this ticket:\n\n${ticketText(page)}`);
   const project = ctx.project && (db.prepare("SELECT id, name, description FROM projects WHERE id = ? AND workspace_id = ?").get(ctx.project, ws) as Record<string, string> | undefined);
   if (project) parts.push(`The user is looking at the project "${project.name}"${project.description ? `: ${project.description}` : ""}\n\nOpen tickets:\n${openTickets(ws, "project_id", project.id).join("\n") || "(none)"}`);
   const cycle = ctx.cycle && (db.prepare("SELECT id, number, name FROM cycles WHERE id = ? AND workspace_id = ?").get(ctx.cycle, ws) as Record<string, any> | undefined);
   if (cycle) parts.push(`The user is looking at cycle ${cycle.number}${cycle.name ? ` "${cycle.name}"` : ""}\n\nOpen tickets:\n${openTickets(ws, "cycle_id", cycle.id).join("\n") || "(none)"}`);
-  const mentioned = [...new Set([...text.matchAll(/@([A-Za-z]{1,3}-\d+)\b/g)].map((m) => m[1].toUpperCase()))].slice(0, 5);
-  const tickets = mentioned.flatMap((k) => (k === page?.key ? [] : (ticketByKey(ws, k) ?? [])));
+  const mentioned = [...new Set([...text.matchAll(/@([A-Za-z][A-Za-z0-9]{1,4}-\d+)\b/g)].map((m) => m[1].toUpperCase()))].slice(0, 5);
+  const tickets = mentioned.flatMap((k) => (k === page?.key ? [] : (ticketByKey(chat, k) ?? [])));
   if (tickets.length) parts.push(`Mentioned tickets:\n\n${tickets.map(ticketText).join("\n\n")}`);
   return parts.length ? `# Context\n\n${parts.join("\n\n")}` : "";
 }
@@ -120,12 +123,11 @@ const str = (input: Record<string, unknown>, key: string, max: number, required 
 };
 
 function chatTools(chat: Chat): Tool[] {
-  const ws = chat.workspace_id;
   return [
     {
       def: {
         name: "list_tickets",
-        description: "Tickets of this workspace, newest first (at most 50): key, status, title. Use it to find existing work before proposing.",
+        description: "Tickets of this project, newest first (at most 50): key, status, title. Use it to find existing work before proposing.",
         input_schema: {
           type: "object",
           properties: { status: { type: "string", description: "Only this status: backlog, todo, running, review, done or failed" }, query: { type: "string", description: "Only tickets whose title or spec contains this text" } },
@@ -134,9 +136,9 @@ function chatTools(chat: Chat): Tool[] {
       async run(input) {
         const status = str(input, "status", 20, false);
         const query = str(input, "query", 200, false);
-        const rows = db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.kind, t.title FROM tickets t JOIN organization o ON o.id = t.workspace_id
-          WHERE t.workspace_id = ? AND t.hidden = 0 AND (? IS NULL OR t.status = ?) AND (? IS NULL OR instr(lower(t.title || ' ' || t.spec), lower(?)) > 0)
-          ORDER BY t.number DESC LIMIT 50`).all(ws, status ?? null, status ?? null, query ?? null, query ?? null) as Record<string, string>[];
+        const rows = db.prepare(`SELECT ${ticketKey()} AS key, t.status, t.kind, t.title FROM tickets t
+          WHERE t.project_id = ? AND t.hidden = 0 AND (? IS NULL OR t.status = ?) AND (? IS NULL OR instr(lower(t.title || ' ' || t.spec), lower(?)) > 0)
+          ORDER BY t.number DESC LIMIT 50`).all(chat.project_id, status ?? null, status ?? null, query ?? null, query ?? null) as Record<string, string>[];
         return rows.map((t) => `${t.key} [${t.status}]${t.kind === "epic" ? " (epic)" : ""} ${t.title}`).join("\n") || "No tickets match.";
       },
     },
@@ -147,7 +149,7 @@ function chatTools(chat: Chat): Tool[] {
         input_schema: { type: "object", properties: { key: { type: "string", description: "Ticket key, e.g. POL-12" } }, required: ["key"] },
       },
       async run(input) {
-        const t = ticketByKey(ws, str(input, "key", 20)!);
+        const t = ticketByKey(chat, str(input, "key", 20)!);
         if (!t) throw new AgentError("InvalidArguments", `no ticket ${String(input.key)} in this workspace`);
         return ticketText(t);
       },
@@ -200,7 +202,7 @@ const firstText = (m: Msg) => m.content.flatMap((b) => (b.type === "text" ? [b.t
 // Shown in the panel as they happen; usage, run_started/run_finished and metrics are not part of a chat.
 const SHOWN = new Set(["assistant_message", "tool_call", "tool_result", "error", "compaction", "stuck"]);
 
-function environment(s: NonNullable<ReturnType<typeof settingsFor>>, sha: string) {
+function environment(s: ProjectSettings, sha: string) {
   return [
     "# Environment",
     `- Repository: ${basename(s.repo_path)}; read_file and search see a read-only checkout of ${s.base_branch}, refreshed to its latest commit on every message (now ${sha.slice(0, 8)})`,
@@ -212,14 +214,14 @@ function environment(s: NonNullable<ReturnType<typeof settingsFor>>, sha: string
 // the conversation with a note, so the next turn knows it was asked and never resumes a dangling tool call.
 async function turn(chat: Chat, message: string, signal: AbortSignal) {
   const ws = chat.workspace_id;
-  const s = settingsFor(ws);
+  const s = projectSettings(chat.project_id);
   const worktree = join(dataDir(), "worktrees", `chat-${randomUUID()}`);
   const prior = JSON.parse(chat.messages) as Msg[];
   let messages: Msg[] | undefined;
   let finished: { status: string; reason?: string } = { status: "failed", reason: "the turn did not start" };
   let added = false;
   try {
-    if (!s) throw new AgentError("UnexpectedEnvironment", "No repository configured. Set one in Settings first.");
+    if (!s) throw new AgentError("UnexpectedEnvironment", "the chat's project was deleted");
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     const sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, sha, worktree);
@@ -227,8 +229,8 @@ async function turn(chat: Chat, message: string, signal: AbortSignal) {
     let wiki = "";
     if (s.wiki)
       try {
-        await materialize(ws, worktree);
-        if (!prior.length) wiki = await wikiSection(ws, s.repo_path, sha);
+        await materialize(chat.project_id, worktree);
+        if (!prior.length) wiki = await wikiSection(chat.project_id, s.repo_path, sha);
       } catch (e) {
         append(chat.id, "error", { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` });
       }
@@ -260,7 +262,7 @@ async function turn(chat: Chat, message: string, signal: AbortSignal) {
 
 // Stores the user's message and starts its turn in the background. The model sees the message behind its context block.
 function start(chat: Chat, text: string, ctx: PageContext) {
-  const context = contextText(chat.workspace_id, text, ctx);
+  const context = contextText(chat, text, ctx);
   append(chat.id, "user_message", { text, context: ctx });
   const ctl = new AbortController();
   busy.set(chat.id, ctl);
@@ -269,7 +271,7 @@ function start(chat: Chat, text: string, ctx: PageContext) {
     .finally(() => busy.delete(chat.id));
 }
 
-// --- routes (mounted at /api/chats; a member sees only their own chats in the active workspace) ---
+// --- routes (mounted at /api/chats; a member sees only their own chats in the active workspace, of every project) ---
 
 export const chatRoutes = new Hono<Env>();
 
@@ -277,8 +279,8 @@ const chatIn = (c: Context<Env>, id = c.req.param("id") as string) =>
   db.prepare("SELECT * FROM chats WHERE id = ? AND workspace_id = ? AND user_id = ?").get(id, c.get("workspaceId"), c.get("userId")) as Chat | undefined;
 
 export const proposalIn = (c: Context<Env>, id = c.req.param("id") as string) =>
-  db.prepare(`SELECT p.*, c.id AS chat_id, c.title AS chat_title FROM chat_proposals p JOIN chats c ON c.id = p.chat_id WHERE p.id = ? AND c.workspace_id = ? AND c.user_id = ?`)
-    .get(id, c.get("workspaceId"), c.get("userId")) as { id: string; chat_id: string; chat_title: string; status: string; payload: string } | undefined;
+  db.prepare(`SELECT p.*, c.id AS chat_id, c.title AS chat_title, c.project_id FROM chat_proposals p JOIN chats c ON c.id = p.chat_id WHERE p.id = ? AND c.workspace_id = ? AND c.user_id = ?`)
+    .get(id, c.get("workspaceId"), c.get("userId")) as { id: string; chat_id: string; chat_title: string; project_id: string; status: string; payload: string } | undefined;
 
 async function messageBody(c: Context<Env>) {
   const b = await c.req.json().catch(() => null);
@@ -286,31 +288,35 @@ async function messageBody(c: Context<Env>) {
   if (!text || text.length > MESSAGE_MAX) return { error: `message must be a string of 1-${MESSAGE_MAX} chars` };
   const ctx: PageContext = {};
   for (const k of ["ticket", "project", "cycle"] as const) if (typeof b?.context?.[k] === "string") ctx[k] = b.context[k].slice(0, 100);
-  return { text, ctx };
+  return { text, ctx, project_id: typeof b?.project_id === "string" ? b.project_id : undefined };
 }
 
 const proposalsOf = (chatId: string) =>
   (db.prepare(`SELECT p.id, p.number, p.payload, p.status, p.ticket_id, CASE WHEN t.id IS NULL THEN NULL ELSE ${ticketKey()} END AS ticket_key, t.number AS ticket_number
-    FROM chat_proposals p LEFT JOIN tickets t ON t.id = p.ticket_id LEFT JOIN organization o ON o.id = t.workspace_id WHERE p.chat_id = ? ORDER BY p.number`).all(chatId) as Record<string, any>[])
+    FROM chat_proposals p LEFT JOIN tickets t ON t.id = p.ticket_id WHERE p.chat_id = ? ORDER BY p.number`).all(chatId) as Record<string, any>[])
     .map((p) => ({ ...p, payload: JSON.parse(p.payload) }));
 
 chatRoutes.get("/", (c) =>
-  c.json(db.prepare("SELECT id, title, created_at, updated_at FROM chats WHERE workspace_id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 50").all(c.get("workspaceId"), c.get("userId"))));
+  c.json(db.prepare(`SELECT c.id, c.title, c.project_id, p.key AS project_key, p.name AS project_name, c.created_at, c.updated_at FROM chats c JOIN projects p ON p.id = c.project_id
+    WHERE c.workspace_id = ? AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT 50`).all(c.get("workspaceId"), c.get("userId"))));
 
+// {message, context?, project_id}: the project the chat talks about, for good.
 chatRoutes.post("/", async (c) => {
   const m = await messageBody(c);
   if ("error" in m) return c.json(m, 400);
+  const project = m.project_id && db.prepare("SELECT id FROM projects WHERE id = ? AND workspace_id = ?").get(m.project_id, c.get("workspaceId"));
+  if (!project) return c.json({ error: "project_id: no such project in this workspace" }, 400);
   const id = randomUUID();
-  db.prepare("INSERT INTO chats (id, workspace_id, user_id, title) VALUES (?, ?, ?, ?)").run(id, c.get("workspaceId"), c.get("userId"), m.text.split("\n")[0].slice(0, 80));
+  db.prepare("INSERT INTO chats (id, workspace_id, project_id, user_id, title) VALUES (?, ?, ?, ?, ?)").run(id, c.get("workspaceId"), m.project_id!, c.get("userId"), m.text.split("\n")[0].slice(0, 80));
   const chat = chatIn(c, id)!;
   start(chat, m.text, m.ctx);
-  return c.json({ id, title: chat.title, busy: true }, 201);
+  return c.json({ id, title: chat.title, project_id: chat.project_id, busy: true }, 201);
 });
 
 chatRoutes.get("/:id", (c) => {
   const chat = chatIn(c);
   if (!chat) return c.json({ error: "not_found" }, 404);
-  return c.json({ id: chat.id, title: chat.title, busy: busy.has(chat.id), events: eventsOf(chat.id), proposals: proposalsOf(chat.id) });
+  return c.json({ id: chat.id, title: chat.title, project_id: chat.project_id, busy: busy.has(chat.id), events: eventsOf(chat.id), proposals: proposalsOf(chat.id) });
 });
 
 chatRoutes.post("/:id/messages", async (c) => {

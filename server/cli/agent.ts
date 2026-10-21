@@ -1,5 +1,5 @@
 // npm run agent -- <ticket-id> [--root DIR] [--model M] [--base-url URL] [--max-turns N] [--max-tokens N]
-// npm run agent -- --task "text" ...   (creates a throwaway ticket in workspace "cli")
+// npm run agent -- --task "text" ...   (creates a throwaway ticket in workspace "cli", project CLI)
 // Anthropic: ANTHROPIC_API_KEY. Ollama: --base-url http://localhost:11434 --model <name>.
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -34,8 +34,14 @@ if (!ticketId) {
     ws = { id: randomUUID() };
     db.prepare("INSERT INTO organization (id, name, slug, createdAt) VALUES (?, 'cli', 'cli', ?)").run(ws.id, new Date().toISOString());
   }
+  // The CLI runs in --root on the host, never in the project's repo: the project only holds the ticket.
+  let project = db.prepare("SELECT id FROM projects WHERE workspace_id = ? AND key = 'CLI'").get(ws.id) as { id: string } | undefined;
+  if (!project) {
+    project = { id: randomUUID() };
+    db.prepare("INSERT INTO projects (id, workspace_id, key, name, repo_path, base_branch) VALUES (?, ?, 'CLI', 'cli', ?, '')").run(project.id, ws.id, root);
+  }
   ticketId = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES (?, ?, ?)").run(ticketId, ws.id, opt.task);
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title) VALUES (?, ?, ?, ?)").run(ticketId, ws.id, project.id, opt.task);
 }
 if (!db.prepare("SELECT 1 FROM tickets WHERE id = ?").get(ticketId)) throw new Error(`ticket not found: ${ticketId}`);
 

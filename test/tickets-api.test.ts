@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 process.env.POLARIS_PROVIDER = "fake";
-const { app, call, db, events, origin, tempRepo, until, user, waitFor } = await import("./helpers.ts");
+const { configure, fileTicket, app, call, db, events, origin, tempRepo, until, user, waitFor } = await import("./helpers.ts");
 const { recoverOrphans } = await import("../server/runs.ts");
 
 const alice = await user("alice");
@@ -13,20 +13,21 @@ const bob = await user("bob");
 
 // Runs need a repository: a one-commit repo whose test gate checks the demo agent's notes.txt.
 const repo = tempRepo();
-assert.equal((await call("PUT", "/api/settings", alice, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false })).status, 200);
+assert.equal((await configure(alice, { repo_path: repo, setup_command: "", test_command: "test -f notes.txt", model_review: false })).status, 200);
+assert.equal((await configure(bob, { repo_path: tempRepo() })).status, 200);
 
 test("ticket CRUD, validation and per-workspace numbering", async () => {
-  const a1 = await call("POST", "/api/tickets", alice, { title: "  First  ", spec: "do it" });
+  const a1 = await fileTicket(alice, { title: "  First  ", spec: "do it" });
   assert.equal(a1.status, 201);
   assert.equal(a1.body.title, "First");
   assert.equal(a1.body.key, "ALI-1");
-  const a2 = await call("POST", "/api/tickets", alice, { title: "Second" });
+  const a2 = await fileTicket(alice, { title: "Second" });
   assert.equal(a2.body.key, "ALI-2");
-  const b1 = await call("POST", "/api/tickets", bob, { title: "Bob's" });
+  const b1 = await fileTicket(bob, { title: "Bob's" });
   assert.equal(b1.body.number, 1);
 
   for (const bad of [{}, { title: "" }, { title: "   " }, { title: "x".repeat(201) }, { title: 5 }, { title: "ok", spec: 1 }, { title: "ok", status: "done" }])
-    assert.equal((await call("POST", "/api/tickets", alice, bad)).status, 400, JSON.stringify(bad).slice(0, 40));
+    assert.equal((await fileTicket(alice, bad)).status, 400, JSON.stringify(bad).slice(0, 40));
   assert.equal((await call("PATCH", `/api/tickets/${a1.body.id}`, alice, { status: "bogus" })).status, 400);
   assert.equal((await call("PATCH", `/api/tickets/${a1.body.id}`, alice, { title: "" })).status, 400);
 
@@ -42,11 +43,11 @@ test("ticket CRUD, validation and per-workspace numbering", async () => {
   assert.equal((await call("DELETE", `/api/tickets/${a2.body.id}`, alice)).status, 204);
   assert.equal((await call("GET", `/api/tickets/${a2.body.id}`, alice)).status, 404);
   // numbers are never reused within the max+1 scheme
-  assert.equal((await call("POST", "/api/tickets", alice, { title: "Third" })).body.number, 2);
+  assert.equal((await fileTicket(alice, { title: "Third" })).body.number, 2);
 });
 
 test("other workspaces get 404 for tickets and runs", async () => {
-  const t = await call("POST", "/api/tickets", alice, { title: "private" });
+  const t = await fileTicket(alice, { title: "private" });
   const run = await call("POST", `/api/tickets/${t.body.id}/runs`, alice);
   assert.equal(run.status, 201);
   const id = run.body.id;
@@ -61,7 +62,7 @@ test("other workspaces get 404 for tickets and runs", async () => {
 });
 
 test("a fake run stores events, moves the ticket to review and matches totals", async () => {
-  const t = await call("POST", "/api/tickets", alice, { title: "demo" });
+  const t = await fileTicket(alice, { title: "demo" });
   const run = await call("POST", `/api/tickets/${t.body.id}/runs`, alice);
   assert.equal(run.body.attempt, 1);
 
@@ -112,7 +113,7 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
 });
 
 test("cancelling a slow run ends it as cancelled and returns the ticket to todo", async () => {
-  const t = await call("POST", "/api/tickets", alice, { title: "slow one", spec: "this is slow" });
+  const t = await fileTicket(alice, { title: "slow one", spec: "this is slow" });
   const run = await call("POST", `/api/tickets/${t.body.id}/runs`, alice);
   assert.equal((await call("GET", `/api/tickets/${t.body.id}`, alice)).body.status, "running");
   assert.equal((await call("POST", `/api/tickets/${t.body.id}/runs`, alice)).status, 409);
@@ -125,7 +126,7 @@ test("cancelling a slow run ends it as cancelled and returns the ticket to todo"
 });
 
 test("startup recovery fails orphaned runs and their tickets", async () => {
-  const t = await call("POST", "/api/tickets", alice, { title: "orphan" });
+  const t = await fileTicket(alice, { title: "orphan" });
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(t.body.id);
   db.prepare("INSERT INTO runs (id, ticket_id, model, status) VALUES ('orphan-run', ?, 'm', 'running')").run(t.body.id);
   assert.equal(recoverOrphans(), 1);
@@ -141,18 +142,18 @@ test("startup recovery fails orphaned runs and their tickets", async () => {
 test("settings accept only a plain docker image reference (it is an argument of docker run)", async () => {
   const dan = await user("dan");
   for (const image of ["--privileged", "-v/:/host", "ubuntu --privileged", "Ubuntu", "a;b", "x:y:z", "img@sha256:abc"]) {
-    const r = await call("PUT", "/api/settings", dan, { repo_path: repo, image });
+    const r = await configure(dan, { repo_path: repo, image });
     assert.equal(r.status, 400, image);
     assert.match(r.body.error, /image/i, image);
   }
   for (const image of ["polaris-sandbox:1", "node:22-bookworm", "ghcr.io/org/img:v1.2", `localhost:5000/team/img@sha256:${"a".repeat(64)}`])
-    assert.equal((await call("PUT", "/api/settings", dan, { repo_path: repo, image })).body.image, image);
+    assert.equal((await configure(dan, { repo_path: repo, image })).body.image, image);
 });
 
 test("startup recovery: an interrupted attempt is retried with the reason fed back and cleaned up; the last one fails; a finished run's ticket is unstuck", async () => {
   const { addWorktree } = await import("../server/git.ts");
   const orphan = async (attempt: number, title: string) => {
-    const t = (await call("POST", "/api/tickets", alice, { title })).body;
+    const t = (await fileTicket(alice, { title })).body;
     const id = `dead-${attempt}-${t.id}`;
     const wt = join(process.env.POLARIS_DATA_DIR!, "worktrees", id);
     await addWorktree(repo, "main", wt, `polaris/${id}`);
@@ -162,10 +163,10 @@ test("startup recovery: an interrupted attempt is retried with the reason fed ba
   };
   const a = await orphan(1, "interrupted early");
   const last = await orphan(3, "interrupted last");
-  const stuck = (await call("POST", "/api/tickets", alice, { title: "finished before the restart" })).body;
+  const stuck = (await fileTicket(alice, { title: "finished before the restart" })).body;
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(stuck.id);
   db.prepare("INSERT INTO runs (id, ticket_id, model, status) VALUES (?, ?, 'demo', 'passed')").run(`done-${stuck.id}`, stuck.id);
-  const epic = (await call("POST", "/api/tickets", alice, { title: "planning", kind: "epic" })).body;
+  const epic = (await fileTicket(alice, { title: "planning", kind: "epic" })).body;
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(epic.id);
   db.prepare("INSERT INTO runs (id, ticket_id, model, status, role) VALUES (?, ?, 'demo', 'running', 'planner')").run(`round-${epic.id}`, epic.id);
 
@@ -186,7 +187,7 @@ test("startup recovery: an interrupted attempt is retried with the reason fed ba
 });
 
 test("manual status changes: only between todo, done and failed (and review back to todo), never while a run is active", async () => {
-  const t = (await call("POST", "/api/tickets", alice, { title: "by hand" })).body;
+  const t = (await fileTicket(alice, { title: "by hand" })).body;
   const patch = async (status: string) => {
     const r = await call("PATCH", `/api/tickets/${t.id}`, alice, { status });
     return { status: r.status, body: r.body };
@@ -207,9 +208,9 @@ test("manual status changes: only between todo, done and failed (and review back
   assert.equal((await call("GET", `/api/tickets/${t.id}`, alice)).body.title, "by hand"); // a refused move changes nothing
 
   // A child marked done by hand settles like a merged one: its dependent starts.
-  const epic = (await call("POST", "/api/tickets", alice, { title: "by hand epic", kind: "epic" })).body;
-  const a = (await call("POST", "/api/tickets", alice, { title: "child a" })).body;
-  const b = (await call("POST", "/api/tickets", alice, { title: "child b", test_command: "true" })).body;
+  const epic = (await fileTicket(alice, { title: "by hand epic", kind: "epic" })).body;
+  const a = (await fileTicket(alice, { title: "child a" })).body;
+  const b = (await fileTicket(alice, { title: "child b", test_command: "true" })).body;
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(epic.id);
   db.prepare("UPDATE tickets SET parent_id = ?, depends_on = ? WHERE id IN (?, ?)").run(epic.id, "[]", a.id, b.id);
   db.prepare("UPDATE tickets SET depends_on = ? WHERE id = ?").run(JSON.stringify([a.id]), b.id);

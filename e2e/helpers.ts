@@ -35,23 +35,47 @@ export async function signUp(page: Page, workspace: string) {
   return email;
 }
 
-// Settings through the API, for specs that do not test the Settings page.
+// A project (repository fields of data, key APP) and the workspace settings (the rest) through the API, for specs that do
+// not test those pages; then the board of the project.
+const REPO_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "image"];
 export async function putSettings(page: Page, data: Record<string, unknown>) {
-  expect((await page.request.put("/api/settings", { data })).ok()).toBe(true);
+  const part = (repo: boolean) => Object.fromEntries(Object.entries(data).filter(([k]) => REPO_FIELDS.includes(k) === repo));
+  expect((await page.request.post("/api/projects", { data: { name: "App", key: "APP", ...part(true) } })).ok()).toBe(true);
+  expect((await page.request.put("/api/settings", { data: part(false) })).ok()).toBe(true);
+  await page.goto("/p/APP");
 }
 
-// Settings through the Settings page (General tab): repository, no setup command, this test command.
+// A project through the New project form: name App (key APP), this repository, no setup command, this test command.
+// Ends on its board.
 export async function saveSettings(page: Page, repo: string, testCommand: string) {
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill(testCommand);
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status").filter({ hasText: /^Saved$/ })).toBeVisible();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Projects", exact: true }).click();
+  const form = page.locator("details.new-project");
+  await form.waitFor();
+  if (!(await form.getAttribute("open").then((o) => o !== null))) await form.locator("> summary").click();
+  await form.getByLabel("Name").fill("App");
+  await form.getByLabel("Repository path").fill(repo);
+  await form.getByLabel("Setup command").fill("");
+  await form.getByLabel("Test command").fill(testCommand);
+  await form.getByRole("button", { name: "Create project" }).click();
+  await expect(page).toHaveURL(/\/p\/APP$/);
 }
 
-// Another Settings tab (General must be saved first): open it, `fill` its fields, save.
+// A page under the sidebar's More group (Usage, Learning): opens the group first.
+export async function more(page: Page, name: string) {
+  const group = page.locator("details.nav-more");
+  if ((await group.getAttribute("open")) === null) await group.locator("> summary").click();
+  await group.getByRole("link", { name, exact: true }).click();
+}
+
+// A workspace Settings tab: open it.
+export async function settingsTab(page: Page, tab: string) {
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("link", { name: tab, exact: true }).click();
+}
+
+// A workspace Settings tab: open it, `fill` its fields, save.
 export async function saveTab(page: Page, tab: string, fill: () => Promise<unknown>) {
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByRole("link", { name: tab, exact: true }).click();
   await fill();
   await page.getByRole("button", { name: "Save settings" }).click();
@@ -74,8 +98,9 @@ export async function openTicket(page: Page, title: string) {
   await page.getByRole("button", { name: new RegExp(title) }).click();
 }
 
-// Adds a provider on the Models tab of the Settings page (from anywhere in Settings).
+// Adds a provider on the Models tab of the Settings page.
 export async function addProvider(page: Page, f: { name: string; kind: string; baseUrl?: string; apiKey?: string }) {
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByRole("link", { name: "Models", exact: true }).click();
   await page.getByRole("button", { name: "Add provider" }).click();
   const d = page.getByRole("dialog");

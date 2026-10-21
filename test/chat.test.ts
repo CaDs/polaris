@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.POLARIS_PROVIDER = "fake";
-const { call, db, until, user, workspace } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, until, user, workspace } = await import("./helpers.ts");
 const { contextText } = await import("../server/chat.ts");
 const { runAgent } = await import("../server/agent/loop.ts");
 const { fakeProvider } = await import("../server/agent/providers/fake.ts");
@@ -21,7 +21,7 @@ const idle = (id: string, turns = 1) =>
 
 test("a chat turn reads the page's ticket, proposes a ticket, and the member files it", async () => {
   const page = await w.create({ title: "Notes are missing", spec: "Users want a notes.txt file." });
-  const started = await call("POST", "/api/chats", w.cookie, { message: "Add a notes file\n\nit should say hello", context: { ticket: page.key } });
+  const started = await call("POST", "/api/chats", w.cookie, { message: "Add a notes file\n\nit should say hello", context: { ticket: page.key }, project_id: w.project.id });
   assert.equal(started.status, 201);
   assert.equal(started.body.title, "Add a notes file");
 
@@ -44,6 +44,7 @@ test("a chat turn reads the page's ticket, proposes a ticket, and the member fil
   const filed = await call("POST", `/api/chats/proposals/${p.id}/file`, w.cookie, { ...p.payload, title: "Write notes.txt", run: true });
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   assert.equal(filed.body.title, "Write notes.txt");
+  assert.equal(filed.body.project_id, w.project.id); // filed in the chat's project
   assert.match(filed.body.spec, /it should say hello[\s\S]*From chat: Add a notes file$/);
   assert.equal(filed.body.estimate, 2);
   assert.equal((await call("POST", `/api/chats/proposals/${p.id}/file`, w.cookie, p.payload)).status, 409);
@@ -64,17 +65,20 @@ test("a chat turn reads the page's ticket, proposes a ticket, and the member fil
   assert.equal((await call("POST", `/api/chats/proposals/${third.proposals[2].id}/dismiss`, w.cookie)).status, 200);
 
   assert.ok(usageSummary(w.ws).purposes.some((u: any) => u.purpose === "chat" && u.background === 1));
-  assert.equal((await call("GET", "/api/chats", w.cookie)).body[0].id, started.body.id);
+  assert.deepEqual((await call("GET", "/api/chats", w.cookie)).body.map((x: any) => [x.id, x.project_key]), [[started.body.id, "CAT"]]);
 });
 
-test("chats are private to their member", async () => {
-  const c = (await call("POST", "/api/chats", w.cookie, { message: "NO-PROPOSAL what is this repo?" })).body;
+test("chats are private to their member and belong to a project of the workspace", async () => {
+  const c = (await call("POST", "/api/chats", w.cookie, { message: "NO-PROPOSAL what is this repo?", project_id: w.project.id })).body;
   await idle(c.id);
   const other = await user("dog");
+  const theirs = await workspace("dob");
+  for (const project_id of [undefined, "nope", theirs.project.id])
+    assert.match((await call("POST", "/api/chats", w.cookie, { message: "hi", project_id })).body.error, /project_id/);
   for (const [m, path] of [["GET", `/api/chats/${c.id}`], ["POST", `/api/chats/${c.id}/messages`], ["DELETE", `/api/chats/${c.id}`], ["GET", `/api/chats/${c.id}/stream`]])
     assert.equal((await call(m, path, other, m === "POST" ? { message: "hi" } : undefined)).status, 404, `${m} ${path}`);
   assert.equal((await call("GET", "/api/chats", other)).body.length, 0);
-  assert.equal((await call("POST", "/api/chats", w.cookie, { message: " " })).status, 400);
+  assert.equal((await call("POST", "/api/chats", w.cookie, { message: " ", project_id: w.project.id })).status, 400);
   assert.equal((await call("DELETE", `/api/chats/${c.id}`, w.cookie)).status, 204);
   assert.equal((await call("GET", `/api/chats/${c.id}`, w.cookie)).status, 404);
 });
@@ -82,12 +86,13 @@ test("chats are private to their member", async () => {
 test("context: the page's ticket and @-mentions, scoped to the workspace", async () => {
   const a = await w.create({ title: "Alpha", spec: "alpha spec" });
   const b = await w.create({ title: "Beta", spec: "beta spec" });
-  const text = contextText(w.ws, `compare with @${b.key} and @XYZ-999`, { ticket: a.key });
+  const chat = { id: "c", workspace_id: w.ws, project_id: w.project.id, user_id: "u", title: "", messages: "[]" };
+  const text = contextText(chat, `compare with @${b.key} and @XYZ-999`, { ticket: a.key });
   assert.match(text, new RegExp(`^# Context\\n\\nThe user is looking at this ticket:\\n\\n## ${a.key} Alpha\\n- Status: todo; kind: task[\\s\\S]*alpha spec`));
   assert.match(text, new RegExp(`Mentioned tickets:\\n\\n## ${b.key} Beta`));
   assert.doesNotMatch(text, /XYZ-999/);
-  const other = (await call("POST", "/api/tickets", await user("eel"), { title: "Not yours" })).body;
-  assert.equal(contextText(w.ws, "", { ticket: other.key }), ""); // another workspace's ticket is not resolved
+  const other = await (await workspace("eel")).create({ title: "Not yours" });
+  assert.equal(contextText(chat, "", { ticket: other.key }), ""); // another workspace's ticket is not resolved
 });
 
 test("a resumed turn sends the earlier conversation unchanged (prompt cache)", async () => {

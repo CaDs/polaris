@@ -17,7 +17,7 @@ export type Ticket = {
   escalated_key: string | null; split_from_key: string | null;
   // M11 tracker. priority: 0 none, 1 urgent … 4 low.
   priority: number; estimate: number | null; due_date: string | null; created_at: number; updated_at: number;
-  labels: { id: string; name: string; color: string }[]; project: { id: string; name: string } | null; milestone: { id: string; name: string } | null;
+  labels: { id: string; name: string; color: string }[]; project_id: string; project: { id: string; name: string; key: string }; milestone: { id: string; name: string } | null;
   cycle: { id: string; number: number; name: string } | null; assignee: { id: string; name: string; email: string } | null;
 };
 // GET /api/tickets/:id of an epic: every descendant with its state label (as the planner sees it) and dependency keys.
@@ -94,6 +94,7 @@ const GLYPHS = {
   down: "M12 5v14M19 12l-7 7-7-7",
   more: "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
   calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+  gear: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
 };
 export const Icon = ({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: number }) => (
   <svg className="glyph" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

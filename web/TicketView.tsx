@@ -6,12 +6,12 @@ import { Alert, COLUMNS, Confirm, Dialog, Icon, ModelPicker, StatusIcon, api, co
 type Detail = Ticket & { usage?: TokenSummary; background_usage?: TokenSummary; runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
 type Ev = { seq: number; type: string; payload: any };
 
-export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (number: number) => void }) {
+export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; reload: () => void; close: () => void; open: (key: string) => void }) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [title, setTitle] = useState(ticket.title);
   const [spec, setSpec] = useState(ticket.spec);
   const [testCommand, setTestCommand] = useState(ticket.test_command ?? "");
-  const [workspaceTest, setWorkspaceTest] = useState("");
+  const [projectTest, setProjectTest] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -27,7 +27,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
     setTestCommand(ticket.test_command ?? "");
     setSelected(null);
   }, [ticket.id]);
-  useEffect(() => void api<{ test_command: string }>("/api/settings").then((s) => setWorkspaceTest(s.test_command), () => {}), []);
+  useEffect(() => void api<{ test_command: string }>(`/api/projects/${ticket.project_id}`).then((p) => setProjectTest(p.test_command), () => {}), [ticket.project_id]);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
   // What changes while the ticket itself does not (an epic's children, a wiki run after approval) pings the workspace stream.
   useWorkspaceEvents("ticket", useCallback(() => void load(), [ticket.id]));
@@ -87,7 +87,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const current = runs.find((r) => r.id === selected) ?? runs.findLast((r) => r.role !== "wiki") ?? runs.at(-1); // M10: a wiki ingest after approval is listed, not the default
   const running = ticket.status === "running";
   const epic = ticket.kind === "epic";
-  const link = (key: string) => <button className="link mono" onClick={() => open(Number(key.split("-").at(-1)))}>{key}</button>;
+  const link = (key: string) => <button className="link mono" onClick={() => open(key)}>{key}</button>;
 
   return (
     <div className="ticket-view">
@@ -123,8 +123,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       <Alert error={error} />
       <textarea aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
       <label>
-        Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={workspaceTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
-        <span className="hint">Overrides the workspace's for this ticket; empty = workspace default. Runs: <span className="mono">{testCommand.trim() || workspaceTest || "(no test command)"}</span></span>
+        Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={projectTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
+        <span className="hint">Overrides the project's for this ticket; empty = project default. Runs: <span className="mono">{testCommand.trim() || projectTest || "(no test command)"}</span></span>
       </label>
       <div className="row">
         <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
@@ -536,7 +536,7 @@ function Diff({ text }: { text: string }) {
 // Epic view: the summary (or why it failed), the whole tree of children with their state, dependencies and handoffs,
 // and the tokens and cost of everything the epic spent (planner rounds + every descendant's runs).
 // Its spending caps (empty = none) cover the same tree, cached tokens included: "spent $x of $y" once one is set.
-function Epic({ ticket, detail, items, open, patch }: { ticket: Ticket; detail: Detail; items: Child[]; open: (number: number) => void; patch: (b: object) => void }) {
+function Epic({ ticket, detail, items, open, patch }: { ticket: Ticket; detail: Detail; items: Child[]; open: (key: string) => void; patch: (b: object) => void }) {
   const all = [ticket, ...items];
   const tokens = all.reduce((n, t) => n + t.tokens_in + t.tokens_out, 0);
   const usd = all.reduce((n, t) => n + t.cost_usd, 0);
@@ -575,14 +575,14 @@ function Epic({ ticket, detail, items, open, patch }: { ticket: Ticket; detail: 
   );
 }
 
-function Children({ parent, items, open }: { parent: string; items: Child[]; open: (number: number) => void }) {
+function Children({ parent, items, open }: { parent: string; items: Child[]; open: (key: string) => void }) {
   return (
     <ul className="children" aria-label="Children">
       {items.filter((c) => c.parent_id === parent).map((c) => (
         <li key={c.id} aria-label={c.key}>
           <div className="child">
             <StatusIcon status={c.status} />
-            <button className="link mono" onClick={() => open(c.number)}>{c.key}</button>
+            <button className="link mono" onClick={() => open(c.key)}>{c.key}</button>
             <span className="grow">{c.title} {c.kind === "epic" && <span className="badge epic">Epic</span>}</span>
             {c.depends_keys.length > 0 && <span className="muted" title="Dependencies">← {c.depends_keys.join(", ")}</span>}
             <span className="muted">{c.label}</span>

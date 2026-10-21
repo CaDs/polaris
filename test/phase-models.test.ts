@@ -30,12 +30,12 @@ test("planner, wiki and chat model settings: saved, validated, and used by their
   assert.equal(run(worked.id).model, "demo");
   await done(worked.id);
 
-  const wiki = await enqueueWiki(w.ws, "bootstrap");
+  const wiki = await enqueueWiki(w.project.id, "bootstrap");
   assert.ok("runId" in wiki, JSON.stringify(wiki));
   assert.deepEqual([run(wiki.runId).role, run(wiki.runId).model], ["wiki", "wiki-small"]);
   await done(wiki.runId);
 
-  const chat = (await call("POST", "/api/chats", w.cookie, { message: "NO-PROPOSAL hi" })).body;
+  const chat = (await call("POST", "/api/chats", w.cookie, { message: "NO-PROPOSAL hi", project_id: w.project.id })).body;
   await until("chat turn finished", async () => !(await call("GET", `/api/chats/${chat.id}`, w.cookie)).body.busy);
   const models = db.prepare("SELECT DISTINCT model FROM usage_ledger WHERE workspace_id = ? AND purpose = 'chat'").all(w.ws) as { model: string }[];
   assert.deepEqual(models.map((m) => m.model), ["chat-small"]);

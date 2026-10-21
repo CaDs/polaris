@@ -95,16 +95,58 @@ export const reply = (r: { tool: string; input: string } | { text: string }) =>
     { type: "message_delta", delta: { stop_reason: "tool" in r ? "tool_use" : "end_turn" }, usage: { output_tokens: 5 } },
   ]);
 
-// A user, its workspace and a temp repo configured with these settings. `settings(o)` saves them again with o on top.
+// A project (one repo) in the session's workspace: key from the name (pia → PIA), a fresh temp repo, no setup command.
+const PROJECT_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "image"];
+const split = (o: Record<string, unknown>, repoFields: boolean) => Object.fromEntries(Object.entries(o).filter(([k]) => PROJECT_FIELDS.includes(k) === repoFields));
+export const keyOf = (name: string) => name.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
+export async function project(cookie: string, name: string, o: Record<string, unknown> = {}) {
+  const r = await call("POST", "/api/projects", cookie, { name, key: keyOf(name), repo_path: tempRepo(), setup_command: "", ...o });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  if (!projects.has(cookie)) projects.set(cookie, r.body.id); // the session's first project is where fileTicket files
+  return r.body as { id: string; key: string; name: string };
+}
+
+// The project configure and workspace made for a session; fileTicket files into it.
+const projects = new Map<string, string>();
+export const projectOf = (cookie: string) => projects.get(cookie);
+
+// Saves a settings body the way one form used to: the repository fields on the session's project (created on first use,
+// keyed like its workspace's slug: alice → ALI), the rest as workspace settings. The reply carries both.
+export async function configure(cookie: string, body: object = {}) {
+  let pid = projects.get(cookie);
+  const repo = split(body as Record<string, unknown>, true);
+  if (!pid || Object.keys(repo).length) {
+    let r;
+    if (pid) r = await call("PATCH", `/api/projects/${pid}`, cookie, repo);
+    else {
+      const ws = (await call("GET", "/api/auth/get-session", cookie)).body?.session?.activeOrganizationId;
+      const { slug } = db.prepare("SELECT slug FROM organization WHERE id = ?").get(ws) as { slug: string };
+      r = await call("POST", "/api/projects", cookie, { name: slug, key: keyOf(slug), ...repo });
+    }
+    if (r.status >= 300) return r;
+    projects.set(cookie, (pid = r.body.id as string));
+  }
+  const r = await call("PUT", "/api/settings", cookie, split(body as Record<string, unknown>, false));
+  const p = (await call("GET", `/api/projects/${pid}`, cookie)).body;
+  return { ...r, body: r.status === 200 ? { ...p, ...r.body } : r.body };
+}
+
+// POST /api/tickets in the session's project (unless the body names one).
+export const fileTicket = (cookie: string, body: object) => call("POST", "/api/tickets", cookie, { project_id: projects.get(cookie), ...body });
+
+// A user, its workspace and a project on a temp repo configured with these settings (repo fields go to the project, the
+// rest to the workspace). `settings(o)` saves them again with o on top. `create` files tickets in the project.
 export async function workspace(name: string, base: Record<string, unknown> = {}) {
   const cookie = await user(name);
   const repo = tempRepo();
-  const settings = (o: object = {}) => call("PUT", "/api/settings", cookie, { repo_path: repo, setup_command: "", ...base, ...o });
+  const p = await project(cookie, name, { repo_path: repo, ...split(base, true) });
+  projects.set(cookie, p.id);
+  const settings = (o: object = {}) => configure(cookie, { repo_path: repo, setup_command: "", ...base, ...o });
   const saved = await settings();
   assert.equal(saved.status, 200, JSON.stringify(saved.body));
   const get = async (id: string) => (await call("GET", `/api/tickets/${id}`, cookie)).body;
   const byKey = async (key: string) => (await call("GET", "/api/tickets", cookie)).body.find((t: any) => t.key === key);
-  const create = async (body: Record<string, unknown>) => (await call("POST", "/api/tickets", cookie, body)).body;
+  const create = async (body: Record<string, unknown>) => (await call("POST", "/api/tickets", cookie, { project_id: p.id, ...body })).body;
   const is = (id: string, status: string, ms?: number) => waitFor(cookie, id, status, ms);
-  return { cookie, repo, ws: wsOf(name), settings, get, byKey, create, is };
+  return { cookie, repo, ws: wsOf(name), project: p, settings, get, byKey, create, is };
 }

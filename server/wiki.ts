@@ -9,10 +9,10 @@ import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
 import { today } from "./tracker.ts";
 
-// M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per workspace at <dataDir>/wikis/<workspace_id>/,
+// M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per project at <dataDir>/wikis/<project_id>/,
 // owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the only writers are the wiki
 // maintainer run (in a clone, committed here only if the mechanical lint passes) and human edits. Everything is
-// serialized per workspace (wikiSerial). The orchestration of maintainer runs lives in runs.ts.
+// serialized per project (wikiSerial). The orchestration of maintainer runs lives in runs.ts.
 
 const execFileP = promisify(execFile);
 export const WIKI_PROMPT = readFileSync(new URL("./agent/prompts/wiki.md", import.meta.url), "utf8");
@@ -25,12 +25,12 @@ const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
 // edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host).
 export const WIKI_PROTECTED = ["code", "wiki/.git"];
 
-export const wikiDir = (ws: string) => join(dataDir(), "wikis", ws);
+export const wikiDir = (pid: string) => join(dataDir(), "wikis", pid);
 
 // Init on first use, with an initial commit. Memoized so two first callers don't both init.
 const ready = new Map<string, Promise<string>>();
-export function ensureWiki(ws: string) {
-  const dir = wikiDir(ws);
+export function ensureWiki(pid: string) {
+  const dir = wikiDir(pid);
   let p = ready.get(dir);
   if (!p) {
     p = (async () => {
@@ -51,11 +51,11 @@ export function ensureWiki(ws: string) {
   return p;
 }
 
-// One writer at a time per workspace: maintainer runs and human edits queue up here.
+// One writer at a time per project: maintainer runs and human edits queue up here.
 const chains = new Map<string, Promise<unknown>>();
-export function wikiSerial<T>(ws: string, fn: () => Promise<T>) {
-  const job = (chains.get(ws) ?? Promise.resolve()).then(fn);
-  chains.set(ws, job.catch(() => {}));
+export function wikiSerial<T>(pid: string, fn: () => Promise<T>) {
+  const job = (chains.get(pid) ?? Promise.resolve()).then(fn);
+  chains.set(pid, job.catch(() => {}));
   return job;
 }
 
@@ -127,7 +127,7 @@ export function lintDir(dir: string): string[] {
 
 // --- reading the wiki repo (HEAD, never the working tree) ---
 
-const show = async (ws: string, path: string) => git(await ensureWiki(ws), ["show", `HEAD:${path}`]).catch(() => undefined);
+const show = async (pid: string, path: string) => git(await ensureWiki(pid), ["show", `HEAD:${path}`]).catch(() => undefined);
 const safe = (dir: string, path: string) => {
   if (!PATH.test(path)) throw new AgentError("InvalidArguments", `not a wiki page path: ${path}`);
   return resolveIn(dir, path);
@@ -160,10 +160,10 @@ async function changed(repo: string, base: string, m: Meta | string) {
 }
 
 // The index with one entry per linked page. stale: where to compute the flags (the project repo and the commit to compare to).
-export async function pageList(ws: string, stale?: { repo: string; base: string }) {
-  const index = (await show(ws, "index.md")) ?? "";
+export async function pageList(pid: string, stale?: { repo: string; base: string }) {
+  const index = (await show(pid, "index.md")) ?? "";
   const pages = await Promise.all(indexLinks(index).map(async ([line, title, path, summary]) => {
-    const text = PATH.test(path) ? await show(ws, path) : undefined;
+    const text = PATH.test(path) ? await show(pid, path) : undefined;
     const m = text === undefined ? "page is missing" : frontmatter(text);
     return { path, title, summary, line, sources: typeof m === "string" ? [] : m.sources, verified: typeof m === "string" ? "" : m.verified,
       updated: typeof m === "string" ? "" : m.updated, stale: stale ? await changed(stale.repo, stale.base, m) : null } satisfies PageInfo;
@@ -171,16 +171,16 @@ export async function pageList(ws: string, stale?: { repo: string; base: string 
   return { index, pages };
 }
 
-export async function readPage(ws: string, path: string) {
-  safe(await ensureWiki(ws), path);
-  return show(ws, path);
+export async function readPage(pid: string, path: string) {
+  safe(await ensureWiki(pid), path);
+  return show(pid, path);
 }
 
 // What the first user message carries (all roles): the index, its links as repo-root paths (.polaris/wiki/<path>, so a page
 // is never mistaken for a code file), with a ⚠ flag on pages whose sources changed since they were verified (computed against
 // `base`, the commit the run starts from). "" when the wiki has no pages.
-export async function wikiSection(ws: string, repo: string, base: string) {
-  const { index, pages } = await pageList(ws, { repo, base });
+export async function wikiSection(pid: string, repo: string, base: string) {
+  const { index, pages } = await pageList(pid, { repo, base });
   if (!pages.length) return "";
   const byLine = new Map(pages.map((p) => [p.line, p]));
   const lines = index.split("\n").filter((l) => l.trim() && !l.startsWith("# ")).map((l) => {
@@ -190,34 +190,34 @@ export async function wikiSection(ws: string, repo: string, base: string) {
   return `# Project wiki\n\nRead the pages relevant to your task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`;
 }
 
-export async function wikiView(ws: string, stale?: { repo: string; base: string }) {
-  const { index, pages } = await pageList(ws, stale);
-  const dir = wikiDir(ws);
+export async function wikiView(pid: string, stale?: { repo: string; base: string }) {
+  const { index, pages } = await pageList(pid, stale);
+  const dir = wikiDir(pid);
   const wt = await git(dir, ["status", "--porcelain"]);
-  return { index, pages, log: (await show(ws, "log.md")) ?? "", problems: wt ? ["wiki working copy has uncommitted changes"] : await lintHead(ws) };
+  return { index, pages, log: (await show(pid, "log.md")) ?? "", problems: wt ? ["wiki working copy has uncommitted changes"] : await lintHead(pid) };
 }
 
 // Mechanical lint of HEAD (the Lint button): exports HEAD to a temp dir.
-async function lintHead(ws: string) {
+async function lintHead(pid: string) {
   const tmp = join(dataDir(), "worktrees", `wiki-lint-${randomUUID()}`);
   try {
-    await snapshotTo(ws, tmp);
+    await snapshotTo(pid, tmp);
     return lintDir(tmp);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-export async function history(ws: string) {
-  const out = await git(await ensureWiki(ws), ["log", "-n", "100", "--format=%H%x1f%s%x1f%aI"]);
+export async function history(pid: string) {
+  const out = await git(await ensureWiki(pid), ["log", "-n", "100", "--format=%H%x1f%s%x1f%aI"]);
   return out.split("\n").filter(Boolean).map((l) => {
     const [sha, subject, date] = l.split("\x1f");
     return { sha, subject, date };
   });
 }
-export const wikiDiff = async (ws: string, sha: string) => {
+export const wikiDiff = async (pid: string, sha: string) => {
   if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new AgentError("InvalidArguments", "sha must be a commit id");
-  return git(await ensureWiki(ws), ["show", "--no-color", "--format=%s%n", sha]);
+  return git(await ensureWiki(pid), ["show", "--no-color", "--format=%s%n", sha]);
 };
 
 // --- snapshot for runs ---
@@ -232,8 +232,8 @@ function readTree(dir: string, rel = "", out: Tree = {}) {
   return out;
 }
 
-async function snapshotTo(ws: string, dest: string) {
-  const dir = await ensureWiki(ws);
+async function snapshotTo(pid: string, dest: string) {
+  const dir = await ensureWiki(pid);
   mkdirSync(dest, { recursive: true });
   const { stdout } = await execFileP("git", ["-C", dir, "archive", "HEAD"], { encoding: "buffer", maxBuffer: 1 << 30 });
   execFileSync("tar", ["-x", "-C", dest], { input: stdout });
@@ -241,9 +241,9 @@ async function snapshotTo(ws: string, dest: string) {
 
 // Exports the wiki's HEAD to <worktree>/.polaris/wiki and returns its content: wikiTampered compares against it at the gate
 // (the dir is git-excluded, so git can't see a write there; the sandbox mounts it read-only, the host sandbox does not).
-export async function materialize(ws: string, worktree: string) {
+export async function materialize(pid: string, worktree: string) {
   const dest = join(worktree, ".polaris/wiki");
-  await snapshotTo(ws, dest);
+  await snapshotTo(pid, dest);
   return readTree(dest);
 }
 export function wikiTampered(worktree: string, original: Tree) {
@@ -253,8 +253,8 @@ export function wikiTampered(worktree: string, original: Tree) {
 
 // --- writing: a clone, validated, then fast-forwarded into the wiki repo ---
 
-export async function openCopy(ws: string, dest: string) {
-  const dir = await ensureWiki(ws);
+export async function openCopy(pid: string, dest: string) {
+  const dir = await ensureWiki(pid);
   await git(dir, ["clone", "-q", dir, dest]);
 }
 
@@ -263,7 +263,7 @@ export type Finished = { problems: string[] } | { unchanged: true } | { sha: str
 // Lints the clone (with `repo`, the project repo, also each page's verified sha and sources), then commits it with `message`
 // and the log entry (log.md is the harness's: whatever the writer did to it is undone first) and fast-forwards the wiki repo.
 // Nothing is committed when a problem is found or nothing changed.
-export async function finishCopy(ws: string, copy: string, message: string, entry: string, repo?: string): Promise<Finished> {
+export async function finishCopy(pid: string, copy: string, message: string, entry: string, repo?: string): Promise<Finished> {
   await git(copy, ["checkout", "-q", "--", "log.md"]).catch(() => {});
   const problems = lintDir(copy);
   if (!problems.length && repo)
@@ -276,7 +276,7 @@ export async function finishCopy(ws: string, copy: string, message: string, entr
   appendFileSync(join(copy, "log.md"), `\n${entry}\n`);
   await git(copy, ["add", "-A"]);
   await git(copy, ["commit", "-q", "-m", message]);
-  const dir = wikiDir(ws);
+  const dir = wikiDir(pid);
   await git(dir, ["fetch", "-q", copy, "HEAD"]);
   await git(dir, ["merge", "-q", "--ff-only", "FETCH_HEAD"]);
   return { sha: await git(dir, ["rev-parse", "HEAD"]) };
@@ -284,11 +284,11 @@ export async function finishCopy(ws: string, copy: string, message: string, entr
 
 // A human edit of one existing page: same validation and commit flow as the maintainer's. `base`: the page as the editor
 // opened it; a page that changed since (an ingest landed meanwhile) is refused rather than overwritten.
-export function editPage(ws: string, path: string, body: string, email: string, o: { base?: string; repo?: string } = {}) {
-  return wikiSerial(ws, async () => {
+export function editPage(pid: string, path: string, body: string, email: string, o: { base?: string; repo?: string } = {}) {
+  return wikiSerial(pid, async () => {
     const tmp = join(dataDir(), "worktrees", `wiki-edit-${randomUUID()}`);
     try {
-      await openCopy(ws, tmp);
+      await openCopy(pid, tmp);
       const file = safe(tmp, path);
       if (path === "log.md") throw new AgentError("InvalidArguments", "log.md is maintained by the harness");
       let cur: string;
@@ -299,7 +299,7 @@ export function editPage(ws: string, path: string, body: string, email: string, 
       }
       if (o.base !== undefined && cur.trimEnd() !== o.base.trimEnd()) throw new AgentError("InvalidArguments", `${path} changed since you opened it: reload it and edit again`);
       writeFileSync(file, body.endsWith("\n") ? body : `${body}\n`);
-      return await finishCopy(ws, tmp, `edit ${path} by ${email}`, `## [${today()}] edit | ${path} by ${email}`, o.repo);
+      return await finishCopy(pid, tmp, `edit ${path} by ${email}`, `## [${today()}] edit | ${path} by ${email}`, o.repo);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

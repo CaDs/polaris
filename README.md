@@ -71,7 +71,7 @@ cost per run, and replay any transcript.
 |---|---|
 | **Chat** | A side panel (Cmd/Ctrl+J) to talk with the project. It knows the page you're on, takes `@` mentions of tickets, reads the code and the wiki, asks what's unclear, and proposes tickets as cards. Nothing is filed until you click **File** (or **File and run**); you can edit a proposal first. Replies stream; chats are private and resumable. |
 | **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
-| **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace (one repository each). The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
+| **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace; inside it, each project is one repository with its own board, cycles, wiki and ticket keys. The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
 | **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
 | **Agent loop** | Tools `read_file`, `edit_file` (or `apply_patch` for OpenAI models), `search`, `shell`. Append-only conversations (prompt caching friendly), provider retries, long output spilled to files. The first message states the environment: test command, read-only paths, budget, git read-only. |
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
@@ -127,8 +127,9 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 ### First ticket
 
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
-2. **Settings → General**: the absolute path of a git repository with at least one commit, the base branch, a setup
-   command (e.g. `npm ci`) and a test command (e.g. `npm test`). Protected paths default to `tests/,evals/`.
+2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
+   with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
+   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
 4. **New ticket**, describe the change, **Run agent**. Or open the chat (Cmd/Ctrl+J), describe what you want, and file the ticket it proposes. Watch the transcript, then **Approve** to merge into your base
@@ -195,12 +196,12 @@ Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARI
 
 ### Workspace settings (Settings page)
 
-One tab per concern, each with its own Save: **General** (repository, base branch, setup and test commands; protected
-paths and sandbox image under Advanced), **Models** (providers, default model, model review (on) and its reviewer model),
+One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model),
 **Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
 Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
 minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
-the default. Theme and sign-out are in the account menu at the foot of the sidebar.
+the default. Theme and sign-out are in the account menu at the foot of the sidebar. A project's repository, base branch,
+setup and test commands, protected paths and sandbox image are on its **Overview** page.
 
 ### In your repository
 
@@ -253,7 +254,7 @@ from Slack itself is not built yet.
 ```sh
 npm run agent -- --task "text" --root DIR             # one-off agent run directly on DIR (no sandbox or gate)
 npm run agent -- <ticket-id> --root DIR               # run an existing ticket the same way
-npm run seed-tasks -- --workspace <slug> [--file tasks.md]   # one ticket per open "- [ ]" item under "## Mn" headings
+npm run seed-tasks -- --workspace <slug> --project <KEY> [--file tasks.md]   # one ticket per open "- [ ]" item under "## Mn" headings
 ```
 
 ## What we learned

@@ -20,11 +20,11 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
 
   const column = (name: string) => page.getByRole("region", { name, exact: true });
   await expect(column("todo").getByRole("button")).toHaveCount(2);
-  await expect(column("todo")).toContainText("HOM-2");
+  await expect(column("todo")).toContainText("APP-2");
 
   // Edit the first ticket's title, then run the agent and watch the transcript stream.
   await column("todo").getByRole("button", { name: /First ticket/ }).click();
-  await expect(page).toHaveURL(/\/t\/1$/);
+  await expect(page).toHaveURL(/\/t\/APP-1$/);
   await page.getByLabel("Title").fill("First ticket edited");
   await page.getByLabel("Title").blur();
   await page.getByRole("button", { name: "Run agent" }).click();
@@ -42,8 +42,8 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   const bell = page.getByRole("button", { name: /^Notifications/ });
   await expect(bell).toHaveAccessibleName("Notifications (1 unread)");
   await bell.click();
-  await page.getByRole("button", { name: "HOM-1 is ready for review" }).click();
-  await expect(page).toHaveURL(/\/t\/1$/);
+  await page.getByRole("button", { name: "APP-1 is ready for review" }).click();
+  await expect(page).toHaveURL(/\/t\/APP-1$/);
   await expect(bell).toHaveAccessibleName("Notifications");
   await page.getByLabel("New comment").fill("Looks good, merging after lunch.");
   await page.getByRole("button", { name: "Comment", exact: true }).click();

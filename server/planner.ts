@@ -58,7 +58,7 @@ export const childrenOf = (epicId: string) =>
   db.prepare(`SELECT t.id, t.title, t.kind, t.status, t.depends_on, t.handoff, t.settled_at, t.test_command, t.escalated_to, ${ticketKey()} AS key,
       (SELECT COUNT(*) FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS}) AS run_count,
       r.status AS run_status, r.attempt, r.model, COALESCE(r.tokens_in + r.tokens_out, 0) AS tokens
-    FROM tickets t JOIN organization o ON o.id = t.workspace_id
+    FROM tickets t
     LEFT JOIN runs r ON r.id = (SELECT id FROM runs WHERE ticket_id = t.id AND ${OWN_RUNS} ORDER BY rowid DESC LIMIT 1)
     WHERE t.parent_id = ? ORDER BY t.number`).all(epicId) as Child[];
 
@@ -149,7 +149,7 @@ export function plannerTask(epic: Epic, o: {
   if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
   if (o.wiki) parts.push(o.wiki);
   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
-  const header = trackerHeader(epic.id); // M11: priority, labels, project, due date
+  const header = trackerHeader(epic.id); // M11: priority, labels, milestone, due date
   parts.push(`# Epic\n\n# ${epic.title}${header ? `\n\n${header}` : ""}${epic.spec ? `\n\n${epic.spec}` : ""}`);
   if (o.notes.length) parts.push(`# Your notes from earlier rounds\n\n${o.notes.map((n) => `## Round ${n.round}\n${n.notes}`).join("\n\n")}`);
   parts.push(`# Children\n\n${childrenText(epic.id, o.since)}`);
@@ -229,7 +229,7 @@ export function plannerTools(
       );
       applyTracker(id, { priority: priority as number, estimate: estimate as number | null, label_ids: labels });
       touch(epic.workspace_id, { type: "ticket", id });
-      const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
+      const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t WHERE t.id = ?`).get(id) as { key: string };
       const waiting = on.filter((k) => k.status !== "done").map((k) => k.key);
       if (waiting.length) return `Created ${key}. It is queued when ${waiting.join(" and ")} ${waiting.length > 1 ? "are" : "is"} done.`;
       const error = await startChild(id);

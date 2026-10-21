@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_SLACK_WEBHOOK = "https://hooks.slack.test/T/B/x";
-const { app, call, tempRepo, until, user } = await import("./helpers.ts");
+const { configure, fileTicket, app, call, tempRepo, until, user } = await import("./helpers.ts");
 const { mintToken } = await import("../server/cli/token.ts");
 const { handle } = await import("../server/mcp.ts");
 
 const alice = await user("alice");
-assert.equal((await call("PUT", "/api/settings", alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false })).status, 200);
+assert.equal((await configure(alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f notes.txt", model_review: false })).status, 200);
 
 // The MCP server talks HTTP to Polaris: route its fetches into the app, and catch the Slack webhook posts.
 const slack: string[] = [];
@@ -42,7 +42,7 @@ test("MCP: a ticket from the conversation to a merge, with a bearer token and a 
   });
   assert.match(review, /Latest run: worker attempt 1, passed/);
   assert.match(review, /Diff \(polaris\/ALI-1.* → main\):[\s\S]*notes\.txt/);
-  assert.deepEqual(slack, ["<http://localhost:5173/t/1|ALI-1 is ready for review>"]);
+  assert.deepEqual(slack, ["<http://localhost:5173/t/ALI-1|ALI-1 is ready for review>"]);
 
   assert.match(await text("approve_ticket", { key: "1" }), /^ALI-1 \[done\] Add notes$/);
   assert.match(await text("list_tickets", { status: "done" }), /ALI-1 \[done\]/);

@@ -1,14 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
-import { newTicket as create, signUp } from "./helpers.ts";
+import { newTicket as create, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // The tracker without agents: labels, a project with a milestone, a current cycle, tickets with properties, filter chips that
 // live in the URL, "/" search and key jump, list grouping, the properties sidebar with shortcuts, the command palette, a saved
 // view, and both themes (screenshots attached to the report).
-const newTicket = (page: Page, title: string, o: { priority?: string; labels?: string[]; project?: string; cycle?: boolean; due?: string } = {}) =>
+const newTicket = (page: Page, title: string, o: { priority?: string; labels?: string[]; cycle?: boolean; due?: string } = {}) =>
   create(page, title, undefined, async (d) => {
     if (o.priority) await d.getByLabel("Priority").selectOption({ label: o.priority });
     for (const l of o.labels ?? []) await d.getByRole("checkbox", { name: l }).check();
-    if (o.project) await d.getByLabel("Project").selectOption({ label: o.project });
     if (o.cycle) await d.getByLabel("Cycle").selectOption({ label: "Cycle 1 (current)" });
     if (o.due) await d.getByLabel("Due date").fill(o.due);
   });
@@ -51,12 +50,13 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await labels.getByRole("button", { name: "Add label" }).click();
   await expect(labels.getByRole("alert")).toHaveText(/^Something went wrong on the server/);
 
-  // A project with a milestone.
-  await page.getByRole("link", { name: "Projects" }).click();
+  // A project (one repository) with a milestone: its sidebar group has Board, Cycles, Wiki and Overview.
+  await saveSettings(page, tempRepo(), "true"); // App: key APP
+  await page.getByRole("link", { name: "Overview" }).click();
+  await expect(page).toHaveURL(/\/p\/APP\/overview$/);
   await page.getByLabel("Project name").fill("Checkout");
-  await page.getByRole("button", { name: "Create project" }).click();
-  await page.getByRole("table", { name: "Projects" }).getByRole("button", { name: "Checkout" }).click();
-  await expect(page).toHaveURL(/\/projects\/[\w-]+$/);
+  await page.getByLabel("Project name").blur();
+  await expect(page.locator("nav .nav-project summary")).toContainText("Checkout");
   await page.getByLabel("New milestone").fill("Beta");
   await page.getByRole("button", { name: "Add milestone" }).click();
   await expect(page.getByLabel("Milestone Beta", { exact: true })).toHaveValue("Beta");
@@ -78,8 +78,8 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
 
   // Tickets with properties from the dialog; cards show them.
   await page.getByRole("link", { name: "Board" }).click();
-  await newTicket(page, "Fix checkout crash", { priority: "Urgent", labels: ["bug"], project: "Checkout", cycle: true, due: "2026-11-30" });
-  await newTicket(page, "Polish cart button", { priority: "Low", labels: ["frontend"], project: "Checkout" });
+  await newTicket(page, "Fix checkout crash", { priority: "Urgent", labels: ["bug"], cycle: true, due: "2026-11-30" });
+  await newTicket(page, "Polish cart button", { priority: "Low", labels: ["frontend"] });
   await newTicket(page, "Write release notes");
   const todo = page.getByRole("region", { name: "todo", exact: true });
   await expect(todo.getByRole("button")).toHaveCount(3);
@@ -115,9 +115,9 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page).toHaveURL(/q=release/);
   await expect(todo.getByRole("button")).toHaveCount(1);
   await expect(todo).toContainText("Write release notes");
-  await page.getByLabel("Search").fill("TRA-1");
+  await page.getByLabel("Search").fill("APP-1");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/t\/1$/);
+  await expect(page).toHaveURL(/\/t\/APP-1$/);
 
   // Properties sidebar with single-key shortcuts.
   const props = page.getByRole("complementary", { name: "Properties" });
@@ -173,12 +173,11 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page).toHaveURL(/layout=list/);
   await page.getByLabel("Group by").selectOption("priority");
   await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/, /No priority 1/]);
-  await expect(page.getByRole("region", { name: "High" })).toContainText("TRA-1");
+  await expect(page.getByRole("region", { name: "High" })).toContainText("APP-1");
   await expect(page.getByRole("region", { name: "High" }).locator(".lrow")).toContainText("regression");
   await expect(page.getByRole("region", { name: "High" }).getByRole("img", { name: "todo" })).toBeVisible(); // a row's status is announced
 
-  // Save the view (project filter + list grouped by priority), then reopen it from Views.
-  await addFilter(page, "Project", "Checkout");
+  // Save the view (the board's project + list grouped by priority), then reopen it from Views.
   await page.getByRole("button", { name: "Save view" }).click();
   await page.getByRole("dialog").getByLabel("View name").fill("Checkout by priority");
   await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
@@ -189,17 +188,18 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await page.keyboard.press("Control+k");
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await palette.getByLabel("Command").fill("release");
-  await expect(palette.getByRole("option").first()).toContainText("TRA-3");
+  await expect(palette.getByRole("option").first()).toContainText("APP-3");
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/t\/3$/);
+  await expect(page).toHaveURL(/\/t\/APP-3$/);
   await page.keyboard.press("Control+k");
   await palette.getByLabel("Command").fill("views");
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/views$/);
   await page.getByRole("listitem", { name: "Checkout by priority" }).getByRole("button", { name: "Checkout by priority", exact: true }).click();
+  await expect(page).toHaveURL(/\/issues\?.*project=/);
   await expect(page).toHaveURL(/layout=list/);
   await expect(page).toHaveURL(/group=priority/);
-  await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/]);
+  await expect(page.locator(".list h2")).toHaveText([/High 1/, /Low 1/, /No priority 1/]);
 
   // Edit the view: regroup the board, then rename and update it in place from the filter bar.
   await expect(page).toHaveURL(/view=/);
@@ -211,7 +211,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await edit.getByRole("button", { name: "Update view" }).click();
   await expect(edit).toBeHidden();
   await expect(page.getByRole("button", { name: "Edit view: Checkout by label" })).toBeVisible();
-  await page.getByRole("link", { name: "Views" }).click();
+  await page.getByRole("link", { name: "Views", exact: true }).click();
   const saved = page.getByRole("listitem", { name: "Checkout by label" });
   await expect(saved).toContainText("group=label");
   await expect(page.getByRole("listitem", { name: "Checkout by priority" })).toHaveCount(0);
@@ -222,7 +222,7 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page).not.toHaveURL(/edit=1/);
   await expect(page.locator(".list h2").first()).toHaveText(/bug|regression|No labels/);
   // Delete asks first.
-  await page.getByRole("link", { name: "Views" }).click();
+  await page.getByRole("link", { name: "Views", exact: true }).click();
   await saved.getByRole("button", { name: "Delete view Checkout by label" }).click();
   await expect(page.getByRole("dialog", { name: "Delete view?" })).toContainText("Tickets are not changed.");
   await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
@@ -233,10 +233,10 @@ test("M11: labels, project, cycle, ticket properties, URL filters, search, list 
   await expect(page.getByRole("region", { name: "Progress" })).toContainText("0/1");
   await expect(page.locator(".list")).toContainText("Fix checkout crash");
   await shot("cycle");
-  await page.getByRole("link", { name: "Projects" }).click();
-  await expect(page.getByRole("table", { name: "Projects" })).toContainText("0/2");
-  await page.getByRole("table", { name: "Projects" }).getByRole("button", { name: "Checkout" }).click();
-  await expect(page.getByRole("region", { name: "Progress" })).toContainText("0/2");
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Projects" })).toContainText("0/3");
+  await page.getByRole("link", { name: "Overview" }).click();
+  await expect(page.getByRole("region", { name: "Progress" })).toContainText("0/3");
   await expect(page.getByRole("listitem", { name: "Beta" })).toContainText("0/1");
   await shot("project");
 

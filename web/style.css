@@ -151,8 +151,10 @@ nav a { display: block; padding: 4px 8px; border-radius: 6px; color: var(--text)
 nav a:hover { background: var(--hover); text-decoration: none; }
 nav a.active { background: var(--hover); font-weight: 500; }
 .nav-group { padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-.side-bottom { margin-top: auto; display: grid; gap: 4px; }
-.account { display: flex; min-width: 0; }
+.side-bottom { margin-top: auto; display: flex; align-items: center; gap: 4px; }
+.account { display: flex; flex: 1; min-width: 0; }
+.settings-link { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 6px; color: var(--muted); }
+.settings-link:hover, .settings-link.active { background: var(--hover); color: var(--text); }
 .account-btn { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; border-color: transparent; background: none; text-align: left; }
 .account-btn:hover { background: var(--hover); }
 .email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -414,6 +416,21 @@ h2.cycle-title { font-size: 16px; margin: 0; text-transform: none; }
 .label-settings .plist li { margin: 0; }
 nav a.sub { padding-left: 20px; font-size: 12px; color: var(--muted); }
 nav a.sub.active { color: var(--text); }
+nav a.sub2 { padding-left: 32px; }
+nav a .count { float: right; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; line-height: 16px; text-align: center; background: var(--hover); color: var(--muted); }
+/* Collapsible groups (More, each project): native <details>. */
+nav details > summary { padding: 4px 8px; border-radius: 6px; cursor: pointer; list-style: none; }
+nav details > summary::-webkit-details-marker { display: none; }
+nav details > summary::before { content: "▸"; display: inline-block; width: 12px; color: var(--muted); font-size: 10px; transition: transform 0.1s; }
+nav details[open] > summary::before { transform: rotate(90deg); }
+nav details > summary:hover { background: var(--hover); }
+.nav-project .key { font-size: 11px; color: var(--muted); }
+.new-project > summary { display: inline-block; list-style: none; margin-bottom: 12px; }
+.new-project > summary::-webkit-details-marker { display: none; }
+.new-project form { display: grid; gap: 10px; max-width: 640px; margin-bottom: 20px; }
+.new-project form .row { align-items: start; }
+.new-project form .row > label { display: grid; gap: 4px; }
+.new-project form > .btn { justify-self: start; }
 .palette-btn { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--muted); text-align: left; }
 
 /* new ticket dialog */

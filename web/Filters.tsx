@@ -6,14 +6,15 @@ import { cycleName, PRIORITIES, useTracker, type Tracker } from "./tracker.tsx";
 import type { View } from "./Views.tsx";
 
 // Board/list with a filter bar. All state lives in the URL query (shareable, bookmarkable, a saved view is just a query):
-// the API's filter params plus sort, layout and group, which the API ignores.
+// the API's filter params plus sort, layout and group, which the API ignores. base: the page's path; scope: the query it
+// always adds (a project board: project=<id>), so `all` is already scoped and a saved view keeps it.
 type Field = { key: string; name: string; options?: (t: Tracker, tickets: Ticket[]) => [string, string][]; date?: boolean };
 const FIELDS: Field[] = [
   { key: "status", name: "Status", options: () => COLUMNS.map((s) => [s, s]) },
   { key: "priority", name: "Priority", options: () => [1, 2, 3, 4, 0].map((p) => [String(p), PRIORITIES[p]]) },
   { key: "label", name: "Labels", options: (t) => t.labels.map((l) => [l.id, l.name]) },
   { key: "assignee", name: "Assignee", options: (t) => [["me", "Me"], ["none", "No assignee"], ...t.members.map((m): [string, string] => [m.id, m.name])] },
-  { key: "project", name: "Project", options: (t) => [["none", "No project"], ...t.projects.map((p): [string, string] => [p.id, p.name])] },
+  { key: "project", name: "Project", options: (t) => t.projects.map((p): [string, string] => [p.id, p.name]) },
   { key: "milestone", name: "Milestone", options: (t) => [["none", "No milestone"], ...t.projects.flatMap((p) => p.milestones.map((m): [string, string] => [m.id, `${p.name} › ${m.name}`]))] },
   { key: "cycle", name: "Cycle", options: (t) => [["current", "Current cycle"], ["none", "No cycle"], ...t.cycles.map((c): [string, string] => [c.id, cycleName(c)])] },
   { key: "kind", name: "Type", options: () => [["task", "Task"], ["epic", "Epic"]] },
@@ -24,7 +25,9 @@ const FIELDS: Field[] = [
 const SORTS: [string, string][] = [["manual", "Manual"], ["priority", "Priority"], ["updated", "Last updated"], ["created", "Created"], ["due", "Due date"]];
 const VIEW_ONLY = ["sort", "layout", "group", "view", "edit"]; // view: the saved view this came from; edit: open its dialog
 
-export function Issues({ search, go, all, open }: { search: string; go: (to: string, replace?: boolean) => void; all: Ticket[] | null; open: (n: number) => void }) {
+export function Issues({ base, scope, search, go, all, open }: {
+  base: string; scope: string; search: string; go: (to: string, replace?: boolean) => void; all: Ticket[] | null; open: (key: string) => void;
+}) {
   const params = new URLSearchParams(search);
   const [tickets, setTickets] = useState<Ticket[] | null>(null);
   const [error, setError] = useState("");
@@ -36,7 +39,7 @@ export function Issues({ search, go, all, open }: { search: string; go: (to: str
   useEffect(() => {
     if (!filtered) return setTickets(all), setError("");
     let live = true;
-    api<Ticket[]>(`/api/tickets?${params}`).then((t) => live && (setTickets(t), setError("")), (e) => live && setError(e.message));
+    api<Ticket[]>(`/api/tickets?${params}${scope && `&${scope}`}`).then((t) => live && (setTickets(t), setError("")), (e) => live && setError(e.message));
     return () => void (live = false);
   }, [search, all]);
 
@@ -44,17 +47,17 @@ export function Issues({ search, go, all, open }: { search: string; go: (to: str
     const p = new URLSearchParams(search);
     mut(p);
     const qs = p.toString();
-    go(qs ? `/?${qs}` : "/", replace);
+    go(qs ? `${base}?${qs}` : base, replace);
   };
 
   return (
     <>
-      <FilterBar params={params} set={set} all={all ?? []} open={open} error={error} />
+      <FilterBar params={params} scope={scope} set={set} all={all ?? []} open={open} error={error} />
       {layout === "list" ? (
-        <List tickets={tickets} group={group} open={(t) => open(t.number)} />
+        <List tickets={tickets} group={group} open={(t) => open(t.key)} />
       ) : (
         <>
-          <Board tickets={tickets} open={(t) => open(t.number)} />
+          <Board tickets={tickets} open={(t) => open(t.key)} />
           {tickets?.length === 0 && <p className="center muted">{filtered ? "No matching tickets." : "No tickets yet. Press C to create one."}</p>}
         </>
       )}
@@ -62,8 +65,8 @@ export function Issues({ search, go, all, open }: { search: string; go: (to: str
   );
 }
 
-function FilterBar({ params, set, all, open, error }: {
-  params: URLSearchParams; set: (mut: (p: URLSearchParams) => void, replace?: boolean) => void; all: Ticket[]; open: (n: number) => void; error: string;
+function FilterBar({ params, scope, set, all, open, error }: {
+  params: URLSearchParams; scope: string; set: (mut: (p: URLSearchParams) => void, replace?: boolean) => void; all: Ticket[]; open: (key: string) => void; error: string;
 }) {
   const { tracker } = useTracker();
   const [menu, setMenu] = useState<string | null>(null); // "fields" or a field key
@@ -106,7 +109,7 @@ function FilterBar({ params, set, all, open, error }: {
   function submit(e: FormEvent) {
     e.preventDefault();
     const t = all.find((x) => x.key.toLowerCase() === q.trim().toLowerCase());
-    if (t) open(t.number);
+    if (t) open(t.key);
   }
 
   return (
@@ -162,7 +165,7 @@ function FilterBar({ params, set, all, open, error }: {
       <button className="btn" onClick={() => setSaving(true)}>{savedView?.mine ? `Edit view: ${savedView.name}` : "Save view"}</button>
       <Alert error={error} />
       {saving && savedView !== undefined && (
-        <SaveView params={params} view={savedView?.mine ? savedView : null} close={() => (setSaving(false), params.has("edit") && set((p) => p.delete("edit"), true))}
+        <SaveView params={params} scope={scope} view={savedView?.mine ? savedView : null} close={() => (setSaving(false), params.has("edit") && set((p) => p.delete("edit"), true))}
           saved={(v) => (setSaving(false), setSavedView(v), set((p) => (p.set("view", v.id), p.delete("edit")), true))} />
       )}
     </div>
@@ -207,13 +210,13 @@ export function Popover({ close, children }: { close: () => void; children: Reac
 }
 
 // New view, or (view: one of mine this board came from) update it in place: name, sharing, and the board's current query.
-function SaveView({ params, view, saved, close }: { params: URLSearchParams; view: View | null; saved: (v: View) => void; close: () => void }) {
+function SaveView({ params, scope, view, saved, close }: { params: URLSearchParams; scope: string; view: View | null; saved: (v: View) => void; close: () => void }) {
   const [error, setError] = useState("");
   async function save(form: HTMLFormElement, asNew: boolean) {
     if (!form.reportValidity()) return;
     const f = new FormData(form);
     const update = view && !asNew;
-    const filters = Object.fromEntries([...params].filter(([k]) => !["sort", "layout", "view", "edit"].includes(k)));
+    const filters = Object.fromEntries([...params, ...new URLSearchParams(scope)].filter(([k]) => !["sort", "layout", "view", "edit"].includes(k)));
     try {
       const body = { name: f.get("name"), filters, sort: params.get("sort") ?? "manual", layout: params.get("layout") ?? "board", shared: f.has("shared") };
       saved(await api<View>(update ? `/api/views/${view.id}` : "/api/views", update ? "PATCH" : "POST", body));
