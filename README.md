@@ -1,31 +1,14 @@
-# Polaris
+<p align="center"><img src="docs/mark.svg" width="96" height="96" alt="The Polaris mark: a fixed point with two star trails turning around it"></p>
 
-```text
-      *                     .                  .
-               .            :                       *
-                            |
-                .           |           .
-  .                .        |        .
-                      .     |     .
-                         \  |  /
-   .  - -- --- ----=====<{  *  }>=====---- --- -- -  .
-                         /  |  \
-                      .     |     .               .
-                   .        |        .
-                .           |           .
-     *                      |
-                            :
-                            .               *
+<h1 align="center">Polaris</h1>
 
-                P   O   L   A   R   I   S
-           tickets in  ·  reviewed commits out
-```
+<p align="center">A fixed point while your agents work: tickets in, reviewed diffs out.</p>
 
 Polaris is a self-hosted coding-agent harness with a web dashboard. You file tickets; AI agents work them in isolated
 sandboxes; tests and a model reviewer check every change before you see it; you approve and it merges. It runs on
 hosted models (Anthropic, OpenAI) or entirely on your own machine with local models through Ollama.
 
-Design and rules: [SPEC.md](SPEC.md) · Milestone checklist: [tasks.md](tasks.md)
+Design and rules: [SPEC.md](SPEC.md) · Visual identity: [DESIGN.md](DESIGN.md) · Milestone checklist: [tasks.md](tasks.md)
 
 ## Why
 
@@ -70,7 +53,7 @@ cost per run, and replay any transcript.
 | Area | What you get |
 |---|---|
 | **Chat** | A side panel (Cmd/Ctrl+J) to talk with the project. It knows the page you're on, takes `@` mentions of tickets, reads the code and the wiki, asks what's unclear, and proposes tickets as cards. Nothing is filed until you click **File** (or **File and run**); you can edit a proposal first. Replies stream; chats are private and resumable. |
-| **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
+| **Dashboard** | Linear-style UI in six palettes (Black + Blue by default), light, dark or system, under the circumpolar mark ([DESIGN.md](DESIGN.md)): board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
 | **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace; inside it, each project is one repository with its own board, cycles, wiki and ticket keys. The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
 | **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama, OpenRouter (hundreds of models behind one key; its billed cost is tracked; providers that retain or train on prompts are excluded by default), a LiteLLM proxy. Provider calls are hardened: https off your network, no cloud-metadata addresses, no redirects, keys scrubbed from errors. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
 | **Chat and Agent page** | Ask Polaris in a side panel (⌘J) or the full-width **Agent** page: it reads the code and the wiki and proposes tickets for you to file. Replies render as clean Markdown whatever the model's dialect. Each chat belongs to a project: the current project's past chats are listed under **Agent** in the sidebar and on **All chats** (search, delete). Attach **skills** to a message; create workspace skills that every agent gets, next to the repo's own `.polaris/skills/`. |
