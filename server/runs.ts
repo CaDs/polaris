@@ -807,7 +807,7 @@ async function execute(runId: string) {
     // (node_modules/.bin, conftest.py) can't make them pass. Costs a second setup + test run.
     // ponytail: one clean run, no fix round; a failure here is a gate failure of the attempt (retried like any other).
     await sandbox.close();
-    const touchedNow = async () => [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
+    const touchedNow = async () => [...(await protectedChanges(worktree, base_sha, protectedPaths, mode, fixedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
     let sha = "";
     let failed = await touchedNow();
     if (!failed.length) failed = (sha = await commitAll(worktree, `${t.key}: ${t.title}`), await touchedNow());
