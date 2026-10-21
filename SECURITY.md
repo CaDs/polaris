@@ -8,7 +8,7 @@ outside their worktree are the most valuable.
 
 ## Provider keys
 
-- Stored encrypted (AES-256-GCM, `POLARIS_SECRET_KEY`), never returned by the API (only the last 4 characters of keys of
+- Stored encrypted (AES-256-GCM, `POLARIS_SECRET_KEY`, bound to their database row), never returned by the API (only the last 4 characters of keys of
   16+ characters), never put in a URL, and scrubbed from provider error messages before they are stored or shown.
 - Sent only over the egress policy in `server/egress.ts`: https unless the endpoint is on this machine or a private
   network, never to link-local/metadata addresses, never across a redirect, with TLS certificate checks on (the server

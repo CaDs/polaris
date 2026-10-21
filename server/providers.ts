@@ -35,17 +35,26 @@ const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-
 const OPENAI_MODELS = ["gpt-5-codex", "gpt-5", "gpt-5-mini", "gpt-4.1"]; // fallback when GET /v1/models is unavailable
 const openaiBase = (p: ProviderRow) => (p.base_url || process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/$/, "");
 
+// A provider's secret column is bound to its row (AAD "providers:<id>"): a ciphertext copied to another row will not open.
+const seal = (id: string, plain: string) => encrypt(plain, `providers:${id}`);
+const unseal = (p: ProviderRow) => decrypt(p.encrypted_secret!, `providers:${p.id}`);
+// The stored secret, rewritten in the current format when it was written in an older one (blobs from before row binding).
+const resealed = (p: ProviderRow) => {
+  if (!p.encrypted_secret || p.encrypted_secret.startsWith("v2:")) return p.encrypted_secret;
+  try { return seal(p.id, unseal(p)); } catch { return p.encrypted_secret; } // unreadable (wrong key): leave it as it was
+};
+
 export const providerById = (id: string) => db.prepare("SELECT * FROM providers WHERE id = ?").get(id) as ProviderRow | undefined;
 
 // The secret is never returned: only whether one is stored and, for API keys, its last 4 chars.
 export function oauthRegistration(p: ProviderRow) {
-  try { return p.encrypted_secret ? registration(decrypt(p.encrypted_secret)) : undefined; } catch { return undefined; }
+  try { return p.encrypted_secret ? registration(unseal(p)) : undefined; } catch { return undefined; }
 }
 function view(p: ProviderRow) {
   let last4: string | null = null;
   if (p.encrypted_secret && p.auth_type === "api_key")
     try {
-      const key = decrypt(p.encrypted_secret);
+      const key = unseal(p);
       if (key.length >= 16) last4 = key.slice(-4); // a short key (a LiteLLM "sk-1234") would be mostly revealed
     } catch {} // key rotated or missing: still has_secret, just unmasked
   let account: { email?: string; label: string; status: string; welcomed: boolean } | undefined;
@@ -87,7 +96,7 @@ export async function freshTokens(p: ProviderRow): Promise<Tokens> {
       const sameSession = active?.refresh === cur.refresh && active?.access === cur.access && active?.client_id === cur.client_id && active?.subject === cur.subject;
       // Preserve UI acknowledgements or a concurrent quota pause, but never overwrite a changed login session.
       const next = { ...t, welcomed: active?.welcomed, blocked_code: active?.blocked_code };
-      const r = sameSession ? db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify(next)), p.id, now!.encrypted_secret) : { changes: 0 };
+      const r = sameSession ? db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(seal(p.id, JSON.stringify(next)), p.id, now!.encrypted_secret) : { changes: 0 };
       if (!r.changes) {
         await revoke(t).catch(() => {}); // discard and revoke a rotation that lost a race with logout/reconnection
         throw new Error("ChatGPT connection changed while refreshing; retry with the current connection");
@@ -95,7 +104,7 @@ export async function freshTokens(p: ProviderRow): Promise<Tokens> {
       return next;
     }).catch((e) => {
       if (e instanceof OAuthError && /^(invalid_grant|invalid_refresh_token|token_expired|refresh_token_expired|refresh_token_invalidated|refresh_token_reused)$/.test(e.code))
-        db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify(withoutTokens(cur))), p.id, saved);
+        db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(seal(p.id, JSON.stringify(withoutTokens(cur))), p.id, saved);
       throw e;
     });
     refreshing.set(p.id, job);
@@ -113,7 +122,7 @@ export const isLocalProvider = (p: Pick<ProviderRow, "kind" | "base_url">) => p.
 // All callers share request accounting. Credentials stay on the server; tools run in the existing sandbox.
 export function adapterFor(p: ProviderRow): Provider {
   try {
-    const secret = p.auth_type === "api_key" ? (p.encrypted_secret ? decrypt(p.encrypted_secret) : "") : "";
+    const secret = p.auth_type === "api_key" ? (p.encrypted_secret ? unseal(p) : "") : "";
     if (p.auth_type === "api_key" && !secret) throw new Error(`provider "${p.name}" has no API key`);
     let provider: Provider;
     const local = isLocalProvider(p);
@@ -138,7 +147,7 @@ export function adapterFor(p: ProviderRow): Provider {
           if (e instanceof AgentError && e.code === "subscription_sharing_usage_limit_exceeded") {
             const latest = providerById(p.id);
             const t = latest && oauthRegistration(latest);
-            if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(encrypt(JSON.stringify({ ...t, blocked_code: e.code })), p.id, latest!.encrypted_secret);
+            if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=? AND encrypted_secret=?").run(seal(p.id, JSON.stringify({ ...t, blocked_code: e.code })), p.id, latest!.encrypted_secret);
           }
           throw e;
         }
@@ -204,7 +213,7 @@ async function listModels(p: ProviderRow): Promise<string[]> {
     return ((await res.json()) as { models: { name: string }[] }).models.map((m) => m.name);
   }
   if (p.auth_type === "oauth") return (await planModels(p)).map((m) => m.id);
-  const key = p.encrypted_secret ? decrypt(p.encrypted_secret) : "";
+  const key = p.encrypted_secret ? unseal(p) : "";
   if (p.kind === "openrouter") return (await openrouterCatalog(key)).map((m) => m.id);
   if (p.kind === "litellm") {
     // The proxy's model aliases (its config.yaml model_list), as the key is allowed to see them.
@@ -275,13 +284,14 @@ async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow
   }
   const context_window = b.context_window ?? cur?.context_window ?? CONTEXT_WINDOW[kind as ProviderRow["kind"]];
   if (!Number.isInteger(context_window) || context_window < 1000 || context_window > 100_000_000) return { error: "context window must be a whole number of tokens (1000 to 100000000)" };
-  let secret: string | null | undefined; // undefined = keep
+  let secret: string | null | undefined; // the new plaintext key; null = drop, undefined = keep
   if (b.api_key !== undefined && b.api_key !== "") {
     // Printable, no spaces or line breaks: a key is sent as a header value (no header injection, no pasted junk).
     if (typeof b.api_key !== "string" || b.api_key.trim().length > 500 || !/^[\x21-\x7e]+$/.test(b.api_key.trim())) return { error: "api_key must be printable text without spaces (at most 500 chars)" };
     if (auth_type !== "api_key") return { error: "this auth type has no API key" };
     try {
-      secret = encrypt(b.api_key.trim());
+      encrypt("", "probe"); // is POLARIS_SECRET_KEY set?
+      secret = b.api_key.trim(); // sealed to its row by the caller
     } catch (e) {
       if (e instanceof SecretKeyError) return { error: e.message };
       throw e;
@@ -296,7 +306,7 @@ providerRoutes.post("/", async (c) => {
   const id = randomUUID();
   const v = p.v;
   db.prepare("INSERT INTO providers (id, workspace_id, name, kind, auth_type, encrypted_secret, base_url, context_window, options) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-    id, c.get("workspaceId"), v.name, v.kind, v.auth_type, v.secret ?? null, v.base_url, v.context_window, v.options,
+    id, c.get("workspaceId"), v.name, v.kind, v.auth_type, v.secret ? seal(id, v.secret) : null, v.base_url, v.context_window, v.options,
   );
   return c.json(view(providerById(id)!), 201);
 });
@@ -309,7 +319,7 @@ providerRoutes.patch("/:id", async (c) => {
   const v = p.v;
   if (v.auth_type !== cur.auth_type || v.base_url !== cur.base_url) cancelLogin(cur.id);
   db.prepare("UPDATE providers SET name = ?, auth_type = ?, base_url = ?, context_window = ?, encrypted_secret = ?, options = ? WHERE id = ?").run(
-    v.name, v.auth_type, v.base_url, v.context_window, v.secret === undefined ? cur.encrypted_secret : v.secret, v.options, cur.id,
+    v.name, v.auth_type, v.base_url, v.context_window, v.secret === undefined ? resealed(cur) : v.secret && seal(cur.id, v.secret), v.options, cur.id,
   );
   return c.json(view(providerById(cur.id)!));
 });
@@ -345,7 +355,7 @@ providerRoutes.get("/:id/models", async (c) => {
       return c.json({ models: model_details.map((m) => m.id), model_details });
     }
     if (p.kind === "openrouter") {
-      const models = await openrouterCatalog(p.encrypted_secret ? decrypt(p.encrypted_secret) : undefined);
+      const models = await openrouterCatalog(p.encrypted_secret ? unseal(p) : undefined);
       return c.json({ models: models.map((m) => m.id), model_details: models.map(({ id, name }) => ({ id, name })) });
     }
     return c.json({ models: await listModels(p) });
@@ -361,7 +371,7 @@ providerRoutes.post("/:id/test", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (p.auth_type === "oauth") {
     const t = oauthRegistration(p);
-    if (t?.blocked_code) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...t, blocked_code: undefined })), p.id);
+    if (t?.blocked_code) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(seal(p.id, JSON.stringify({ ...t, blocked_code: undefined })), p.id);
   }
   const model = typeof b?.model === "string" && b.model ? b.model : p.kind === "anthropic" ? DEFAULT_MODEL : (await listModels(p).catch(() => []))[0];
   if (!model) return c.json({ error: "choose a model to test" }, 400);
@@ -391,13 +401,13 @@ providerRoutes.post("/:id/oauth/start", async (c) => {
   if (!p) return c.json({ error: "not_found" }, 404);
   if (p.kind !== "openai" || p.auth_type !== "oauth") return c.json({ error: "provider does not use ChatGPT sign-in" }, 400);
   try {
-    encrypt("");
+    encrypt("", "probe"); // is POLARIS_SECRET_KEY set?
     const current = oauthRegistration(p);
     const b = await c.req.json().catch(() => ({}));
     return c.json({ url: await startLogin(p.id, (t) => {
       const latest = providerById(p.id);
       if (!latest || latest.auth_type !== "oauth") throw new Error("provider was removed or changed");
-      db.prepare("UPDATE providers SET encrypted_secret=?,base_url=NULL WHERE id=?").run(encrypt(JSON.stringify(t)), p.id);
+      db.prepare("UPDATE providers SET encrypted_secret=?,base_url=NULL WHERE id=?").run(seal(p.id, JSON.stringify(t)), p.id);
     }, current, b?.consent === true) });
   } catch (e) { return c.json({ error: (e as Error).message }, e instanceof SecretKeyError ? 400 : 409); }
 });
@@ -415,7 +425,7 @@ providerRoutes.post("/:id/oauth/logout", async (c) => {
   const t = oauthRegistration(p);
   let revoked = true;
   // Clear locally before awaiting revocation so a concurrent refresh cannot resurrect the old session.
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(t ? encrypt(JSON.stringify(withoutTokens(t))) : null, p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(t ? seal(p.id, JSON.stringify(withoutTokens(t))) : null, p.id);
   if (t) revoked = await revoke(t).catch(() => false);
   return c.json({ ok: true, revoked, ...(revoked ? {} : { warning: "Signed out locally. Remote revocation was not confirmed; disconnect Polaris in ChatGPT settings." }) });
 });
@@ -424,6 +434,6 @@ providerRoutes.post("/:id/oauth/acknowledge", (c) => {
   if (!p) return c.json({ error: "not_found" }, 404);
   if (p.auth_type !== "oauth") return c.json({ error: "provider does not use ChatGPT sign-in" }, 400);
   const t = oauthRegistration(p);
-  if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...t, welcomed: true })), p.id);
+  if (t) db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(seal(p.id, JSON.stringify({ ...t, welcomed: true })), p.id);
   return c.json({ ok: true });
 });

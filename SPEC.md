@@ -264,7 +264,9 @@ summaries. Encrypted-only reasoning shows nothing.
   `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()` (retry events inside `withRetry` and the Anthropic stream `error` included): the provider's own key and common key
   and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses
   to start with `NODE_TLS_REJECT_UNAUTHORIZED=0` unless `POLARIS_ALLOW_INSECURE_TLS=1` (a private CA goes in
-  `NODE_EXTRA_CA_CERTS`). OAuth, plan-model and Slack webhook requests (the calls that do not use `providerFetch`) refuse
+  `NODE_EXTRA_CA_CERTS`). Stored secrets are AES-256-GCM with a 16-byte tag, `v2:` blobs bound to their row (additional data
+  `providers:<id>`: a ciphertext copied to another row does not open); older `v1:` blobs still decrypt and are rewritten as
+  v2 on the next write. OAuth, plan-model and Slack webhook requests (the calls that do not use `providerFetch`) refuse
   redirects and give up after 10 s; a token response whose `access_token` (or `refresh_token`) is not a string is refused.
 - **Migrations** run with foreign keys off and `PRAGMA foreign_key_check` before each commit, so one can rebuild a table
   (003 widens the `kind` CHECK) without the drop cascading.

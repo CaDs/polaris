@@ -65,7 +65,7 @@ async function start(id: string, consent = false) {
   nonce = url.searchParams.get("nonce")!;
   return { url, callback: `${url.searchParams.get("redirect_uri")}?state=${url.searchParams.get("state")}&code=code-1&client_id=oaiapp_polaris_test` };
 }
-const tokens = (id: string) => JSON.parse(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id=?").get(id) as any).encrypted_secret)) as import("../server/oauth.ts").Tokens;
+const tokens = (id: string) => JSON.parse(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id=?").get(id) as any).encrypted_secret, `providers:${id}`)) as import("../server/oauth.ts").Tokens;
 
 test("dynamic registration: own client, stable host, exact loopback URI, nonce, scopes and PKCE", async () => {
   const p = await make();
@@ -143,7 +143,7 @@ test("plan permission, public catalog and namespaced tool/result round trip; tok
 test("concurrent refresh rotates once; logout retains registration and prevents use; foreign workspaces are refused", async () => {
   const p = await make();
   await fetch((await start(p.id)).callback);
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 }), `providers:${p.id}`), p.id);
   const before = refreshes;
   await Promise.all([freshTokens(providerById(p.id)!), freshTokens(providerById(p.id)!)]);
   assert.equal(refreshes, before + 1);
@@ -160,7 +160,7 @@ test("concurrent refresh rotates once; logout retains registration and prevents 
 
 test("legacy credentials need reconnect; callback replay and cancellation cannot save credentials", async () => {
   const p = await make();
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ access: "legacy", refresh: "legacy", account_id: "old" })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ access: "legacy", refresh: "legacy", account_id: "old" }), `providers:${p.id}`), p.id);
   const view = (await call("GET", "/api/providers", cookie)).body.find((x: any) => x.id === p.id);
   assert.equal(view.account.status, "reconnect_required");
   assert.equal(view.has_secret, false);
@@ -192,7 +192,7 @@ test("plan usage limits pause inference until the user explicitly tests again", 
 test("logout wins over an in-flight refresh and revokes the discarded replacement", async () => {
   const p = await make();
   await fetch((await start(p.id)).callback);
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 }), `providers:${p.id}`), p.id);
   let release!: () => void;
   refreshGate = new Promise<void>((done) => { release = done; });
   const before = refreshes;
