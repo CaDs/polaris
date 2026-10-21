@@ -35,10 +35,12 @@ loop: resp = provider.stream(messages, tools) → append → no tool calls? done
       stop on turn/token/time budget
 ```
 
-Worker budget: workspace settings `max_turns` (10..500, default 120) and `max_minutes` (5..600, default 60). `max_minutes`
+Worker budget: workspace settings `max_turns` (10..500, default 120), `max_minutes` (5..600, default 60) and `max_tokens`
+(100k..20M, default 2M: uncached input + cache writes + output). `max_minutes`
 is one wall-clock deadline for the whole attempt (counted from the run's start; the first run, gate fix rounds and review
 fix rounds share it); `max_turns` is also per attempt: a fix round gets what is left, but at least `FIX_ROUND_MIN_TURNS` (10),
-so a short fix is still possible. The 2M token cap applies per agent call. The loop
+so a short fix is still possible. `max_tokens` is per attempt the same way: a fix round gets what the attempt has left,
+but at least `FIX_ROUND_MIN_TOKENS` (200k). The loop
 checks `budget.deadline` (epoch ms) at the top of each turn and ends with `time budget exhausted (<n> min)`. The
 `finishHint` fires once, when 2 turns are left or less than max(2 min, 10% of the call's window) remains, whichever
 comes first. Planner (50 turns), reviewer, wiki and CLI runs keep their own budgets. Eval case runs use the frozen
@@ -71,9 +73,9 @@ budget ended it. The loop now watches for that, without a decision model. Consta
   what it repeated, that the result will not change, take a different step or finish with what it has. Counters restart.
 - **Next detection** (any signal; `no_progress` after its own nudge already after 4 more idle turns) → `stuck {…, action:
   "stop"}` and the run fails `stuck: <signal> (<detail>)`. Each `runAgent` call has its own monitor (a fix round starts fresh).
-- **Worker**: a `stuck:` failure is retried fresh while attempts remain (a plain budget failure of the first call is not),
-  fed back as "Previous attempt was stopped because it repeated … / made no progress: …". Never split on it (like
-  provider/environment errors).
+- **Worker**: a `stuck:` failure is retried fresh while attempts remain, fed back as "Previous attempt was stopped because
+  it repeated … / made no progress: …". Never split on it (like provider/environment errors). A turn, time or token
+  budget failure is retried the same way (fed back as "Previous attempt failed: …"); the last attempt's is split.
 - **`run_metrics`**, one per run right before `run_finished`: `{turns, tool_calls, tool_errors, repeated_calls (same name +
   input as an earlier call of the run), repeated_reads (dedupe stubs), compactions, first_edit_turn (1-based), files_changed
   (worker: paths changed against base incl. untracked, minus `.polaris` scratch; else null), turns_pct, minutes, minutes_pct
@@ -257,7 +259,9 @@ The harness gets better at the user's repo in three loops of increasing risk. Ev
 can read or write it, and every change is a new version you can see in full on the **Learning** page (route `/improvement`).
 
 1. **Reflection → lessons** (lowest risk, applies at once). When a run series ends (it passed → review, it failed for
-   good after its retries, or a reviewer rejected it with a note) the harness makes one extra call: a fresh one-message
+   good after its retries, or a reviewer rejected it with a note) the harness makes one extra call, except when it failed
+   with a provider or environment error (`failureClass`): a lesson about a timeout or a restart misleads every later run,
+   so the event is `reflection {skipped: <class>}`. The call: a fresh one-message
    conversation, no tools, the run's own provider and model, system prompt = the reflection instructions. Input: the current
    lessons + the run's real tool names (`<tools>`; the instructions say to name tools exactly as listed, never invent one) + a compact digest of the series (ticket key/title, final status, per attempt: status/reason, turns, tokens,
    model, tool errors with their class and first line, setup/gate failures with a 1,000-char output tail, the reviewer

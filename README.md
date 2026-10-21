@@ -291,7 +291,6 @@ an Apple M4 Max:
   decision model (System One style) checking every few turns is not; an offline replay separated stuck runs from healthy
   ones cleanly.
 - **Smaller items:**
-  - the 2M token cap is per agent session, not per attempt;
   - inviting members and switching workspaces in the UI;
   - formatted dates.
 - **Hardening:**

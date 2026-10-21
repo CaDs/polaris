@@ -7,7 +7,7 @@ import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useP
 
 type WorkspaceSettings = {
   compact_at_tokens: number; updated_at?: number; default_provider_id: string | null; default_model: string | null;
-  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
+  auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number; max_tokens: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 } & Record<`${Phase}_provider_id` | `${Phase}_model`, string | null>;
 
@@ -216,6 +216,11 @@ function LimitsTab({ s, saved, go }: Tab & { go: (to: string) => void }) {
         Max minutes per attempt
         <input name="max_minutes" type="number" min={5} max={600} step={1} defaultValue={s.max_minutes} required />
         <span className="hint">Wall-clock limit for the whole attempt, fix rounds included. Fast models run out of turns first; slow ones out of minutes.</span>
+      </label>
+      <label>
+        Max tokens per attempt
+        <input name="max_tokens" type="number" min={100000} max={20000000} step={1} defaultValue={s.max_tokens} required />
+        <span className="hint">Uncached input + cache writes + output, fix rounds included. It stops runaway loops; a model whose prompt cache misses spends it fastest. ChatGPT-plan calls are not billed per token.</span>
       </label>
       <label>
         Compact at (tokens)

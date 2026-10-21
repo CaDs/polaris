@@ -14,7 +14,7 @@ import { addUsage, AgentError, noUsage, type AgentEvent, type EventPayloads, typ
 import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
-import { classifyRun } from "./failures.ts";
+import { classifyRun, failureClass } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
@@ -35,13 +35,14 @@ export const BUDGET = { maxTurns: 50, maxTokens: 2_000_000 }; // planner, wiki a
 const GATE_FIX_ROUNDS = 1;
 // max_turns is per attempt: a fix round gets what the attempt has left, but at least this many (a one-test fix needs a few).
 const FIX_ROUND_MIN_TURNS = 10;
+const FIX_ROUND_MIN_TOKENS = 200_000; // the same floor for the attempt's token budget
 // A reviewer reads the whole change and a few callers: its turns grow with the changed lines (it once used 25 on a 10-line diff).
 const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 + Math.ceil(lines / 8))), maxTokens: BUDGET.maxTokens });
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
 
 type Settings = {
   workspace_id: string; default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
-  auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
+  auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number; max_tokens: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 } & Record<`${ModelPhase}_provider_id` | `${ModelPhase}_model`, string | null>;
 // Phases with their own model setting (M14); the reviewer's is review_provider_id/review_model, the worker's the default.
@@ -52,11 +53,11 @@ const phaseModel = (s: Settings, p: ModelPhase): Choice | undefined =>
 // The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
 export const SETTINGS_DEFAULTS = {
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
-  compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
+  compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60, max_tokens: 2_000_000,
   monthly_cap_usd: null as number | null, monthly_cap_tokens: null as number | null, // spending caps; null = none
 };
 // Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
-const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
+const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes, max_tokens: SETTINGS_DEFAULTS.max_tokens };
 const MODEL_DEFAULTS = Object.fromEntries(["default", "review", ...MODEL_PHASES].flatMap((p) => [[`${p}_provider_id`, null], [`${p}_model`, null]]));
 // The workspace's settings, defaults included (the row exists only once something was saved).
 export const settingsFor = (ws: string) =>
@@ -603,12 +604,14 @@ async function execute(runId: string) {
       model: run.model, root: worktree, exec: sandbox.exec, protectedPaths, signal, cacheKey: t.id, compactAt,
       onEvent: relay(log), onStream: liveStream(runId), // this pipeline writes run_metrics and run_finished
     };
-    const workerBudget = { maxTurns: limits.max_turns, maxTokens: BUDGET.maxTokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
+    const workerBudget = { maxTurns: limits.max_turns, maxTokens: limits.max_tokens, deadline: attemptStart + limits.max_minutes * 60_000, minutes: limits.max_minutes };
     let a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, tools: toolsFor(stored?.kind), budget: workerBudget, finishHint: WORKER_FINISH });
     ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
     if (res.status !== "passed") {
-      retry = !ev && res.status === "failed" && !!res.reason?.startsWith("stuck:") && run.attempt < MAX_ATTEMPTS; // unlike a budget failure
+      // Stuck, or out of turns, minutes or tokens: a fresh attempt with the reason fed back (a cache-miss streak spends the
+      // token budget fast; it must not end the series). The last attempt's failure is split.
+      retry = !ev && res.status === "failed" && /^(stuck:|(turn|time|token) budget exhausted)/.test(res.reason ?? "") && run.attempt < MAX_ATTEMPTS;
       return;
     }
 
@@ -631,7 +634,7 @@ async function execute(runId: string) {
     // A fix round (FIX_ROUNDS): resumes the worker's own conversation with `message`; false = it ended the attempt.
     const fixRound = async (why: string, message: string) => {
       cap();
-      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: { ...workerBudget, maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - res.turns) }, finishHint: WORKER_FINISH });
+      a = await runAgent({ ...common, provider: providerFor(task), system: prompt.body, task, resume: { messages: a.messages, message }, tools: toolsFor(stored?.kind), budget: { ...workerBudget, maxTurns: Math.max(FIX_ROUND_MIN_TURNS, limits.max_turns - res.turns), maxTokens: Math.max(FIX_ROUND_MIN_TOKENS, limits.max_tokens - (res.usage.input + res.usage.cache_write + res.usage.output)) }, finishHint: WORKER_FINISH });
       addUsage(res.usage, a.usage);
       res.metrics = addMetrics(res.metrics!, a.metrics);
       res.turns += a.turns;
@@ -710,8 +713,10 @@ async function execute(runId: string) {
       };
     await sandbox?.close();
     if (signal.aborted) retry = false;
+    // Not on a provider or environment failure: a lesson from a harness or network problem misleads every later run.
+    const infra = status === "failed" ? failureClass({ status, reason }) : null;
     if (!run.eval_run_id && s && !retry && status !== "cancelled" && !reason?.startsWith("SpendingCap:")) // reflecting is a model call too
-      log({ type: "reflection", payload: await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
+      log({ type: "reflection", payload: infra === "provider_error" || infra === "environment" ? { skipped: infra } : await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
     if (t.parent_id && !run.eval_run_id && !retry && status !== "cancelled") {
       const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${truncate(gateOutput, 1000, "tail")}\n\`\`\`` : ""}`);
       db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(text, t.id);
