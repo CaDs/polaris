@@ -1,5 +1,5 @@
 import { AgentError, noUsage, type Block, type Msg, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, withRetry } from "./retry.ts";
+import { httpError, retryable, secretsOf, withRetry } from "./retry.ts";
 import { cappedText, EgressError, providerFetch } from "../../egress.ts";
 
 type Item = Record<string, any>;
@@ -146,6 +146,6 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
       e.requestSent = false;
       throw e;
     }
-    return withRetry(onEvent, req.signal, (on) => once(req, on, headers), req.metering);
+    return withRetry(onEvent, req.signal, (on) => once(req, on, headers), req.metering, secretsOf(headers));
   } };
 }

@@ -34,8 +34,12 @@ export function httpError(res: Response, body: string) {
   return RETRY_STATUS.has(res.status) || /overloaded/i.test(body) ? retryable(e, retryAfter(res.headers.get("retry-after"))) : e;
 }
 
+// Header values of a request without the "Bearer " prefix: the secrets to scrub from what the endpoint says back.
+export const secretsOf = (headers: Record<string, string>) => Object.entries(headers).filter(([k]) => /auth|key|token/i.test(k)).map(([, v]) => v.replace(/^Bearer /, ""));
+
 // Runs one request attempt; `once` gets an onEvent that marks the attempt as having produced output.
-export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: AbortSignal | undefined, once: (on: (e: StreamEvent) => void) => Promise<T>, metering = false): Promise<T> {
+// `secrets` (the request's credentials) are scrubbed from the retry events emitted here, before any outer wrapper sees them.
+export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: AbortSignal | undefined, once: (on: (e: StreamEvent) => void) => Promise<T>, metering = false, secrets: string[] = []): Promise<T> {
   if (signal?.aborted) {
     const e = new AgentError("UserAborted", "cancelled before the request started");
     e.requestSent = false;
@@ -56,7 +60,7 @@ export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: Ab
       // POLARIS_RETRY_BASE_MS: tests shrink the backoff.
       const base = Number(process.env.POLARIS_RETRY_BASE_MS ?? 1000);
       const delay = e.retryAfterMs ?? Math.min(base * 2 ** attempt, 30_000) * (1 + Math.random() * 0.25);
-      onEvent({ type: "retry", attempt: attempt + 1, max: RETRIES, message: e.message, delay_ms: Math.round(delay) });
+      onEvent({ type: "retry", attempt: attempt + 1, max: RETRIES, message: scrub(e.message, secrets), delay_ms: Math.round(delay) });
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delay);
         signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });

@@ -1,5 +1,5 @@
 import { AgentError, noUsage, type Block, type Msg, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
-import { httpError, retryable, withRetry } from "./retry.ts";
+import { httpError, retryable, secretsOf, withRetry } from "./retry.ts";
 import { cappedText, EgressError, providerFetch, scrub } from "../../egress.ts";
 
 // OpenAI Chat Completions over fetch + SSE: what OpenRouter and the LiteLLM proxy (and most OpenAI-compatible servers)
@@ -118,5 +118,5 @@ export function chatCompletions(opts: { url: string; headers: Record<string, str
       throw e;
     }
   }
-  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on), req.metering) };
+  return { stream: (req, onEvent) => withRetry(onEvent, req.signal, (on) => once(req, on), req.metering, secretsOf(opts.headers)) };
 }

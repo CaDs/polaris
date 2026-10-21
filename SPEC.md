@@ -260,7 +260,7 @@ summaries. Encrypted-only reasoning shows nothing.
   or userinfo (a `?` would swallow the path Polaris appends). Test and the model list answer with the HTTP status and a fixed
   reason, never the upstream body (it goes to the server log): a base URL must not turn them into a reader of internal services.
 - **Secrets.** Keys must be printable without spaces (a key is a header value: no header injection), at most 500 chars.
-  `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()`: the provider's own key and common key
+  `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()` (retry events inside `withRetry` and the Anthropic stream `error` included): the provider's own key and common key
   and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses
   to start with `NODE_TLS_REJECT_UNAUTHORIZED=0` unless `POLARIS_ALLOW_INSECURE_TLS=1` (a private CA goes in
   `NODE_EXTRA_CA_CERTS`).
