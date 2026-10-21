@@ -33,7 +33,7 @@ doctor: ## Check Node 26+, git, Docker running, Ollama reachable
 ## group: run
 
 dev: ## API on :3000 with reload + Vite dashboard on :5173 (PORT/WEB_PORT override)
-	npm run dev
+	BETTER_AUTH_URL=http://localhost:$(PORT) WEB_ORIGIN=http://localhost:$(WEB_PORT) npm run dev
 
 build: ## Build the dashboard into dist/
 	npm run build
