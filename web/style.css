@@ -355,6 +355,20 @@ td .icon { vertical-align: -2px; }
 .gate.err summary { color: var(--error); }
 .gate pre { margin: 4px 0; max-height: 240px; overflow: auto; font-size: 12px; white-space: pre-wrap; }
 .review { margin-top: 16px; }
+.verdict { padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.verdict h3 { margin: 0 0 8px; font-size: 16px; }
+.verdict h4 { margin: 24px 0 8px; }
+.verdict > .row.end { margin-top: 16px; }
+.verdict-rows { margin: 16px 0; }
+.verdict-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; margin: 8px 0; }
+.verdict-row dt { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
+.verdict-row dt > span { display: inline-flex; width: 16px; justify-content: center; }
+.verdict-check { color: var(--ok); }
+.verdict-row dd { margin: 0; overflow-wrap: anywhere; }
+.verdict-row ul { margin: 8px 0; padding-left: 16px; }
+.review-details { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.review-details > summary { cursor: pointer; font-weight: 600; }
+.review-details[open] > summary { margin-bottom: 12px; }
 .diff-file { margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
 .diff-head { padding: 6px 10px; background: var(--hover); border-bottom: 1px solid var(--border); font-weight: 600; }
 .diff pre { margin: 0; padding: 4px 0; overflow-x: auto; }
@@ -719,3 +733,13 @@ nav details > summary:hover { background: var(--hover); }
 /* A button with a leading glyph (New ticket, Ask Polaris, Skills): icon and label on one line. */
 .btn.with-icon { display: inline-flex; align-items: center; gap: 6px; }
 .chat-example .glyph { color: var(--accent-text); margin-bottom: 4px; }
+
+/* POL-29: the repository section of the project form */
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 10px; }
+fieldset.plain:disabled { opacity: 0.55; }
+fieldset.plain label > select { display: block; width: 100%; margin-top: 4px; }
+.repo-state { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -6px 0 0; }
+.repo-state:empty { display: none; }
+.protected { display: grid; gap: 6px; }
+.protected h4 { margin: 4px 0 0; font-size: 13px; }
+.protected label.check { gap: 8px; }

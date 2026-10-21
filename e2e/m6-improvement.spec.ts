@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, more, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, more, newTicket, openSection, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M6: reflection → lessons, eval case from an approved ticket, eval-gated prompt promotion", async ({ page }) => {
   test.setTimeout(240_000);
@@ -14,6 +14,7 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   const transcript = page.getByRole("region", { name: "Transcript" });
   await page.getByRole("button", { name: "Run agent" }).click();
   await expect(status).toHaveValue("review", { timeout: 90_000 });
+  await openSection(page, "How it got here");
   await expect(transcript).toContainText("prompt v1");
   await expect(transcript).toContainText("Reflection: lessons updated (v1");
   await page.getByRole("button", { name: "Show run #1" }).click();
@@ -25,9 +26,15 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await page.getByRole("button", { name: "Add to evals" }).click();
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 60_000 });
 
-  // Lessons written by the reflection, with history.
+  // Lessons proposed by the reflection wait for Accept (POL-10), with history.
   await more(page, "Learning");
   const lessons = page.getByRole("textbox", { name: "Lessons" });
+  await expect(lessons).toHaveValue("");
+  const pending = page.getByRole("group", { name: "Pending lessons" });
+  await expect(pending).toContainText("Pending: v1");
+  await expect(pending.locator(".add")).toHaveText("+- APP-1 Make ok file: passed");
+  await pending.getByRole("button", { name: "Accept" }).click();
+  await expect(pending).toBeHidden();
   await expect(lessons).toHaveValue("- APP-1 Make ok file: passed");
   const history = page.getByRole("list", { name: "Lessons history" });
   await expect(history.getByRole("listitem", { name: "Lessons v1" })).toContainText("reflection on APP-1 (run #2)");

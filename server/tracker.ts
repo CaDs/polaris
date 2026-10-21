@@ -7,8 +7,10 @@ import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
-import { IMAGE_REF, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
+import { inspectProject } from "./inspect.ts";
+import { IMAGE_REF, NETWORKS, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
+import { requireRole } from "./roles.ts";
 
 // Projects whose repository is the checkout this server runs from. A server started with --watch there restarts on every
 // merge or edit in it, and a restart fails every running run (server/index.ts warns; README "Working on Polaris with Polaris").
@@ -36,11 +38,12 @@ export const ESTIMATES = [1, 2, 3, 5, 8];
 const SORTS = ["manual", "priority", "updated", "created", "due"];
 export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
 export const KINDS = ["task", "epic"];
+const PROTECTED_MODES = ["add_only", "read_only"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 // A project's ticket key prefix: 2-5 capitals or digits, a capital first.
 const KEY = /^[A-Z][A-Z0-9]{1,4}$/;
 // A project's repository settings when not given (a new project, PATCH with null). The DB columns repeat them.
-export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE };
+export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", protected_mode: "add_only", image: SANDBOX_IMAGE };
 // The sandbox's size, a whole number in range (form posts send strings; empty or null = the default).
 const PROJECT_RESOURCES: Record<string, [number, number, number, string]> = {
   sandbox_cpus: [1, 32, SANDBOX_RESOURCES.cpus, "Sandbox CPUs"],
@@ -383,12 +386,14 @@ async function projectBody(ws: string, b: Record<string, any>, cur?: Record<stri
   if (b.target_date !== undefined) v.target_date = date(b.target_date, "target_date");
   for (const k of Object.keys(PROJECT_DEFAULTS))
     if (b[k] !== undefined) v[k] = b[k] === null ? PROJECT_DEFAULTS[k] : typeof b[k] === "string" && b[k].length <= 2000 ? b[k].trim() : fail(`${k} must be a string of at most 2000 chars`);
+  if (v.protected_mode !== undefined && !PROTECTED_MODES.includes(v.protected_mode as string)) fail(`protected_mode must be one of ${PROTECTED_MODES.join(", ")}`);
   if (v.image === "") v.image = PROJECT_DEFAULTS.image;
   for (const [k, [lo, hi, def, label]] of Object.entries(PROJECT_RESOURCES)) {
     if (b[k] === undefined) continue;
     const n = b[k] === null || b[k] === "" ? def : typeof b[k] === "number" || typeof b[k] === "string" ? Number(b[k]) : NaN;
     v[k] = Number.isInteger(n) && n >= lo && n <= hi ? n : fail(`${label} must be a whole number from ${lo} to ${hi}`);
   }
+  if (b.sandbox_network !== undefined) v.sandbox_network = b.sandbox_network === null || b.sandbox_network === "" ? SANDBOX_RESOURCES.network : NETWORKS.includes(b.sandbox_network) ? b.sandbox_network : fail(`Sandbox network must be one of ${NETWORKS.join(", ")}`);
   if (v.image !== undefined && !IMAGE_REF.test(v.image as string)) fail("Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag");
   if (typeof v.protected_paths === "string" && v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
     fail("Protected paths must be relative to the repository root, without ..");
@@ -406,10 +411,19 @@ trackerRoutes.get("/projects", (c) => {
   const ids = db.prepare("SELECT id FROM projects WHERE workspace_id = ? ORDER BY created_at, rowid").all(ws) as { id: string }[];
   return c.json(ids.map((p) => project(ws, p.id)));
 });
+// The repository form's detection and suggestions (POL-29); `check_paths` (optional) are protected paths to look for in the branch. A folder that is not a usable repository gets project create's 400,
+// with its `state` (and `root` for inside_repo) so the form can offer the fix.
+trackerRoutes.post("/projects/inspect", async (c) => {
+  const b = await body(c);
+  const r = await inspectProject(typeof b.repo_path === "string" ? b.repo_path.trim() : "", typeof b.base_branch === "string" ? b.base_branch.trim() : "",
+    Array.isArray(b.check_paths) ? b.check_paths.filter((p: unknown): p is string => typeof p === "string") : []);
+  return c.json(r, r.state === "ok" ? 200 : 400);
+});
 trackerRoutes.post("/projects", async (c) => {
+  requireRole(c);
   const v = await projectBody(c.get("workspaceId"), await body(c));
   const projectId = randomUUID();
-  insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), ...v });
+  insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), protected_mode: PROJECT_DEFAULTS.protected_mode, ...v });
   setCurrent(c.get("userId"), c.get("workspaceId"), projectId); // a new project is where its maker works next
   return c.json(project(c.get("workspaceId"), projectId), 201);
 });
@@ -420,11 +434,15 @@ trackerRoutes.get("/projects/:id", (c) => {
 trackerRoutes.patch("/projects/:id", async (c) => {
   const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
-  update("projects", cur.id, { ...(await projectBody(c.get("workspaceId"), await body(c), cur)), updated_at: Date.now() });
+  const b = await body(c);
+  // The repository, its commands, image, protected paths and sandbox size decide what code runs where: owners and admins only.
+  if (["repo_path", "base_branch", ...Object.keys(PROJECT_DEFAULTS), ...Object.keys(PROJECT_RESOURCES)].some((k) => b[k] !== undefined && String(b[k] ?? "").trim() !== String(cur[k] ?? ""))) requireRole(c); // resending the current value is not a change
+  update("projects", cur.id, { ...(await projectBody(c.get("workspaceId"), b, cur)), updated_at: Date.now() });
   return c.json(project(c.get("workspaceId"), cur.id));
 });
 // Only an empty project goes (its tickets' branches and runs would go with it): move on by deleting its tickets first.
 trackerRoutes.delete("/projects/:id", (c) => {
+  requireRole(c);
   const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
   if (db.prepare("SELECT 1 FROM tickets WHERE project_id = ? AND hidden = 0").get(cur.id)) fail("delete the project's tickets first");
@@ -608,7 +626,8 @@ function slack(ticketId: string, text: string) {
   const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t WHERE t.id = ?`).get(ticketId) as { key: string };
   const url = `${process.env.WEB_ORIGIN ?? "http://localhost:5173"}/t/${key}`;
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }) })
+  // No redirects, and a deadline: a webhook that hangs must not hold a socket open forever (POLARIS_SLACK_TIMEOUT_MS: tests).
+  fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }), redirect: "error", signal: AbortSignal.timeout(Number(process.env.POLARIS_SLACK_TIMEOUT_MS ?? 10_000)) })
     .then((r) => r.ok || console.error(`slack webhook: HTTP ${r.status}`))
     .catch((e) => console.error(`slack webhook: ${e.message}`));
 }

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import type { EventPayloads, Provider, ToolDef } from "./agent/types.ts";
-import { ask, capLessons, currentLessons, LESSONS_MAX, runDigest, saveLessons, scrub } from "./improve.ts";
+import { ask, capLessons, currentLessons, latestLessons, LESSONS_MAX, runDigest, saveLessons, scrub } from "./improve.ts";
 import { applyTracker, labelIds, ticketKey } from "./tracker.ts";
 
 // M12 failure mining (see SPEC "Failure mining (M12)"): every finished worker ticket run that failed gets a failure class,
@@ -187,7 +187,7 @@ export async function mine(o: { workspaceId: string; provider: Provider; model: 
         const v = await verdict(o, dossier(ws, c, days));
         const evidence = c.examples.map((e) => `- ${e.ticket_key} (${e.model}): ${e.reason ?? "no reason"}`).join("\n");
         if (v.verdict === "harness") {
-          const cur = currentLessons(ws)?.body ?? "";
+          const cur = latestLessons(ws)?.body ?? ""; // a candidate pending from before is built on, not overwritten
           const bullet = `- ${v.lesson}`;
           if (cur.split("\n").includes(bullet)) skip("the model's lesson is already in the lessons");
           else if (cur.length + bullet.length + 1 > LESSONS_MAX) skip(`harness, but the lessons are full (${LESSONS_MAX} chars): ${v.lesson}`);

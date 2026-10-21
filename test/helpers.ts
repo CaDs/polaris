@@ -10,6 +10,7 @@ import { join } from "node:path";
 // (POLARIS_PROVIDER, POLARIS_CONCURRENCY, ...): it loads the server. Each test file runs in its own process
 // (DB_PATH=:memory:), so nothing here is shared between files.
 process.env.POLARIS_SANDBOX ??= "host"; // docker is covered by docker.test.ts
+process.env.POLARIS_RATE_LIMIT ??= "0"; // the suites sign up many users from one address; security-api.test.ts turns the limits on
 process.env.POLARIS_DATA_DIR ??= mkdtempSync(join(tmpdir(), "polaris-data-"));
 export const { app } = await import("../server/app.ts");
 export const { db } = await import("../server/db.ts");
@@ -36,7 +37,7 @@ export async function call(method: string, path: string, cookie = "", body?: unk
   try {
     json = JSON.parse(text);
   } catch {}
-  return { status: res.status, text, body: json, cookie: set || cookie };
+  return { status: res.status, text, body: json, cookie: set || cookie, headers: res.headers };
 }
 
 export const signUp = (name: string) => call("POST", "/api/auth/sign-up/email", "", { email: `${name}@x.dev`, password: "password-123", name });
@@ -45,6 +46,8 @@ export async function user(name: string, workspace = true) {
   const { cookie } = await signUp(name);
   return workspace ? (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie : cookie;
 }
+// The host path of a run's worktree: the API does not return it.
+export const worktreeOf = (runId: string) => (db.prepare("SELECT worktree FROM runs WHERE id = ?").get(runId) as { worktree: string | null }).worktree!;
 export const wsOf = (slug: string) => (db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string }).id;
 
 export async function until<T>(what: string, fn: () => Promise<T | undefined | false> | T | undefined | false, ms = 60_000): Promise<T> {
@@ -95,12 +98,13 @@ export const reply = (r: { tool: string; input: string } | { text: string }) =>
     { type: "message_delta", delta: { stop_reason: "tool" in r ? "tool_use" : "end_turn" }, usage: { output_tokens: 5 } },
   ]);
 
-// A project (one repo) in the session's workspace: key from the name (pia → PIA), a fresh temp repo, no setup command.
-const PROJECT_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "image"];
+// A project (one repo) in the session's workspace (protected paths read-only, like projects before add-only mode; the demo
+// provider's "broken" change writes tests/broken.txt): key from the name (pia → PIA), a fresh temp repo, no setup command.
+const PROJECT_FIELDS = ["repo_path", "base_branch", "setup_command", "test_command", "protected_paths", "protected_mode", "image"];
 const split = (o: Record<string, unknown>, repoFields: boolean) => Object.fromEntries(Object.entries(o).filter(([k]) => PROJECT_FIELDS.includes(k) === repoFields));
 export const keyOf = (name: string) => name.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
 export async function project(cookie: string, name: string, o: Record<string, unknown> = {}) {
-  const r = await call("POST", "/api/projects", cookie, { name, key: keyOf(name), repo_path: tempRepo(), setup_command: "", ...o });
+  const r = await call("POST", "/api/projects", cookie, { name, key: keyOf(name), repo_path: tempRepo(), setup_command: "", protected_mode: "read_only", ...o });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   if (!projects.has(cookie)) projects.set(cookie, r.body.id); // the session's first project is where fileTicket files
   return r.body as { id: string; key: string; name: string };
@@ -121,7 +125,7 @@ export async function configure(cookie: string, body: object = {}) {
     else {
       const ws = (await call("GET", "/api/auth/get-session", cookie)).body?.session?.activeOrganizationId;
       const { slug } = db.prepare("SELECT slug FROM organization WHERE id = ?").get(ws) as { slug: string };
-      r = await call("POST", "/api/projects", cookie, { name: slug, key: keyOf(slug), ...repo });
+      r = await call("POST", "/api/projects", cookie, { name: slug, key: keyOf(slug), protected_mode: "read_only", ...repo });
     }
     if (r.status >= 300) return r;
     projects.set(cookie, (pid = r.body.id as string));

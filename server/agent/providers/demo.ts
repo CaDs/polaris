@@ -201,7 +201,10 @@ function demoMeta(req: ProviderRequest): ProviderResponse {
   const msg = req.messages[0].content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
   const tag = (name: string) => new RegExp(`<${name}>\\n?([\\s\\S]*?)\\n?</${name}>`).exec(msg)?.[1] ?? "";
   let text: string;
-  if (msg.includes("<current_prompt>"))
+  // Triage by a chat model (runs.ts TRIAGE_SYSTEM, "Score the ticket from 0 to 4"): "huge" in the ticket scores 3.4, "BAD-JSON" answers in prose, the rest 0.8.
+  if (req.system.some((b) => b.type === "text" && b.text.includes("Score the ticket from 0 to 4")))
+    text = msg.includes("BAD-JSON") ? "It is quite large." : JSON.stringify({ score: msg.includes("huge") ? 3.4 : 0.8, reason: "Demo triage." });
+  else if (msg.includes("<current_prompt>"))
     text = `<rationale>Demo proposal: the failing evals check for ok.txt, so the prompt now tells the agent to always create it.</rationale>\n<prompt>\n${tag("current_prompt")}\nALWAYS-CREATE-OK\n</prompt>`;
   else {
     const old = tag("lessons").trim();
@@ -224,9 +227,20 @@ function demoMine(req: ProviderRequest): ProviderResponse {
   };
 }
 
+// PROT-* in a ticket: what the shell does to tests/ (add-only mode, POL-29). The test repo has tests/existing.txt; OWN edits a
+// file the run itself added.
+const PROTECTED_CHANGE: Record<string, string> = {
+  ADD: "mkdir -p tests && echo new > tests/new.test.ts",
+  EDIT: "echo changed >> tests/existing.txt",
+  DEL: "rm tests/existing.txt",
+  MV: "mv tests/existing.txt tests/moved.txt",
+  OWN: "mkdir -p tests && echo a > tests/own.txt && echo b >> tests/own.txt",
+};
+
 // The scripted turns. ok: also create ok.txt; why says so in the first turn's text.
-function script(task: string, ok: boolean, why: string) {
+function script(task: string, ok: boolean, why: string, model: string) {
   const ticket = task.includes("# Task") ? task.slice(task.lastIndexOf("# Task")) : task;
+  if (ticket.includes("STRONG-ONLY")) ok = model.endsWith("strong"); // only a model named *strong creates ok.txt (escalation tests)
   if (task.includes('"## Handoff"')) return childScript(ticket);
   if (ticket.includes("STUCK-LOOP") && !task.includes("Previous attempt"))
     return fakeProvider(Array.from({ length: 30 }, (_, i) => [use(`s${i}`, "read_file", { path: "README.md" })]), { input: 100, output: 20, cache_read: 10, cache_write: 0 }).provider;
@@ -255,6 +269,7 @@ function script(task: string, ok: boolean, why: string) {
             use("1", "edit_file", { path: "notes.txt", old_string: "", new_string: "hello from the demo agent\n" }),
             ...(ok ? [use("1b", "edit_file", { path: "ok.txt", old_string: "", new_string: "ok\n" })] : []),
             ...(ticket.includes("SPLIT-ME") ? [use("1c", "shell", { command: "mkdir -p tests && echo broken > tests/broken.txt" })] : []),
+            ...(PROTECTED_CHANGE[/PROT-(ADD|EDIT|DEL|MV|OWN)/.exec(ticket)?.[1] ?? ""] ? [use("1e", "shell", { command: PROTECTED_CHANGE[/PROT-(ADD|EDIT|DEL|MV|OWN)/.exec(ticket)![1]] })] : []),
             ...(ticket.includes("WIKI-WRITE") ? [use("1d", "shell", { command: "echo tampered > .polaris/wiki/x" })] : []),
           ],
           [use("2", "shell", { command: "ls" })],
@@ -277,7 +292,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));
       const gateFix = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Tests failed"));
-      scripted ??= req.tools.some((t) => t.name === "propose_ticket") ? chatScript : req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript(task) : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so");
+      scripted ??= req.tools.some((t) => t.name === "propose_ticket") ? chatScript : req.system.some((b) => b.type === "text" && b.text.startsWith("You maintain a project wiki")) ? wikiScript(task) : req.tools.some((t) => t.name === "create_ticket") ? plannerScript(task) : req.tools.some((t) => t.name === "submit_review") ? reviewScript(task) : resumed ? fixScript(task) : gateFix ? gateFixScript(task) : script(task, retry || always, retry ? "the previous attempt failed" : "the system prompt says so", req.model);
       await new Promise((resolve) => {
         const t = setTimeout(resolve, delayMs);
         req.signal?.addEventListener("abort", () => (clearTimeout(t), resolve(0)), { once: true });

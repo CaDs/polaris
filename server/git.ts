@@ -1,15 +1,19 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, closeSync, constants, copyFileSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { isProtected } from "./agent/tools.ts";
+import { foldPath, isProtected, MAX_FILE } from "./agent/tools.ts";
+import { dataDir } from "./sandbox.ts";
 
 // All git work happens on the host via the git CLI; the sandbox never sees the repo's .git (see README).
 const execFileP = promisify(execFile);
 const env = {
   ...process.env,
   GIT_TERMINAL_PROMPT: "0",
+  // No /etc/gitconfig or system gitattributes (filters, helpers) on the host's git.
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_ATTR_NOSYSTEM: "1",
   // Harness commits (passing runs, merges) never depend on the user's git identity.
   GIT_AUTHOR_NAME: "polaris",
   GIT_AUTHOR_EMAIL: "polaris@localhost",
@@ -37,17 +41,46 @@ export async function git(cwd: string, args: string[], extraEnv?: Record<string,
   }
 }
 
-// Settings validation: absolute path to the root of a repo with at least one commit, and an existing base branch
-// (default: the branch checked out there).
-export async function inspectRepo(repoPath: string, baseBranch: string): Promise<{ error: string } | { repo_path: string; base_branch: string }> {
-  if (!isAbsolute(repoPath)) return { error: "Repository path must be an absolute path" };
+const under = (p: string, root: string) => p === root || p.startsWith(root + sep);
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+
+// What is at a folder, as a state the form can act on (POL-29): not_found, not_a_repo, inside_repo (`root` is the repository's
+// root), no_commits, ok, or refused. `error` is the message project create/update fail with. Host git runs in a project's
+// repo (worktree add, merge), and repo-local config such as a smudge filter would run there, so before any git command
+// (POL-2): not under the data dir (worktrees and wikis are agent-writable), under POLARIS_REPO_ROOTS when the operator set
+// it (colon-separated), and owned by the server's user.
+// ponytail: repo-local filters and attributes of an allowed repo still run on the host; the allowlist is what keeps members off foreign repos.
+export type RepoState = { state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok" | "refused"; root?: string; error?: string };
+export async function repoState(repoPath: string): Promise<RepoState> {
+  if (!isAbsolute(repoPath)) return { state: "not_found", error: "Repository path must be an absolute path" };
+  const at = real(repoPath);
+  if (under(at, real(dataDir()))) return { state: "refused", error: "Repository path is inside Polaris's data directory" };
+  const roots = (process.env.POLARIS_REPO_ROOTS ?? "").split(":").filter(Boolean);
+  if (roots.length && !roots.some((r) => under(at, real(r)))) return { state: "refused", error: "Repository path is outside POLARIS_REPO_ROOTS" };
+  const owner = existsSync(at) ? statSync(at).uid : undefined;
+  if (owner !== undefined && process.getuid && owner !== process.getuid()) return { state: "refused", error: "Repository must be owned by the user Polaris runs as" };
+  if (!existsSync(repoPath)) return { state: "not_found", error: `${repoPath} is not a git repository (or does not exist)` };
   const top = await git(repoPath, ["rev-parse", "--show-toplevel"]).catch(() => "");
-  if (!top) return { error: `${repoPath} is not a git repository (or does not exist)` };
-  if (realpathSync(top) !== realpathSync(repoPath)) return { error: `${repoPath} is inside a git repository; use its root ${top}` };
+  if (!top) return { state: "not_a_repo", error: `${repoPath} is not a git repository (or does not exist)` };
+  if (realpathSync(top) !== realpathSync(repoPath)) return { state: "inside_repo", root: top, error: `${repoPath} is inside a git repository; use its root ${top}` };
   // Not `rev-list --all`: it also reads every linked worktree's HEAD and fails while a run's `git worktree add` is half done
   // (~13% of checks under concurrent runs), so a run queued then got "no commits yet".
   const commit = (await git(repoPath, ["rev-list", "-n1", "--branches", "--tags", "--remotes"]).catch(() => "")) || (await git(repoPath, ["rev-parse", "--verify", "-q", "HEAD"]).catch(() => ""));
-  if (!commit) return { error: "Repository has no commits yet" };
+  if (!commit) return { state: "no_commits", root: top, error: "Repository has no commits yet" };
+  return { state: "ok", root: top };
+}
+
+// Settings validation: absolute path to the root of a repo with at least one commit, and an existing base branch
+// (default: the branch checked out there).
+export async function inspectRepo(repoPath: string, baseBranch: string): Promise<{ error: string } | { repo_path: string; base_branch: string }> {
+  const st = await repoState(repoPath);
+  if (st.error) return { error: st.error };
   const base = baseBranch || (await git(repoPath, ["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => ""));
   if (!base) return { error: "HEAD is detached; set a base branch" };
   if (!(await git(repoPath, ["rev-parse", "--verify", "-q", `refs/heads/${base}^{commit}`]).catch(() => ""))) return { error: `Branch "${base}" does not exist` };
@@ -114,6 +147,22 @@ export async function addDetached(repo: string, sha: string, path: string) {
   await excludeScratch(repo);
 }
 
+// A git dir for the sandbox at `dest`: the run's HEAD and index, the repository's branches and (hard-linked) objects, the
+// repo's info/exclude, and none of its config (remote URLs and credentials), hooks, stashes or other worktrees' metadata.
+// ponytail: one hard link per object file (a copy across filesystems), once per run; alternates would be instant but put the
+// repo's path in the container.
+export async function sandboxGitDir(worktree: string, dest: string) {
+  const admin = gitDirs.get(worktree);
+  if (!admin) return false;
+  const common = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  mkdirSync(dirname(dest), { recursive: true });
+  await execFileP("git", ["clone", "-q", "--local", "--bare", common, dest]);
+  writeFileSync(join(dest, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+  for (const f of ["HEAD", "index"]) if (existsSync(join(admin, f))) copyFileSync(join(admin, f), join(dest, f));
+  if (existsSync(join(common, "info/exclude"))) copyFileSync(join(common, "info/exclude"), join(dest, "info/exclude"));
+  return true;
+}
+
 // Best effort: a half-created or already-removed worktree/branch is fine. `dataRoot` guards the rm fallback.
 export async function removeWorktree(repo: string, path: string | null, branch: string | null, dataRoot: string) {
   if (path) {
@@ -139,16 +188,39 @@ export async function changedLines(worktree: string, baseSha: string) {
   const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, POLARIS_SCRATCH));
   const count = (f: string) => {
     try {
-      return readFileSync(join(worktree, f), "utf8").match(/\n/g)?.length ?? 0;
+      // A FIFO would block the server in open(), a huge sparse file would fill its memory: only small regular files. Checked
+      // on the open descriptor (non-blocking, no symlinks), so the agent can't swap the file between the check and the read.
+      const fd = openSync(join(worktree, f), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        const st = fstatSync(fd);
+        return st.isFile() && st.size <= MAX_FILE ? readFileSync(fd, "utf8").match(/\n/g)?.length ?? 0 : 0;
+      } finally {
+        closeSync(fd);
+      }
     } catch {
-      return 0; // a symlink to a directory, an unreadable file
+      return 0; // an unreadable file, or a symlink
     }
   };
   return fresh.reduce((n, f) => n + count(f), sum);
 }
 
-export const protectedChanges = async (worktree: string, baseSha: string, protectedPaths: string[]) =>
-  (await changedPaths(worktree, baseSha)).filter((f) => isProtected(f, protectedPaths));
+// The changed paths that break the protection. read_only: anything under a protected path. add_only: a file under one that
+// existed at base and was modified, deleted or had its type changed (a rename is a delete plus an add); added and untracked
+// files are fine. `fixed` (.polaris/..., see runs.ts) are read-only in both modes.
+export async function protectedChanges(worktree: string, baseSha: string, protectedPaths: string[], mode = "read_only", fixed: string[] = []) {
+  const all = await changedPaths(worktree, baseSha);
+  if (mode !== "add_only") return all.filter((f) => isProtected(f, [...protectedPaths, ...fixed]));
+  const status = (await git(worktree, ["diff", "--name-status", "--no-renames", "-z", baseSha])).split("\0");
+  const edited = new Set<string>();
+  for (let i = 0; i + 1 < status.length; i += 2) if (status[i] !== "A") edited.add(status[i + 1]);
+  return all.filter((f) => isProtected(f, fixed) || (edited.has(f) && isProtected(f, protectedPaths)));
+}
+
+// Files under the protected paths at `baseSha`, case-folded: what add-only mode keeps agents from changing.
+export async function protectedFilesAt(worktree: string, baseSha: string, protectedPaths: string[]) {
+  const all = (await git(worktree, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0");
+  return new Set(all.filter((f) => f && isProtected(f, protectedPaths)).map(foldPath));
+}
 
 // Untracked nested repositories: directories with their own .git (or a .git file), which git lists with a trailing slash.
 // `add -A` would record one as a gitlink, and host git then reads that repo's agent-written config (filters, ...).

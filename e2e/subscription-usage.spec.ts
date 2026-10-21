@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { addProvider, more, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { addProvider, more, newTicket, openSection, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("ChatGPT connection, per-ticket GPT/local switching and complete token reporting", async ({ page }) => {
   test.setTimeout(120_000);
@@ -45,6 +45,7 @@ test("ChatGPT connection, per-ticket GPT/local switching and complete token repo
   await page.getByRole("button", { name: "Run agent", exact: true }).click();
   await expect(page.getByLabel("Status", { exact: true })).toHaveValue("review", { timeout: 60_000 });
   await expect(page.getByLabel("Ticket token usage")).toContainText("72 total processed tokens · 18 background");
+  await openSection(page, "How it got here");
   await expect(page.getByRole("table").first()).toContainText("ChatGPT plan");
 
   await page.getByRole("link", { name: "Board", exact: true }).click();

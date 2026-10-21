@@ -1,13 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
+import { listSkills } from "../server/agent/context.ts";
+import { writeWorkspaceSkills } from "../server/skills.ts";
+import { hostExec, isProtected, readAt, refuseSymlinks, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
-import { addWorktree, changedLines, changedPaths, commitAll, git, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
+import { protectedMounts } from "../server/sandbox.ts";
+import { addWorktree, changedLines, changedPaths, commitAll, git, inspectRepo, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
@@ -138,4 +141,119 @@ test("compaction refuses a planted .polaris/history symlink and writes nothing o
   const r = await runAgent({ provider: fake.provider, model: "fake", system: "s", task: "T", tools, root, compactAt: 1000, budget: { maxTurns: 20, maxTokens: 1e6 }, onEvent: () => {} });
   assert.equal(r.status, "failed");
   assert.deepEqual(readdirSync(outside), []);
+});
+
+test("file tools refuse FIFOs and oversized files without blocking the event loop (POL-6)", async () => {
+  const root = tmp("sec-fifo-");
+  execFileSync("mkfifo", [join(root, "p")]);
+  writeFileSync(join(root, "big"), ""), truncateSync(join(root, "big"), 1024 ** 3); // sparse: costs no disk
+  const t0 = Date.now();
+  for (const [name, input] of [["read_file", { path: "p" }], ["edit_file", { path: "p", old_string: "x", new_string: "y" }], ["edit_file", { path: "p", old_string: "", new_string: "y" }]] as const) {
+    const r = await call(root, name, input);
+    assert.match(JSON.stringify(r), /not a regular file/);
+  }
+  assert.match(JSON.stringify(await call(root, "read_file", { path: "big" })), /file too large/);
+  assert.ok(Date.now() - t0 < 1000);
+  // changedLines counts neither (and does not hang on the FIFO)
+  repoWith(root + "-repo");
+  const repo = root + "-repo";
+  const base = sh(repo, "git rev-parse HEAD");
+  execFileSync("mkfifo", [join(repo, "q")]);
+  writeFileSync(join(repo, "big"), ""), truncateSync(join(repo, "big"), 1024 ** 3);
+  writeFileSync(join(repo, "n.txt"), "1\n2\n");
+  assert.equal(await changedLines(repo, base), 2);
+});
+
+// The parent-dir race: `a` flips between a real dir and a symlink to a dir outside, while the tools hammer a/x.
+test("a parent dir swapped for a symlink never lets a file tool touch a file outside the root (POL-7)", async () => {
+  const outside = tmp("sec-race-out-");
+  writeFileSync(join(outside, "x"), "SENTINEL");
+  const root = tmp("sec-race-");
+  mkdirSync(join(root, "real"));
+  writeFileSync(join(root, "real/x"), "inside");
+  // The swapper is its own process: a loop in this thread could never interleave with the (synchronous) tool I/O.
+  const swapper = spawn("sh", ["-c", `while :; do rm -rf a; ln -s '${outside}' a; rm a; mkdir a; echo inside > a/x; done`], { cwd: root, stdio: "ignore" });
+  let leaked = 0;
+  for (let i = 0; i < 2000; i++) {
+    const r = JSON.stringify(await call(root, "read_file", { path: "a/x" }));
+    if (r.includes("SENTINEL")) leaked++;
+    await call(root, "edit_file", { path: "a/x", old_string: "SENTINEL", new_string: "PWNED" });
+    await call(root, "edit_file", { path: "a/x", old_string: "inside", new_string: "edited" });
+  }
+  swapper.kill();
+  assert.equal(leaked, 0);
+  assert.equal(readFileSync(join(outside, "x"), "utf8"), "SENTINEL");
+  assert.deepEqual(readdirSync(outside), ["x"]);
+});
+
+test("a symlinked .polaris fails skill/wiki setup and nothing outside is touched (POL-20)", () => {
+  const target = tmp("sec-polaris-target-");
+  mkdirSync(join(target, "workspace-skills"));
+  writeFileSync(join(target, "workspace-skills/keep.md"), "keep");
+  const root = tmp("sec-polaris-");
+  symlinkSync(target, join(root, ".polaris"));
+  assert.throws(() => writeWorkspaceSkills("ws-none", root), /\.polaris in the repository is a symlink/);
+  assert.throws(() => refuseSymlinks(root, ".polaris/wiki"), /symlink/);
+  assert.deepEqual(readdirSync(target), ["workspace-skills"]);
+  assert.equal(readFileSync(join(target, "workspace-skills/keep.md"), "utf8"), "keep");
+  // a symlinked child, and a fine tree
+  const r2 = tmp("sec-polaris-");
+  mkdirSync(join(r2, ".polaris"));
+  symlinkSync(target, join(r2, ".polaris/wiki"));
+  assert.throws(() => refuseSymlinks(r2, ".polaris/wiki"), /\.polaris\/wiki in the repository is a symlink/);
+  refuseSymlinks(r2, ".polaris/workspace-skills"); // absent: fine
+});
+
+test("skills that are symlinks leaving the checkout are skipped (POL-20)", () => {
+  const outside = tmp("sec-skill-out-");
+  writeFileSync(join(outside, "secret.md"), "---\nname: stolen\ndescription: host file\n---\n");
+  const root = tmp("sec-skill-");
+  mkdirSync(join(root, ".polaris/skills"), { recursive: true });
+  writeFileSync(join(root, ".polaris/skills/ok.md"), "---\nname: ok\ndescription: fine\n---\n");
+  symlinkSync(join(outside, "secret.md"), join(root, ".polaris/skills/x.md"));
+  assert.deepEqual(listSkills(root, "worker").map((s) => s.name), ["ok"]);
+  rmSync(join(root, ".polaris/skills"), { recursive: true });
+  symlinkSync(outside, join(root, ".polaris/skills"));
+  assert.deepEqual(listSkills(root, "worker"), []);
+});
+
+test("POL-2: a project repo_path under the data dir is refused before any git command runs; POLARIS_REPO_ROOTS limits the rest", async () => {
+  const base = tmp("sec-roots-");
+  const data = join(base, "data");
+  process.env.POLARIS_DATA_DIR = data;
+  try {
+    // A repo a sandbox built under the worktrees dir, with a smudge filter that would run on `git worktree add`.
+    const evil = repoWith(join(data, "worktrees", "run1", "evil"));
+    const marker = join(base, "SMUDGE");
+    writeFileSync(join(evil, ".gitattributes"), "* filter=evil\n");
+    sh(evil, `git config filter.evil.smudge 'touch ${marker}; cat'`);
+    assert.match(((await inspectRepo(evil, "")) as { error: string }).error, /data directory/);
+    assert.match(((await inspectRepo(join(data, "wikis", "../worktrees/run1/evil"), "")) as { error: string }).error, /data directory/);
+    const link = join(base, "link");
+    symlinkSync(evil, link);
+    assert.match(((await inspectRepo(link, "")) as { error: string }).error, /data directory/); // by realpath
+    assert.equal(existsSync(marker), false);
+
+    const mine = repoWith(join(base, "mine"));
+    const other = repoWith(join(base, "other"));
+    assert.equal("error" in (await inspectRepo(other, "")), false); // unset: any repo
+    process.env.POLARIS_REPO_ROOTS = `/nonexistent:${mine}`;
+    assert.equal("error" in (await inspectRepo(mine, "")), false);
+    assert.match(((await inspectRepo(other, "")) as { error: string }).error, /POLARIS_REPO_ROOTS/);
+    process.env.POLARIS_REPO_ROOTS = base;
+    assert.equal("error" in (await inspectRepo(other, "")), false);
+  } finally {
+    delete process.env.POLARIS_REPO_ROOTS;
+    delete process.env.POLARIS_DATA_DIR;
+  }
+});
+
+test("POL-4: a protected path that does not exist yet is created and mounted read-only; paths outside the worktree are skipped (.git has its own mounts)", () => {
+  const wt = tmp("sec-ro-");
+  mkdirSync(join(wt, ".git"));
+  mkdirSync(join(wt, "tests"));
+  const args = protectedMounts(wt, ["tests", "evals", "deep/er", "../escape"]);
+  assert.equal(existsSync(join(wt, "evals")), true);
+  assert.equal(existsSync(join(wt, "../escape")), false);
+  assert.deepEqual(args.filter((a) => a !== "-v").map((a) => a.split(":/work/")[1]), ["tests:ro", "evals:ro", "deep/er:ro"]);
 });

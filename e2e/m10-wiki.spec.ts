@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { newTicket, openTicket, saveSettings, settingsTab, signUp, tempRepo } from "./helpers.ts";
+import { newTicket, openSection, openTicket, saveSettings, settingsTab, signUp, tempRepo } from "./helpers.ts";
 
 test("M10: approving a ticket ingests it into the wiki; the next run's first message carries the index", async ({ page }) => {
   test.setTimeout(240_000);
@@ -17,6 +17,7 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
     await openTicket(page, title);
     await page.getByRole("button", { name: "Run agent" }).click();
     await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 90_000 });
+  await openSection(page, "How it got here");
   };
 
   await runTicket("Add notes", "WIKI-NOTES");

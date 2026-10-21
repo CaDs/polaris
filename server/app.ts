@@ -1,15 +1,17 @@
 import { attributedUsage, backfillUsage, treeUsage, usageSummary } from "./usage.ts";
 import { randomUUID } from "node:crypto";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { secureHeaders } from "hono/secure-headers";
 import { streamSSE } from "hono/streaming";
-import { auth } from "./auth.ts";
+import { auth, TOKEN_UA } from "./auth.ts";
 import { db, migrate } from "./db.ts";
 import { subscribe, subscribeWorkspace, touch, type Change, type LiveEvent, type StoredEvent } from "./agent/events.ts";
 import { git, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
-import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
+import { activePrompt, addPrompt, caseSet, currentLessons, decideLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, projectSettings, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, TREE, withStates } from "./planner.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -17,6 +19,7 @@ import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery
 import { AgentError } from "./agent/types.ts";
 import { chatRoutes, proposalIn } from "./chat.ts";
 import { skillRoutes } from "./skills.ts";
+import { requireRole } from "./roles.ts";
 
 migrate();
 backfillUsage();
@@ -35,7 +38,39 @@ app.onError((e, c) => {
   return c.json({ error: "internal error" }, 500);
 });
 
-app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+// The limiter's client address: the socket's, or with POLARIS_TRUST_PROXY=1 the last x-forwarded-for entry (the one a reverse
+// proxy appended, which a client can't forge). Always overwritten, so a client can't pick its own bucket; requests without a
+// socket (tests) keep the header they came with. ponytail: one bucket per address, no per-account lockout.
+// DNS rebinding: a page on another name that resolves to this machine would pass the same-host Origin check below, so only
+// loopback names, the configured public hosts (BETTER_AUTH_URL, WEB_ORIGIN) and POLARIS_ALLOWED_HOSTS (comma-separated names,
+// for reaching a HOST=0.0.0.0 server by its LAN name) are served, else 421. No Host header (tests) passes.
+app.use("*", async (c, next) => {
+  const host = c.req.header("host");
+  const name = host && URL.parse(`http://${host}`)?.hostname;
+  const ok = new Set(["localhost", "127.0.0.1", "[::1]", ...(process.env.POLARIS_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim())]);
+  for (const u of [process.env.BETTER_AUTH_URL, process.env.WEB_ORIGIN]) if (u && URL.canParse(u)) ok.add(new URL(u).hostname);
+  return host && (!name || !ok.has(name)) ? c.json({ error: "bad_host" }, 421) : next();
+});
+
+// Everything, static files and API: no framing (clickjacking Approve), no sniffing, no referrer, and a CSP that only allows our own scripts.
+app.use("*", secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", "data:"], connectSrc: ["'self'"],
+    objectSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'self'"],
+  },
+  xFrameOptions: "DENY",
+  referrerPolicy: "no-referrer",
+}));
+
+app.on(["GET", "POST"], "/api/auth/*", (c) => {
+  const req = new Request(c.req.raw);
+  const socket = (c.env as { incoming?: unknown } | undefined)?.incoming;
+  const proxied = process.env.POLARIS_TRUST_PROXY === "1" ? c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() : undefined;
+  const ip = proxied || (socket ? getConnInfo(c).remote.address : undefined);
+  if (ip) req.headers.set("x-polaris-client-ip", ip);
+  else if (socket) req.headers.delete("x-polaris-client-ip");
+  return auth.handler(req);
+});
 
 // CSRF: cookie-authenticated mutations must come from a trusted origin (BETTER_AUTH_URL, WEB_ORIGIN) or this host.
 // No Origin and no Sec-Fetch-Site means a non-browser client (curl, CLI): allowed only without a cookie.
@@ -61,6 +96,15 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+// Owners and admins only (server/roles.ts): workspace settings (caps, auto-approve, review, default models), lessons and prompts.
+app.use("/api/settings/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/settings", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.delete("/api/evals/cases/:id", (c, next) => (requireRole(c), next()));
+app.post("/api/tickets/:id/approve", (c, next) => (requireRole(c), next()));
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects (each a repository), milestones, cycles, views, members
 app.route("/api", skillRoutes); // M17: workspace skills, and each project's skills for the chat composer
@@ -96,6 +140,9 @@ const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
 const METRICS = "SELECT payload FROM events WHERE run_id = r.id AND seq = (SELECT MAX(seq) FROM events WHERE run_id = r.id AND type = 'run_metrics')";
 // The run r's latest event of a type: its last model review (findings) and how it finished (status, reason).
 const LAST = (type: string) => `SELECT payload FROM events WHERE run_id = r.id AND type = '${type}' ORDER BY seq DESC LIMIT 1`;
+
+// A run as the API shows it: without the host path of its worktree (it names the data dir and gives a member a target for repo_path).
+const pub = ({ worktree: _, ...r }: Record<string, any>) => r;
 
 // Runs are only reachable through a ticket in the caller's workspace.
 const runIn = (c: Context<Env>) =>
@@ -136,6 +183,8 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
   const raw = await c.req.json().catch(() => null);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "body must be a JSON object" };
   const b = { ...raw, ...force };
+  // A command the sandbox runs and spending limits: owners and admins only. A form that resends the current value is not a change.
+  if (["test_command", "cap_usd", "cap_tokens"].some((k) => b[k] !== undefined && String(b[k] ?? "") !== String(cur?.[k] ?? ""))) requireRole(c);
   const m = pick(c, b);
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };
@@ -222,7 +271,7 @@ app.get("/api/tickets/:id", (c) => {
   const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics, (${LAST("model_review")}) AS last_review, (${LAST("run_finished")}) AS finished
     FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
     WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({
-    ...r, metrics: r.metrics && JSON.parse(r.metrics), last_review: r.last_review && JSON.parse(r.last_review), finished: r.finished && JSON.parse(r.finished),
+    ...pub(r), metrics: r.metrics && JSON.parse(r.metrics), last_review: r.last_review && JSON.parse(r.last_review), finished: r.finished && JSON.parse(r.finished),
     usage: attributedUsage("run_id", r.id, false), background_usage: attributedUsage("run_id", r.id, true),
   }));
   if (t.kind !== "epic") return c.json({ ...t, runs, usage: attributedUsage("ticket_id", t.id), background_usage: attributedUsage("ticket_id", t.id, true) });
@@ -275,7 +324,7 @@ app.post("/api/tickets/:id/runs", async (c) => {
   if ("error" in m) return c.json(m, 400);
   const r = await enqueueRun(t.id, m.v);
   if ("error" in r) return c.json({ error: r.error }, r.status);
-  return c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
+  return c.json(pub(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId) as Record<string, any>), 201);
 });
 
 // Review queue: diff of the latest passed run, then approve (merge into the base branch) or reject (back to todo).
@@ -324,7 +373,7 @@ app.on("PUT", ["default", "review", ...MODEL_PHASES].map((p) => `/api/settings/$
   ensureSettings(c.get("workspaceId"));
   const col = c.req.path.split("/").pop()!.replace(/-provider$/, ""); // one of the listed names: safe in the SQL below
   db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
-    m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
+    m.v.provider_id ?? null, m.v.model ?? (col === "triage" ? "" : null), Date.now(), c.get("workspaceId"), // triage_model is NOT NULL, "" = off
   );
   return c.json(settingsFor(c.get("workspaceId")));
 });
@@ -361,6 +410,18 @@ const PALETTES = ["black", "graphite", "stone", "polar", "ember", "teal"];
 const MODES = ["system", "light", "dark"];
 const preferences = (userId: string) =>
   ({ palette: "black", mode: "system", ...(db.prepare("SELECT palette, mode FROM user_preferences WHERE user_id = ?").get(userId) as object | undefined) });
+// The account's live sessions: browser sign-ins and API tokens (npm run token --name, stored in userAgent). Revoking one signs it out.
+app.get("/api/me/sessions", async (c) => {
+  const current = (await auth.api.getSession({ headers: c.req.raw.headers }))?.session.id;
+  return c.json(
+    (db.prepare("SELECT id, userAgent, createdAt, updatedAt, expiresAt FROM session WHERE userId = ? ORDER BY createdAt DESC").all(c.get("userId")) as Record<string, any>[])
+      .filter((r) => new Date(r.expiresAt).getTime() > Date.now())
+      .map(({ userAgent: ua, ...r }) => ({ ...r, token: !!ua?.startsWith(TOKEN_UA), name: ua?.startsWith(TOKEN_UA) ? ua.slice(TOKEN_UA.length) : ua ?? "", current: r.id === current })),
+  );
+});
+app.delete("/api/me/sessions/:id", (c) =>
+  db.prepare("DELETE FROM session WHERE id = ? AND userId = ?").run(c.req.param("id"), c.get("userId")).changes ? c.json({ ok: true }) : c.json({ error: "session not found" }, 404));
+
 app.get("/api/me/preferences", (c) => c.json(preferences(c.get("userId"))));
 // Merges: an omitted field keeps its value.
 app.put("/api/me/preferences", async (c) => {
@@ -430,7 +491,8 @@ async function textBody(c: Context<Env>, max: number, what: string): Promise<{ e
   return { v: b.body.trim() };
 }
 
-// Every version, newest first, with the run/ticket a reflection came from. The newest is the active one.
+// Every version, newest first, with the run/ticket a reflection came from. The active one is the newest with state accepted;
+// a pending candidate (state pending) is the newest version when there is one.
 app.get("/api/lessons", (c) =>
   c.json({
     max: LESSONS_MAX,
@@ -448,6 +510,10 @@ app.put("/api/lessons", async (c) => {
   if (cur?.body === b.v || (!cur && !b.v)) return c.json(cur ?? null);
   return c.json(saveLessons(c.get("workspaceId"), b.v, { source: "human", author: email(c) }), 201);
 });
+
+// A reflection's or mining's candidate: Accept makes it the active version, Discard drops it. 404 when it is not pending.
+for (const [verb, accept] of [["accept", true], ["discard", false]] as const)
+  app.post(`/api/lessons/:id/${verb}`, (c) => (decideLessons(c.get("workspaceId"), c.req.param("id"), accept) ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404)));
 
 app.post("/api/lessons/:id/restore", (c) => {
   const l = db.prepare("SELECT * FROM lessons WHERE id = ? AND workspace_id = ?").get(c.req.param("id"), c.get("workspaceId")) as { body: string; version: number } | undefined;
@@ -521,7 +587,7 @@ app.get("/api/evals", (c) => {
   return c.json({
     cases: db.prepare(`SELECT c.*, ${ticketKey()} AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
       WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
-    runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id) })),
+    runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id).map(pub) })),
   });
 });
 
@@ -538,13 +604,13 @@ app.post("/api/evals/cases", async (c) => {
   if (!run) return c.json({ error: "This ticket was not approved through review, so there is no base commit to replay it from." }, 409);
   const s = projectSettings(t.project_id)!;
   if (t.eval_case_id) return c.json({ error: "This ticket is already an eval case." }, 409);
-  const frozen = { repo_path: s.repo_path, base_sha: run.base_sha, setup_command: s.setup_command, test_command: t.test_command ?? s.test_command, protected_paths: s.protected_paths, image: s.image };
+  const frozen = { repo_path: s.repo_path, base_sha: run.base_sha, setup_command: s.setup_command, test_command: t.test_command ?? s.test_command, protected_paths: s.protected_paths, image: s.image, protected_mode: s.protected_mode };
   const invalid = await validateCase(frozen).catch((e) => `Validation failed: ${(e as Error).message}`);
   if (invalid) return c.json({ error: invalid }, 400);
   if (ticketIn(c, t.id)?.eval_case_id) return c.json({ error: "This ticket is already an eval case." }, 409); // re-checked after the await
   const id = randomUUID();
-  db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, c.get("workspaceId"), t.id, t.title, t.spec, ...Object.values(frozen));
+  db.prepare(`INSERT INTO eval_cases (id, workspace_id, ticket_id, title, spec, repo_path, base_sha, setup_command, test_command, protected_paths, image, protected_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, c.get("workspaceId"), t.id, t.title, t.spec, ...Object.values(frozen));
   return c.json(db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(id), 201);
 });
 
@@ -610,12 +676,12 @@ app.get(`${WIKI}/diff`, async (c) => {
 for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const)
   app.post(`${WIKI}/${path}`, async (c) => {
     const r = await enqueueWiki(projectOf(c).project_id, op);
-    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
+    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(pub(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId) as Record<string, any>), 201);
   });
 
 app.get("/api/runs/:id", (c) => {
   const r = runIn(c);
-  return r ? c.json(r) : c.json({ error: "not_found" }, 404);
+  return r ? c.json(pub(r)) : c.json({ error: "not_found" }, 404);
 });
 
 app.get("/api/runs/:id/metrics", (c) => {

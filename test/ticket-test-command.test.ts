@@ -34,6 +34,6 @@ test("a ticket's own test_command replaces the workspace one in the test gate", 
   const gate = db.prepare("SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.ticket_id = ? AND e.type = 'test_result'").all(t.id) as { payload: string }[];
   const run = db.prepare("SELECT id FROM runs WHERE ticket_id = ?").get(t.id) as { id: string };
   assert.match(task(run.id), /\n- Test command: `test -f notes\.txt`\. The harness runs it after you finish/); // the worker is told its own gate
-  assert.equal(gate.length, 1);
-  assert.equal(JSON.parse(gate[0].payload).command, "test -f notes.txt");
+  assert.equal(gate.length, 2); // the in-place gate and the clean run of the commit (POL-4)
+  assert.deepEqual(gate.map((g) => JSON.parse(g.payload).command), ["test -f notes.txt", "test -f notes.txt"]);
 });

@@ -6,7 +6,7 @@ import { db } from "./db.ts";
 import { git } from "./git.ts";
 import { projectSettings } from "./runs.ts";
 import { PHASES } from "./agent/context.ts";
-import { resolveIn } from "./agent/tools.ts";
+import { refuseSymlinks, resolveIn } from "./agent/tools.ts";
 
 // M17 skills (see SPEC "Skills (M17)"). Repo skills are .polaris/skills/*.md in a project's repository (code-reviewed,
 // read-only here). Workspace skills live in the skills table: every run gets them as files in .polaris/workspace-skills/,
@@ -26,6 +26,7 @@ const slug = (r: Row) => `${r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").rep
 // Writes the workspace's skills into <root>/.polaris/workspace-skills/ (replacing what was there), as skill files. Returns
 // how many: none = no directory.
 export function writeWorkspaceSkills(ws: string, root: string) {
+  refuseSymlinks(root, WORKSPACE_SKILLS);
   const dir = join(root, WORKSPACE_SKILLS);
   rmSync(dir, { recursive: true, force: true });
   const all = rows(ws);

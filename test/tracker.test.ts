@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // M11 tracker: labels, ticket fields, filters, search, views, projects (one repo each), cycles, parent epics, priority
 // queue, planner.
@@ -216,7 +218,7 @@ test("projects: key and repository checked, ordered milestones, progress by stat
   const ok = { name: "Launch", key: "lch", repo_path: repo };
   const bad: [Record<string, unknown>, RegExp][] = [
     [{}, /name/], [{ name: "x", repo_path: repo }, /key/], [{ ...ok, key: "L" }, /key/], [{ ...ok, key: "1AB" }, /key/], [{ ...ok, key: "TOOLONG" }, /key/],
-    [{ ...ok, key: "pro" }, /already has the key PRO/], [{ ...ok, repo_path: "relative/path" }, /absolute/], [{ ...ok, repo_path: tmpdir() }, /not a git repository/],
+    [{ ...ok, key: "pro" }, /already has the key PRO/], [{ ...ok, repo_path: "relative/path" }, /absolute/], [{ ...ok, repo_path: mkdtempSync(join(tmpdir(), "plain-")) }, /not a git repository/],
     [{ ...ok, base_branch: "nope" }, /Branch "nope" does not exist/], [{ ...ok, image: "Not An Image" }, /docker image/], [{ ...ok, protected_paths: "../x" }, /Protected paths/],
     [{ ...ok, status: "done" }, /status/], [{ ...ok, lead_id: userId("alice") }, /not a member/], [{ ...ok, target_date: "2026-13-01" }, /target_date/],
   ];
@@ -404,6 +406,22 @@ test("planner create_ticket: labels by name (created when unknown), priority, es
   for (const [input, re] of [[{ labels: "bug" }, /"labels" must be an array/], [{ labels: [""] }, /label name/], [{ priority: 7 }, /"priority"/], [{ estimate: 4 }, /"estimate"/]] as const)
     assert.match((await use({ title: "x", spec: "s", ...input })).content, re);
   assert.equal(queued.length, 2);
+});
+
+test("sandbox network: a project setting, setup-only by default, and the docker flags it gives (POL-8)", async () => {
+  const { dockerRunArgs } = await import("../server/sandbox.ts");
+  const p = await project(alice, "Offline");
+  const patch = (b: object) => call("PATCH", `/api/projects/${p.id}`, alice, b);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "setup-only");
+  assert.equal((await patch({ sandbox_network: "none" })).status, 200);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "none");
+  assert.match((await patch({ sandbox_network: "host" })).body.error, /must be one of/);
+  assert.equal((await patch({ sandbox_network: null })).status, 200);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "setup-only");
+  const flags = (network: string) => dockerRunArgs("n", "/wt", [], "img:1", { cpus: 1, memory_gb: 1, network });
+  assert.ok(flags("none").join(" ").includes("--network none"));
+  assert.ok(!flags("setup-only").includes("--network") && !flags("full").includes("--network"));
+  assert.ok(["--init", "--read-only", "--memory-swap"].every((f) => flags("full").includes(f)));
 });
 
 test("sandbox size: a project setting with defaults and limits, and the docker run flags it gives", async () => {

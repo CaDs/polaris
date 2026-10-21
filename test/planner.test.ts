@@ -6,7 +6,7 @@ import { join } from "node:path";
 // M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { configure, fileTicket, call, db, events, idle, sh, task, until, user, workspace: base } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events, idle, sh, task, until, user, workspace: base, worktreeOf } = await import("./helpers.ts");
 const { createRun, subscribe } = await import("../server/agent/events.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { extractHandoff, handoffText, plannerTools, MAX_CHILDREN } = await import("../server/planner.ts");
@@ -64,7 +64,7 @@ test("epic: read-only planner round, B waits for A, approve A → B from the upd
   const calls = events(r1.id).filter((x) => x.type === "tool_call").map((x) => x.p.name);
   assert.deepEqual(calls, ["read_file", "create_ticket", "create_ticket", "finish_round"]);
   assert.equal(events(r1.id).find((x) => x.type === "round_finished")!.p.notes, "Created a.txt and b.txt tickets. Next: read their handoffs, then complete the epic.");
-  assert.equal(existsSync(r1.worktree), false);
+  assert.equal(existsSync(worktreeOf(r1.id)), false);
   assert.doesNotMatch(sh(w.repo, "git worktree list"), new RegExp(r1.id));
   assert.equal(sh(w.repo, "git status --porcelain"), "");
   assert.equal(sh(w.repo, "git rev-parse main"), init);
@@ -383,4 +383,22 @@ test("every worktree and branch is cleaned up", async () => {
     assert.equal(sh(repo, "git for-each-ref refs/heads/polaris"), "", repo);
   }
   assert.deepEqual(readdirSync(join(process.env.POLARIS_DATA_DIR!, "worktrees")), []);
+});
+
+test("POL-9: with auto-approve on, a child whose gate the planner chose (here: `true`) stays in review after passing; one on the project's gate is merged", async () => {
+  const w = await workspace("p9a", true, { wiki: false });
+  const e = (await fileTicket(w.cookie, { title: "E", kind: "epic" })).body;
+  const use = (input: Record<string, unknown>) =>
+    runTool(plannerTools(e, {}, 0, async () => undefined), { type: "tool_use", id: "x", name: "create_ticket", input }, { root: w.repo, exec: hostExec });
+  await use({ title: "Create a.txt", spec: "s", test_command: "true" }); // the gate a prompt-injected planner would pick
+  await use({ title: "Create b.txt", spec: "s" });
+  const kids = (await w.get(e.id)).children;
+  assert.deepEqual(kids.map((k: any) => k.test_command), ["true", null]);
+  for (const k of kids) assert.equal((await call("POST", `/api/tickets/${k.id}/runs`, w.cookie)).status, 201); // the test's startChild is a no-op
+  await w.is(kids[1].id, "done");
+  await w.is(kids[0].id, "review");
+  await idle(e.workspace_id);
+  assert.equal((await w.get(kids[0].id)).status, "review"); // a human reads the diff and the gate
+  assert.equal(sh(w.repo, "git ls-tree -r --name-only main"), "README.md\nb.txt");
+  db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id);
 });

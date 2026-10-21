@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, statSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { AgentError, type ErrorKind, type ToolDef, type ToolUseBlock } from "./types.ts";
@@ -8,8 +8,10 @@ import { AgentError, type ErrorKind, type ToolDef, type ToolUseBlock } from "./t
 export type ExecResult = { stdout: string; stderr: string; code: number | null; timedOut: boolean };
 export type Exec = (command: string, opts: { cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<ExecResult>;
 // protectedPaths: repo-relative dirs/files edit_file must not write (tests/, evals/). The sandbox also mounts them read-only.
+// addOnly: the project's protected paths in add-only mode: new files may be written there, but not the `existing` ones
+// (case-folded paths that existed at the run's base commit, see foldPath).
 // turn/callId/tool name the spill file of a long result (see spill below). reads: read_file outputs of the current conversation (loop.ts).
-type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
+type ToolContext = { root: string; exec: Exec; signal?: AbortSignal; protectedPaths?: string[]; addOnly?: { paths: string[]; existing: Set<string> }; turn?: number; callId?: string; tool?: string; reads?: Map<string, { out: string; turn: number }> };
 export type Tool = { def: ToolDef; run: (input: Record<string, unknown>, ctx: ToolContext) => Promise<string> };
 
 const MAX_OUTPUT = 30_000; // read_file only: shell/search output over SPILL_AT goes to a file instead
@@ -41,36 +43,64 @@ export function writeScratch(root: string, rel: string, text: string, append = f
   writeAt(join(resolveIn(root, dirname(rel)), basename(rel)), text, append ? constants.O_APPEND : constants.O_TRUNC);
 }
 
-// Files at a resolveIn path are opened once, by descriptor, never following a final symlink: one planted after the check
-// (by a process still running in the sandbox) fails instead of redirecting the read or write outside root. null: no file.
-// ponytail: a parent dir swapped for a symlink between resolveIn and open still wins; openat if that matters.
+// Files at a resolveIn path (a real path) are opened once, by descriptor, never following a final symlink: one planted after
+// the check (by a process still running in the sandbox) fails instead of redirecting the read or write outside root.
+// O_NONBLOCK: a FIFO with no writer would block the whole server in open(); it is then refused as not a regular file.
+// A swapped parent dir is caught after the open: the fd must be the file that `file` still names, with no symlink in its
+// parents (realpath of /proc/self/fd/N on Linux; elsewhere realpath of `file` plus dev/ino equal to the fd's). So a
+// write opens without O_TRUNC and truncates only after that check. null: no file.
+// ponytail: mkdir of missing parent dirs (writeAt) and O_CREAT itself still follow a parent swapped in that instant: on
+// macOS (no /proc) an empty file or dir can land outside root, never content; openat would close it.
+export const MAX_FILE = 5_000_000; // read_file/edit_file/apply_patch refuse bigger files
 function openAt(file: string, flags: number) {
+  let fd: number;
   try {
-    return openSync(file, flags | constants.O_NOFOLLOW, 0o644);
+    fd = openSync(file, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o644);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
     if (code === "ELOOP") throw new AgentError("InvalidArguments", `refusing to follow a symlink: ${file}`);
     if (code === "EEXIST") throw new AgentError("InvalidArguments", `already exists: ${file}`);
+    if (code === "ENXIO") throw new AgentError("InvalidArguments", `not a regular file: ${file}`); // a FIFO with no reader
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new AgentError("InvalidArguments", `not a regular file: ${file}`);
+    let moved: boolean;
+    try {
+      moved = process.platform === "linux" ? realpathSync(`/proc/self/fd/${fd}`) !== file : (() => {
+        const now = statSync(file);
+        return realpathSync.native(file) !== file || now.ino !== st.ino || now.dev !== st.dev;
+      })();
+    } catch {
+      moved = true;
+    }
+    if (moved) throw new AgentError("InvalidArguments", `path changed while opening: ${file}`);
+    return { fd, size: st.size };
+  } catch (e) {
+    closeSync(fd);
     throw e;
   }
 }
 export function readAt(file: string) {
-  const fd = openAt(file, constants.O_RDONLY);
-  if (fd === null) return null;
+  const f = openAt(file, constants.O_RDONLY);
+  if (f === null) return null;
   try {
-    return readFileSync(fd);
+    if (f.size > MAX_FILE) throw new AgentError("InvalidArguments", `file too large (${f.size} bytes, max ${MAX_FILE}): ${file}`);
+    return readFileSync(f.fd);
   } finally {
-    closeSync(fd);
+    closeSync(f.fd);
   }
 }
 export function writeAt(file: string, text: string, mode: number = constants.O_TRUNC) {
   mkdirSync(dirname(file), { recursive: true });
-  const fd = openAt(file, constants.O_WRONLY | constants.O_CREAT | mode)!;
+  const f = openAt(file, constants.O_WRONLY | constants.O_CREAT | (mode & ~constants.O_TRUNC))!;
   try {
-    writeFileSync(fd, text);
+    if (mode & constants.O_TRUNC) ftruncateSync(f.fd);
+    writeFileSync(f.fd, text);
   } finally {
-    closeSync(fd);
+    closeSync(f.fd);
   }
 }
 function unlinkAt(file: string, p: string) {
@@ -106,6 +136,19 @@ export function resolveIn(root: string, p: string) {
   }
   if (real !== realRoot && !real.startsWith(realRoot + sep)) throw new AgentError("InvalidArguments", `path is outside the workspace: ${p}`);
   return real;
+}
+
+// Host-side setup that writes under <root>/.polaris (skills, wiki) must not write through a symlink the repo committed there
+// (`.polaris -> ~/somewhere`): refuses when any of the given repo-relative paths, or a parent of one, is a symlink.
+export function refuseSymlinks(root: string, ...rels: string[]) {
+  for (const rel of rels)
+    for (let p = rel; p !== "."; p = dirname(p)) {
+      try {
+        if (lstatSync(join(root, p)).isSymbolicLink()) throw new AgentError("UnexpectedEnvironment", `${p} in the repository is a symlink; Polaris will not write through it`);
+      } catch (e) {
+        if (e instanceof AgentError) throw e; // not there yet is fine
+      }
+    }
 }
 
 const badInput = (message: string) => Object.assign(new AgentError("InvalidArguments", message), { badInput: true });
@@ -168,6 +211,9 @@ export const hostExec: Exec = (command, { cwd, timeoutMs, signal }) => {
   return capture(child, kill, { timeoutMs, signal });
 };
 
+// The paths to mount read-only (sandbox.ts openSandbox): add-only mode leaves the project's paths writable, since new files
+// must be creatable there; the fixed ones (.polaris/wiki, workspace skills, ...) are read-only whatever the mode.
+export const readOnlyPaths = (paths: string[], mode: string, fixed: string[] = []) => [...(mode === "add_only" ? [] : paths), ...fixed];
 // "tests/, ./evals" → ["tests", "evals"]. Entries are repo-relative; settings reject "..".
 export const parseProtected = (list: string) =>
   list.split(",").map((p) => p.trim().replace(/^(\.\/)+|\/+$/g, "")).filter(Boolean);
@@ -183,6 +229,7 @@ const caseless = (() => {
   }
 })();
 const fold = (s: string) => (caseless ? s.toLowerCase() : s);
+export const foldPath = fold;
 
 // True if `rel` (repo-relative, "/"-separated) is or is under one of the (parsed) protected paths.
 export function isProtected(rel: string, protectedPaths: string[]) {
@@ -192,10 +239,12 @@ export function isProtected(rel: string, protectedPaths: string[]) {
 
 // Path for writing: inside root, not protected, and no .git anywhere in it (a .git file or dir is what the host's git
 // reads: pointed at agent-written config, it runs commands on the host). Returns the real path.
-function writable(root: string, p: string, protectedPaths: string[]) {
+function writable(root: string, p: string, protectedPaths: string[], addOnly?: ToolContext["addOnly"]) {
   const file = resolveIn(root, p);
   const rel = relative(realpathSync.native(root), file).split(sep).join("/");
   if (isProtected(rel, protectedPaths) || rel.split("/").some((s) => fold(s) === ".git")) throw new AgentError("InvalidArguments", `${p} is read-only (protected path)`);
+  if (addOnly?.existing.has(fold(rel)) && isProtected(rel, addOnly.paths))
+    throw new AgentError("InvalidArguments", `${p} existed before this run under a protected path: add new files instead of changing it`);
   return file;
 }
 
@@ -253,11 +302,11 @@ const editFile: Tool = {
       required: ["path", "old_string", "new_string"],
     },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const p = str(input, "path")!;
     const oldS = str(input, "old_string")!;
     const newS = str(input, "new_string")!;
-    const file = writable(root, p, protectedPaths);
+    const file = writable(root, p, protectedPaths, addOnly);
     const text = readAt(file)?.toString("utf8");
     if (oldS === "") {
       if (text !== undefined) throw new AgentError("InvalidArguments", `${p} already exists; old_string must be non-empty to edit it`);
@@ -283,9 +332,9 @@ const deleteFile: Tool = {
     description: "Delete a file.",
     input_schema: { type: "object", properties: { path: { type: "string", description: "Path relative to the workspace root" } }, required: ["path"] },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const p = str(input, "path")!;
-    const file = writable(root, p, protectedPaths);
+    const file = writable(root, p, protectedPaths, addOnly);
     unlinkAt(file, p);
     return `deleted ${p}`;
   },
@@ -331,7 +380,7 @@ const applyPatch: Tool = {
     description: `Add, update or delete files with one patch. ${PATCH_HELP} Context lines must match the file; paths are relative to the workspace root.`,
     input_schema: { type: "object", properties: { patch: { type: "string" } }, required: ["patch"] },
   },
-  async run(input, { root, protectedPaths = [] }) {
+  async run(input, { root, protectedPaths = [], addOnly }) {
     const lines = str(input, "patch")!.replace(/\r\n/g, "\n").split("\n");
     while (lines.at(-1) === "") lines.pop();
     if (lines[0]?.trim() !== "*** Begin Patch" || lines.at(-1)?.trim() !== "*** End Patch") throw new AgentError("InvalidArguments", `patch must start with '*** Begin Patch' and end with '*** End Patch'. ${PATCH_HELP}`);
@@ -343,7 +392,7 @@ const applyPatch: Tool = {
       const m = /^\*\*\* (Add|Delete|Update) File: (.+)$/.exec(lines[i].trim());
       if (!m) throw new AgentError("InvalidArguments", `unexpected line in patch: ${lines[i]}. ${PATCH_HELP}`);
       const [, op, p] = m;
-      const file = writable(root, p.trim(), protectedPaths);
+      const file = writable(root, p.trim(), protectedPaths, addOnly);
       let j = i + 1;
       while (j < lines.length - 1 && !lines[j].startsWith("*** ")) j++;
       const body = lines.slice(i + 1, j).filter((l) => l !== "*** End of File");

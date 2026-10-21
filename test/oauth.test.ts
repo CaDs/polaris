@@ -18,6 +18,8 @@ let refreshes = 0;
 let revoked = 0;
 let refreshGate: Promise<void> | undefined;
 const authReqs: URLSearchParams[] = [];
+let trapHits = 0;
+const trap = await listen((_req, res) => (trapHits++, void res.end("trap")));
 const auth = await listen(async (req, res) => {
   if (req.url === "/.well-known/openid-configuration") return void res.end(JSON.stringify({ issuer: auth.url, jwks_uri: `${auth.url}/jwks`, revocation_endpoint: `${auth.url}/revoke` }));
   if (req.url === "/jwks") return void res.end(JSON.stringify({ keys: [jwk] }));
@@ -27,6 +29,8 @@ const auth = await listen(async (req, res) => {
   if (req.url === "/revoke") { revoked++; return void res.end(); }
   if (req.url !== "/api/accounts/oauth/token") return void res.writeHead(404).end();
   authReqs.push(b);
+  if (mode === "redirect") return void res.writeHead(307, { location: `${trap.url}/steal` }).end();
+  if (mode === "bad_shape") return void res.end(JSON.stringify({ access_token: { a: 1 }, token_type: "Bearer", expires_in: 3600 }));
   if (b.get("grant_type") === "refresh_token") { refreshes++; await refreshGate; }
   if (mode === "invalid_grant") return void res.writeHead(400).end(JSON.stringify({ error: "invalid_grant" }));
   const id_token = await new SignJWT({ nonce: mode === "bad_nonce" ? "wrong" : nonce, email: "me@example.com" })
@@ -61,7 +65,7 @@ async function start(id: string, consent = false) {
   nonce = url.searchParams.get("nonce")!;
   return { url, callback: `${url.searchParams.get("redirect_uri")}?state=${url.searchParams.get("state")}&code=code-1&client_id=oaiapp_polaris_test` };
 }
-const tokens = (id: string) => JSON.parse(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id=?").get(id) as any).encrypted_secret)) as import("../server/oauth.ts").Tokens;
+const tokens = (id: string) => JSON.parse(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id=?").get(id) as any).encrypted_secret, `providers:${id}`)) as import("../server/oauth.ts").Tokens;
 
 test("dynamic registration: own client, stable host, exact loopback URI, nonce, scopes and PKCE", async () => {
   const p = await make();
@@ -139,7 +143,7 @@ test("plan permission, public catalog and namespaced tool/result round trip; tok
 test("concurrent refresh rotates once; logout retains registration and prevents use; foreign workspaces are refused", async () => {
   const p = await make();
   await fetch((await start(p.id)).callback);
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 }), `providers:${p.id}`), p.id);
   const before = refreshes;
   await Promise.all([freshTokens(providerById(p.id)!), freshTokens(providerById(p.id)!)]);
   assert.equal(refreshes, before + 1);
@@ -156,7 +160,7 @@ test("concurrent refresh rotates once; logout retains registration and prevents 
 
 test("legacy credentials need reconnect; callback replay and cancellation cannot save credentials", async () => {
   const p = await make();
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ access: "legacy", refresh: "legacy", account_id: "old" })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ access: "legacy", refresh: "legacy", account_id: "old" }), `providers:${p.id}`), p.id);
   const view = (await call("GET", "/api/providers", cookie)).body.find((x: any) => x.id === p.id);
   assert.equal(view.account.status, "reconnect_required");
   assert.equal(view.has_secret, false);
@@ -188,7 +192,7 @@ test("plan usage limits pause inference until the user explicitly tests again", 
 test("logout wins over an in-flight refresh and revokes the discarded replacement", async () => {
   const p = await make();
   await fetch((await start(p.id)).callback);
-  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 })), p.id);
+  db.prepare("UPDATE providers SET encrypted_secret=? WHERE id=?").run(encrypt(JSON.stringify({ ...tokens(p.id), expires: 0 }), `providers:${p.id}`), p.id);
   let release!: () => void;
   refreshGate = new Promise<void>((done) => { release = done; });
   const before = refreshes;
@@ -204,4 +208,14 @@ test("logout wins over an in-flight refresh and revokes the discarded replacemen
   assert.equal(revoked, beforeRevoked + 2, "revoke both the old credential and the discarded rotation");
 });
 
-test.after(() => { for (const id of oauth.logins.keys()) oauth.cancelLogin(id); auth.srv.close(); apiServer.srv.close(); });
+test.after(() => { for (const id of oauth.logins.keys()) oauth.cancelLogin(id); auth.srv.close(); apiServer.srv.close(); trap.srv.close(); });
+
+test("token endpoint: a redirect is never followed, and a token of the wrong shape is refused (POL-26)", async () => {
+  const cur = { version: 2, client_id: "oaiapp_polaris_test", host_id: "h", issuer: auth.url, subject: "person-1", refresh: "refresh-x", scopes: [] } as any;
+  mode = "redirect";
+  await assert.rejects(oauth.refreshTokens(cur));
+  assert.equal(trapHits, 0, "the refresh token went nowhere else");
+  mode = "bad_shape";
+  await assert.rejects(oauth.refreshTokens(cur), /OpenAI token request failed/);
+  mode = "ok";
+});

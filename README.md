@@ -64,7 +64,7 @@ how long), see tokens and cost per run, and replay any transcript. On a wide scr
 | **Model review** | After the tests pass, the same model (or a reviewer model you pick per workspace) reviews the change with read-only tools and returns findings, which go back to the worker to fix (up to 3 reviews, so 2 fix rounds, per attempt). Any file the reviewer writes is undone. Its budget scales with the size of the diff. |
 | **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. Monthly spending caps per workspace and caps per epic or ticket (cost or tokens). A stuck monitor nudges, then ends an attempt that repeats itself or stops making progress. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
-| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage with a decision model. |
+| **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage (a chat model or an Ollama decision model) and an optional escalation model for the last attempt. |
 | **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
 | **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). Failure mining: per-run metrics, failure classes and draft improvement tickets. A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
 | **Tracker** | Labels, priority (the run queue starts urgent tickets first), assignee, estimate, due date, projects with milestones, cycles (sprints), filters as shareable URLs, full-text search, saved views, command palette (Cmd/Ctrl+K), keyboard shortcuts, comments, a notification bell (runs to review, failures, comments) and a live board over a workspace event stream. |
@@ -114,7 +114,13 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
 2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
    with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
-   Protected paths default to `tests/,evals/`. Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
+   The form detects the repository as soon as the folder is set (from a subfolder it offers the repository root), lists its branches
+   (the checked-out one is preselected) and prefills the commands and protected paths from the base branch; it warns when the settings
+   protect or gate nothing.
+   Protected paths are your tests, which agents must not weaken; they default to `tests/,evals/`, and `POST /api/projects/inspect`
+   suggests them (and the commands) from the repository's base branch. **Add-only** (the default) lets agents add new files there,
+   such as regression tests, but not change, delete or rename ones that existed when the run started; **read-only** lets them touch nothing there.
+   Add a project per repository; each gets its group in the sidebar. The switcher at the top of the sidebar
    picks the project you work in (a new one is picked for you): new tickets, the home page and the Agent's chats (each chat belongs to one project) follow it.
 3. **Settings → Models**: add Ollama (`http://localhost:11434`), Anthropic or OpenAI, click **Test**, then pick the
    workspace's default provider and model.
@@ -173,17 +179,21 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 
 | Variable | Purpose |
 |---|---|
-| `BETTER_AUTH_SECRET` | Session signing secret (required, 32+ characters) |
+| `BETTER_AUTH_SECRET` | Session signing secret (required: the server exits without 32+ characters or with the `.env.example` placeholder) |
 | `BETTER_AUTH_URL` | Public URL of the API (default `http://localhost:3000`) |
 | `WEB_ORIGIN` | Origin of the dashboard (default `http://localhost:5173` in dev) |
 | `POLARIS_SECRET_KEY` | 64 hex characters; encrypts provider API keys and OAuth tokens at rest |
+| `POLARIS_TRUST_PROXY=1` | Take the client address for sign-in rate limiting from the last `X-Forwarded-For` entry (only behind a proxy that sets it) |
+| `POLARIS_ALLOWED_HOSTS` | Extra host names the server answers to (comma-separated), e.g. a LAN name when `HOST=0.0.0.0`; loopback names and the hosts of `BETTER_AUTH_URL`/`WEB_ORIGIN` always work, other `Host` headers get 421 |
 | `PORT` | API port (default 3000) |
 | `HOST` | Interface the API listens on (default `127.0.0.1`; `0.0.0.0` exposes it to your network) |
 | `POLARIS_OPEN_SIGNUP=1` | Allow sign-ups after the first account (by default the first account is the owner and sign-up then closes) |
 | `DB_PATH` | SQLite database file (default `polaris.db`) |
 | `POLARIS_DATA_DIR` | Worktrees, wikis and run data (default `./data`) |
+| `POLARIS_REPO_ROOTS` | Optional, colon-separated: a project's repository must sit under one of these directories (unset: any path; the data dir is always refused) |
 | `POLARIS_CONCURRENCY` | Runs at the same time (default 2; use 1 with a single local model) |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama) |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama). Used only by the first account's workspaces and those in `POLARIS_ENV_PROVIDER_WORKSPACES` |
+| `POLARIS_ENV_PROVIDER_WORKSPACES` | Comma-separated workspace ids besides the first account's that may use the fallback provider |
 | `POLARIS_MODEL` | Model of the fallback provider and the CLI (default `claude-sonnet-5-5`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI providers saved without one (default `https://api.openai.com`) |
 | `POLARIS_ALLOW_HTTP_PROVIDERS=1` | Allow plain http to a provider on a public address (default: http only on this machine or a private network, so a key never crosses the internet unencrypted). Never opens cloud-metadata addresses |
@@ -198,9 +208,10 @@ Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARI
 
 ### Workspace settings (Settings page)
 
-One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model),
-**Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
-Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
+One tab per concern, each with its own Save: **Models** (providers, default model, model review (on) and its reviewer model, and **Models per phase**: planner, chat, wiki,
+**escalation** (takes a ticket's last attempt, or the retry after a budget ran out, from the default model; never replaces a model you
+picked; off by default) and **triage** (sizes a new ticket before its first run, on any chat model or an Ollama decision model; off by default)),
+**Automation** (auto-approve child tickets (off), automatic splitting (on), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
 minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
 the default. **Appearance** is yours alone: a palette (Black + Blue by default, Graphite, Stone & Ink, Polar Night, Ember,
 Deep Teal) and light/dark/system, saved for your account. Mode and sign-out are also in the account menu at the foot of the sidebar. A project's repository, base branch,
@@ -210,7 +221,7 @@ setup and test commands, protected paths and sandbox image are on its **Overview
 
 - `.polaris/skills/<name>.md` with `name` and `description` frontmatter: agents see the list and read the skills they need.
   Add `phases: worker, reviewer` (any of worker, planner, reviewer, chat) to offer a skill only to those agents; without it,
-  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat and wiki their own model.
+  the worker and the planner see it. Settings → Models → Models per phase gives the planner, chat, wiki, escalation and triage their own model.
 - Polaris also creates `.polaris/outputs/`, `.polaris/history/` and `.polaris/wiki/` inside its worktrees. They are
   git-excluded and never committed.
 
@@ -237,7 +248,7 @@ You don't have to sit in the dashboard. Polaris is also an MCP server, so you ca
 tickets from the conversation where the work was discussed:
 
 ```sh
-npm run token        # prints an API token (valid 365 days; --email to pick the account, --days to change it)
+npm run token        # prints an API token (valid 30 days; --email to pick the account, --days to change it, --name to label it in Settings > Account, where it can be revoked)
 claude mcp add polaris -s user -e POLARIS_TOKEN=<token> -- node "$PWD/server/mcp.ts"
 ```
 
@@ -307,7 +318,7 @@ an Apple M4 Max:
   - inviting members and switching workspaces in the UI;
   - formatted dates.
 - **Hardening:**
-  - containers have network access;
+  - the sandbox's network is cut after the setup command, but a project set to `full` (or the setup command itself) can still send data out;
   - spending caps are checked between agent sessions, so a session in flight can overshoot a cap;
   - a reviewer that errors is skipped (fail-open) and the change still goes to human review;
   - the CLI (`npm run agent`) runs on the host with no sandbox, test gate or spending cap;
@@ -334,16 +345,24 @@ tasks.md          milestone checklist
 - **Server.** Listens on `127.0.0.1` unless `HOST` says otherwise. The first account is the owner; sign-up then closes
   (`POLARIS_OPEN_SIGNUP=1` reopens it). Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` requests must come from a
   trusted origin (`BETTER_AUTH_URL`, `WEB_ORIGIN` or the API's own host). The ChatGPT sign-in callback listens on
-  `127.0.0.1` only.
+  `127.0.0.1` only. Sign-in and sign-up are limited to 5 a minute per client address (stored in the database, so a restart
+  doesn't reset it). Behind a reverse proxy every client shares the proxy's address: set `POLARIS_TRUST_PROXY=1` and make
+  the proxy set `X-Forwarded-For` itself (Polaris uses the last entry); otherwise leave it unset. Every response carries a
+  CSP (own scripts only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`,
+  so no page can frame the dashboard; requests with an unknown `Host` header get 421 (DNS rebinding).
+- **Roles.** A workspace's creator is its `owner`; other members are `member` unless an owner makes them `admin`. Only owners
+  and admins change providers, workspace settings, prompts and lessons, a project's repository and commands, a ticket's test
+  command and caps, and approve (merge); members read, file and edit tickets, comment, run, reject and chat.
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.
-- **Agents.** Workers and reviewers run in Docker containers limited to the project's CPUs and memory (default 4 and 4 GB) and 512 processes, with network
-  access, as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
+- **Agents.** Workers and reviewers run in Docker containers limited to the project's CPUs and memory (default 4 and 4 GB) and 512 processes, with a read-only root, no swap, and a network only while the setup command runs (project setting
+  *Sandbox network*: setup-only (default), none, full; agents and tests never have one unless `full`), as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
   gid, so files agents create in the worktree are yours; under Docker Desktop it is the image's `polaris` (1000:1000),
-  and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid, so it needs a writable `HOME`.
+  and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid with `HOME=/home/polaris` (a tmpfs). Polaris refuses to run sandboxes as root
+  (`POLARIS_ALLOW_ROOT_SANDBOX=1` overrides) and stops a sandbox whose worktree passes 5 GB (`POLARIS_WORKTREE_MAX_MB`).
   The built-in image is rebuilt when its `polaris.image.version` label is older than the harness expects.
-  Your protected paths, the worktree's `.git` file and the repo's git dir are mounted read-only. The file tools never
+  Your protected paths (in read-only mode; add-only mode enforces them in the file tools and the gate, so agents can add files there) and a throwaway git dir (the run's HEAD, index, branches and objects; no config, remotes or host path) are mounted read-only; the npm cache is a volume per repository. The file tools never
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.
 - **Host git.** Every git command the harness runs has hooks and fsmonitor off, and addresses a run's worktree by the git
@@ -351,5 +370,5 @@ tasks.md          milestone checklist
   and a change that contains one fails the test gate. Harness writes into a worktree (spilled
   output, history) refuse symlinks. The sandbox image setting must be a plain image reference.
 - **Scope.** Built for a single trusted user on their own machine. Anyone who can sign in can point a workspace at any
-  git repository the server's user can read, merge into it, and spend the `ANTHROPIC_API_KEY` fallback. It is not
+  git repository the server's user can read, merge into it, and spend the `ANTHROPIC_API_KEY` fallback (only the first account's workspaces use it unless listed in `POLARIS_ENV_PROVIDER_WORKSPACES`). It is not
   hardened for untrusted users or workspaces side by side.

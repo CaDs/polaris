@@ -3,7 +3,7 @@ import { Providers } from "./Providers.tsx";
 import { SkillsTab } from "./Skills.tsx";
 import { LabelSettings } from "./tracker.tsx";
 import { Caps, type Usage } from "./Usage.tsx";
-import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useProviders } from "./ui.tsx";
+import { Alert, Loading, ModelPicker, PALETTES, api, when, useApi, useAppearance, useProviders } from "./ui.tsx";
 
 type WorkspaceSettings = {
   compact_at_tokens: number; updated_at?: number; default_provider_id: string | null; default_model: string | null;
@@ -16,12 +16,14 @@ const PHASES = [
   ["planner", "Planner", "Plans epics into child tickets. Default: the workspace default."],
   ["chat", "Chat", "Answers in the chat panel and proposes tickets. Default: the workspace default."],
   ["wiki", "Wiki", "Keeps the project wiki up to date after each approval. Default: the model of the run it documents."],
+  ["escalation", "Escalation", "Takes the last attempt of a ticket the default model couldn't finish, and the retry after a worker ran out of turns, time or tokens. A model picked on a ticket or with Retry with… is never replaced. Default: off (every attempt uses the same model)."],
+  ["triage", "Triage", "Sizes a new ticket before its first run; large ones are split instead of run. Any chat model, or an Ollama decision model (System One). Needs \"Split tickets that fail\" on (Automation). Default: off."],
 ] as const;
 type Phase = (typeof PHASES)[number][0];
 
 // One page per concern, in setup order; Appearance is the caller's own. A project's repository and commands are on its
 // Overview page.
-const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["skills", "Skills"], ["appearance", "Appearance"]] as const;
+const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["skills", "Skills"], ["appearance", "Appearance"], ["account", "Account"]] as const;
 
 export function Settings({ tab = "models", go }: { tab?: string; go: (to: string) => void }) {
   const [s, setS] = useState<WorkspaceSettings | null>(null);
@@ -47,6 +49,8 @@ export function Settings({ tab = "models", go }: { tab?: string; go: (to: string
           <SkillsTab />
         ) : tab === "appearance" ? (
           <AppearanceTab />
+        ) : tab === "account" ? (
+          <AccountTab />
         ) : null}
       </div>
     </div>
@@ -94,7 +98,10 @@ function ModelsTab({ s, saved }: Tab) {
   const [pick, setPick] = useState({ provider_id: s.default_provider_id, model: s.default_model });
   const [reviewer, setReviewer] = useState({ provider_id: s.review_provider_id, model: s.review_model });
   const [review, setReview] = useState(!!s.model_review);
-  const [phases, setPhases] = useState(() => Object.fromEntries(PHASES.map(([p]) => [p, { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] }])));
+  // Triage with no provider of its own runs on the default one: show that provider, so its saved model stays visible.
+  const [phases, setPhases] = useState(() => Object.fromEntries(PHASES.map(([p]) => [p, {
+    provider_id: s[`${p}_provider_id`] ?? (p === "triage" && s.triage_model ? s.default_provider_id : null), model: s[`${p}_model`] || null,
+  }])));
   const also = () => Promise.all([
     api("/api/settings/default-provider", "PUT", pick), api("/api/settings/review-provider", "PUT", reviewer),
     ...PHASES.map(([p]) => api(`/api/settings/${p}-provider`, "PUT", phases[p])),
@@ -125,7 +132,7 @@ function ModelsTab({ s, saved }: Tab) {
         <p className="muted">Give a phase its own model, e.g. a smaller local model for chat and the wiki and your strongest one for the worker.</p>
         {PHASES.map(([p, name, hint]) => (
           <div key={p}>
-            <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
+            <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} decision={p === "triage"} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
             <span className="hint">{hint}</span>
           </div>
         ))}
@@ -136,12 +143,7 @@ function ModelsTab({ s, saved }: Tab) {
 
 function AutomationTab({ s, saved }: Tab) {
   const [split, setSplit] = useState(!!s.auto_split);
-  // Triage runs on the workspace's default provider, which must be Ollama (server/runs.ts triageTicket).
-  const [providers] = useProviders();
-  const ollama = providers?.find((p) => p.id === s.default_provider_id && p.kind === "ollama");
-  const [models, setModels] = useState<string[]>([]);
-  useEffect(() => void (ollama && api<{ models: string[] }>(`/api/providers/${ollama.id}/models`).then((r) => setModels(r.models), () => {})), [ollama?.id]);
-  const options = s.triage_model && !models.includes(s.triage_model) ? [s.triage_model, ...models] : models;
+  // The triage model is picked under Models → Models per phase.
   return (
     <Form s={s} saved={saved}>
       <h2>Epics and planner</h2>
@@ -159,17 +161,10 @@ function AutomationTab({ s, saved }: Tab) {
         A ticket that fails its last attempt is replaced by a "Split:" epic with the same spec and what the attempt left behind; its planner breaks
         it into smaller tickets. Not for children of a sub-epic (depth limit).
       </span>
-      <label>
-        Triage model
-        <select name="triage_model" defaultValue={s.triage_model} disabled={!split || !ollama}>
-          <option value="">Off</option>
-          {options.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
-        <span className="hint">
-          {!split ? "Needs splitting on. " : !ollama ? "Needs an Ollama provider as the default model (Models tab). " : ""}
-          Scores a new ticket's size before its first run; large tickets are split instead of run. Errors never block the run.
-        </span>
-      </label>
+      <span className="hint">
+        {split ? "" : "Triage needs splitting on. "}Triage (a model that scores a new ticket's size before its first run, so large tickets are split instead of run) is set
+        under Models, Models per phase.
+      </span>
       <label>
         Child size hint
         <input name="child_size_hint" defaultValue={s.child_size_hint} spellCheck={false} />
@@ -233,6 +228,39 @@ function LimitsTab({ s, saved, go }: Tab & { go: (to: string) => void }) {
 
 // Yours alone, in every workspace and browser: saved on the server the moment you pick. Each card previews its palette
 // (data-palette scopes the tokens to the card) in the current light or dark mode.
+// Your sign-ins and API tokens (npm run token -- --name x). Revoking one signs it out at once.
+type SessionRow = { id: string; token: boolean; name: string; current: boolean; createdAt: string; updatedAt: string; expiresAt: string };
+function AccountTab() {
+  const [rows, setRows] = useState<SessionRow[] | null>(null);
+  const [error, setError] = useState("");
+  const load = () => api<SessionRow[]>("/api/me/sessions").then(setRows, (e) => setError(e.message));
+  useEffect(() => void load(), []);
+  if (!rows) return <Loading error={error} />;
+  return (
+    <section aria-label="Sessions and tokens">
+      <h2>Sessions and API tokens</h2>
+      <p className="muted">Tokens come from <code>npm run token -- --name claude-code</code> and last 30 days by default. Revoke one you no longer use or that may have leaked.</p>
+      <Alert error={error} />
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th /></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.token ? r.name : "Browser sign-in"}{r.current && " (this one)"}</td>
+                <td>{when(r.createdAt)}</td>
+                <td>{when(r.updatedAt)}</td>
+                <td>{when(r.expiresAt)}</td>
+                <td><button className="btn danger" aria-label={`Revoke ${r.token ? r.name : "browser sign-in"}`} onClick={() => api(`/api/me/sessions/${r.id}`, "DELETE").then(load, (e) => setError(e.message))}>Revoke</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function AppearanceTab() {
   const { appearance, set } = useAppearance();
   return (

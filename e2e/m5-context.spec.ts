@@ -1,5 +1,5 @@
 import { test, expect, type Route } from "@playwright/test";
-import { git, more, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
+import { git, more, newTicket, openSection, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 test("M5: spilled output, compaction, skills, cache hit rate and the Usage page", async ({ page }) => {
   test.setTimeout(180_000);
@@ -40,6 +40,7 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await expect(transcript).toContainText("Summary: printed the numbers");
   await expect(transcript).toContainText("Tests passed", { timeout: 60_000 });
   await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 15_000 });
+  await openSection(page, "How it got here");
 
   // Cache hit rate: 75% in the runs table and the transcript header.
   await expect(page.getByRole("table").locator("tbody tr").first()).toContainText("75%");
@@ -69,6 +70,8 @@ test("M5: spilled output, compaction, skills, cache hit rate and the Usage page"
   await page.route("**/api/runs/*/events", events);
   await page.route("**/api/tickets/*", detail);
   await page.reload();
+  await expect(page.getByLabel("Status")).toHaveValue("review"); // the reload closes the sections again
+  await openSection(page, "How it got here");
   await expect(transcript.getByLabel("Run metrics")).toHaveText(/^\d+ turns? \(\d+%\) · \d+ tool calls? · \d+ errors? · \d+ repeated · (first edit at turn \d+|no edits)/);
   const stuck = transcript.getByRole("note", { name: "Stuck" });
   await expect(stuck).toHaveClass(/\bwarn\b/);

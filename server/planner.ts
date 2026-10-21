@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
-import { skillsText, type Skill } from "./agent/context.ts";
+import { referenceNotes, skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
 import { SANDBOX_TOOLS } from "./sandbox.ts";
@@ -132,7 +132,7 @@ function childrenText(epicId: string, since: number) {
 type Epic = { id: string; workspace_id: string; key: string; title: string; spec: string; parent_id: string | null; provider_id: string | null; model: string | null };
 
 export function plannerTask(epic: Epic, o: {
-  repo: string; base: string; sha: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; skills: Skill[]; lessons?: string; wiki?: string; round: number;
+  repo: string; base: string; sha: string; gate: string; sizeHint: string; autoSplit: boolean; protectedPaths: string[]; protectedMode: string; skills: Skill[]; lessons?: string; wiki?: string; round: number;
   notes: { round: number; notes: string }[]; review?: string; since: number;
 }) {
   const parts = [
@@ -140,16 +140,15 @@ export function plannerTask(epic: Epic, o: {
       "# Environment",
       `- Repository: ${o.repo}; read_file and search see a read-only checkout of ${o.base} at ${o.sha.slice(0, 8)} (it includes the merged work of done children)`,
       `- Workers' sandbox: ${SANDBOX_TOOLS}: don't write child tickets whose acceptance needs them`,
-      `- Test gate for every child ticket: ${o.gate.trim() ? `\`${o.gate}\` must exit 0` : "no test command"}${o.protectedPaths.length ? `, and changes under ${o.protectedPaths.join(", ")} fail it` : ""}; a child's own test_command replaces the command`,
+      `- Test gate for every child ticket: ${o.gate.trim() ? `\`${o.gate}\` must exit 0` : "no test command"}${o.protectedPaths.length ? (o.protectedMode === "add_only" ? `, and changing or deleting existing files under ${o.protectedPaths.join(", ")} fails it (new files there, e.g. regression tests, are fine)` : `, and changes under ${o.protectedPaths.join(", ")} fail it`) : ""}; a child's own test_command replaces the command`,
       `- Epic gate: ${o.gate.trim() ? `complete_epic first runs \`${o.gate}\` on ${o.base} as it is then, and is refused unless it exits 0` : "none (no test command)"}`,
       ...(o.sizeHint.trim() ? [`- Child size: the worker model reliably finishes tickets of this size: ${o.sizeHint.trim()}; make every child at most that size`] : []),
       `- Failed children: ${o.autoSplit && !epic.parent_id ? 'a child task that fails every attempt is split automatically (a "Split:" epic replaces it)' : "not split automatically (create smaller follow-up tickets)"}`,
       `- Round ${o.round} of at most ${MAX_ROUNDS}; child tickets: ${childrenOf(epic.id).length} of at most ${MAX_CHILDREN}; sub-epics: ${epic.parent_id ? "not allowed (this epic is a sub-epic)" : "allowed (their planners cannot create epics)"}`,
     ].join("\n"),
   ];
-  if (o.skills.length) parts.push(skillsText(o.skills));
-  if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
-  if (o.wiki) parts.push(o.wiki);
+  const notes = referenceNotes([o.skills.length ? skillsText(o.skills) : "", o.lessons && `# Lessons from earlier runs\n\n${o.lessons}`, o.wiki]);
+  if (notes) parts.push(notes);
   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
   const header = trackerHeader(epic.id); // M11: priority, labels, milestone, due date
   parts.push(`# Epic\n\n# ${epic.title}${header ? `\n\n${header}` : ""}${epic.spec ? `\n\n${epic.spec}` : ""}`);

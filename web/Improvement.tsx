@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { Transcript } from "./TicketView.tsx";
 import { Alert, Confirm, Dialog, Loading, api, cost, fmt, useApi, when, type Run } from "./ui.tsx";
 
-// M6: the three self-improvement loops, all visible and reversible. Lessons apply to the next run at once (so Restore is
-// one click); a prompt version only applies once a human promotes it, and only when its eval beats the active one.
+// M6: the three self-improvement loops, all visible and reversible. A reflection's lessons wait for Accept (your edits apply
+// to the next run at once, so Restore is one click); a prompt version only applies once a human promotes it, and only when
+// its eval beats the active one.
 type LessonsVersion = {
-  id: string; version: number; body: string; source: "reflection" | "human" | "restore"; author: string | null; restored_from: number | null;
+  id: string; version: number; body: string; state: "accepted" | "pending" | "discarded"; source: "reflection" | "human" | "restore"; author: string | null; restored_from: number | null;
   run_attempt: number | null; ticket_key: string | null; created_at: number;
 };
 type EvalRun = {
@@ -127,7 +128,7 @@ function FailureClasses({ open, changed }: { open: (key: string) => void; change
           {result.created.map((c) => (
             <li key={c.ticket_id}>Created {link(c.key)} {c.title} <span className="muted">· from {c.class} · confidence {c.confidence.toFixed(2)}</span></li>
           ))}
-          {result.lessons.map((l) => <li key={l.class}>Lesson added (v{l.version}) for {l.class}: {l.lesson}</li>)}
+          {result.lessons.map((l) => <li key={l.class}>Lesson proposed (v{l.version}, accept it under Lessons) for {l.class}: {l.lesson}</li>)}
           {result.skipped.map((s) => <li key={s.class} className="muted">Skipped {s.class}: {s.why}</li>)}
           {!result.created.length && !result.lessons.length && !result.skipped.length && <li className="muted">No failures to mine.</li>}
         </ul>
@@ -166,7 +167,8 @@ function FailureClasses({ open, changed }: { open: (key: string) => void; change
 }
 
 function Lessons({ data, act }: { data: Data["lessons"]; act: Act }) {
-  const current = data.versions[0];
+  const current = data.versions.find((v) => v.state === "accepted"); // the active version
+  const pending = data.versions.find((v) => v.state === "pending");
   const [draft, setDraft] = useState(current?.body ?? "");
   useEffect(() => setDraft(current?.body ?? ""), [current?.id]);
   const by = (v: LessonsVersion) =>
@@ -176,9 +178,23 @@ function Lessons({ data, act }: { data: Data["lessons"]; act: Act }) {
     <section aria-label="Lessons">
       <h2>Lessons</h2>
       <About summary="Notes about this repository that every new run starts with.">
-        Written by a reflection after each finished ticket, or by you. The active (latest) version goes into the first message of every
-        new run, right away. Never into the system prompt.
+        A reflection after each finished ticket (and failure mining) proposes a new version, which waits here until you accept it:
+        it is written from run output the repository's tests control, so it is never active on its own. Your own edits apply at once.
+        The active version goes into the first message of every new run, framed as reference notes. Never into the system prompt.
       </About>
+      {pending && (
+        <div className="pcard" role="group" aria-label="Pending lessons">
+          <div className="row">
+            <strong>Pending: v{pending.version}</strong>
+            <span className="badge">waiting for you</span>
+            <span className="muted grow">{by(pending)} · {when(pending.created_at)}, not used by any run yet</span>
+            <button className="btn primary" onClick={() => act(() => api(`/api/lessons/${pending.id}/accept`, "POST"))}>Accept</button>
+            <button className="btn" onClick={() => act(() => api(`/api/lessons/${pending.id}/discard`, "POST"))}>Discard</button>
+          </div>
+          <p className="muted">Diff vs the active version{current ? ` (v${current.version})` : " (none yet)"}:</p>
+          <LineDiff from={current?.body ?? ""} to={pending.body} />
+        </div>
+      )}
       <textarea aria-label="Lessons" className="mono" rows={8} value={draft} maxLength={data.max} onChange={(e) => setDraft(e.target.value)} placeholder="No lessons yet." />
       <div className="row">
         <button className="btn primary" disabled={draft.trim() === (current?.body ?? "")} onClick={() => act(() => api("/api/lessons", "PUT", { body: draft }))}>Save lessons</button>
@@ -191,9 +207,11 @@ function Lessons({ data, act }: { data: Data["lessons"]; act: Act }) {
           <li key={v.id} aria-label={`Lessons v${v.version}`}>
             <div className="row">
               <strong>v{v.version}</strong>
-              {i === 0 && <span className="badge">active</span>}
+              {v.id === current?.id && <span className="badge">active</span>}
+              {v.state === "pending" && <span className="badge">pending</span>}
+              {v.state === "discarded" && <span className="badge">discarded</span>}
               <span className="muted grow">{by(v)} · {when(v.created_at)} · {v.body.length} chars</span>
-              {i > 0 && <button className="btn" onClick={() => act(() => api(`/api/lessons/${v.id}/restore`, "POST"))}>Restore</button>}
+              {v.id !== current?.id && v.state !== "pending" && <button className="btn" onClick={() => act(() => api(`/api/lessons/${v.id}/restore`, "POST"))}>Restore</button>}
             </div>
             <details>
               <summary className="muted">Diff vs {data.versions[i + 1] ? `v${data.versions[i + 1].version}` : "empty"}</summary>

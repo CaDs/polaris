@@ -7,7 +7,7 @@ import { join } from "node:path";
 // M3 pipeline without docker: POLARIS_SANDBOX=host runs setup/test/shell commands in the worktree on the host.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { configure, fileTicket, projectOf, call, db, events, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, projectOf, call, db, events, sh, tempRepo, user, waitFor, wsOf, worktreeOf } = await import("./helpers.ts");
 const { addWorktree, protectedChanges, removeWorktree } = await import("../server/git.ts");
 const { parseProtected } = await import("../server/agent/tools.ts");
 const { parseTasks, seedTasks } = await import("../server/cli/seed-tasks.ts");
@@ -61,7 +61,7 @@ test("project repository: validation, defaults, per-workspace; runs need a valid
   for (const [body, error] of [
     [{ repo_path: "relative/path" }, /absolute/],
     [{ repo_path: "/nonexistent/x" }, /not a git repository/],
-    [{ repo_path: tmpdir() }, /not a git repository/],
+    [{ repo_path: mkdtempSync(join(tmpdir(), "plain-")) }, /not a git repository/],
     [{ repo_path: empty }, /no commits/],
     [{ repo_path: repo, base_branch: "nope" }, /"nope" does not exist/],
     [{ repo_path: repo, protected_paths: "../x" }, /relative/],
@@ -139,7 +139,7 @@ test("gate failure retries with the failure fed back; pass commits on the run br
   assert.match(task2, /Read-only paths .*tests, evals/);
 
   // Failed attempt: worktree and branch gone. Passed: commit with the harness identity on its branch.
-  assert.equal(existsSync(r1.worktree), false);
+  assert.equal(existsSync(worktreeOf(r1.id)), false);
   assert.equal(branches(repo), r2.branch);
   assert.equal(sh(repo, `git log -1 --format='%s|%an <%ae>' ${r2.branch}`), `${t.key}: make ok|polaris <polaris@localhost>`);
   assert.equal(sh(repo, `git rev-parse ${r2.branch}~1`), r2.base_sha);
@@ -196,12 +196,12 @@ test("reject cleans up, returns to todo, and the note reaches the next run's tas
   await call("POST", `/api/tickets/${t.id}/runs`, alice);
   const inReview = await waitFor(alice, t.id, "review");
   const run = inReview.runs[0];
-  assert.ok(existsSync(run.worktree));
+  assert.ok(existsSync(worktreeOf(run.id)));
 
   const r = await call("POST", `/api/tickets/${t.id}/reject`, alice, { note: "use a better file name" });
   assert.equal(r.status, 200);
   assert.equal(r.body.status, "todo");
-  assert.equal(existsSync(run.worktree), false);
+  assert.equal(existsSync(worktreeOf(run.id)), false);
   assert.equal(branches(repo), "");
   assert.equal((await call("GET", `/api/tickets/${t.id}/diff`, alice)).status, 404);
 

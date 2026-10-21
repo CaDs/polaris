@@ -109,7 +109,7 @@ export type EventPayloads = {
   // M3 orchestration (server/runs.ts): sandbox setup, test gate, commit of a passing run, review decision.
   setup: { step: "worktree"; branch: string; base_sha: string } /* branch "" = detached (eval) */ | { step: "sandbox"; sandbox: string } | { step: "context"; window: number; source: string; compact_at: number } | { step: "skills"; skills: { name: string; description: string; path: string }[] } | { step: "command"; command: string; code: number | null; output: string } | { step: "resumed"; from: string; turns: number };
   // flaky: the command failed, then passed on an immediate re-run (first_failure is the first run); the gate passed.
-  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[]; nested?: string[]; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
+  test_result: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; protected: string[]; nested?: string[]; clean?: true; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
   // The test gate failed and the worker's own conversation is resumed to fix it (reason: gateFailure).
   gate_fix: { reason: string };
   commit: { sha: string; branch: string };
@@ -126,7 +126,10 @@ export type EventPayloads = {
   // M9: complete_epic first ran this command on the base branch's head (sha); failed → complete_epic was refused.
   epic_gate: { passed: boolean; command: string; code: number | null; timed_out: boolean; output: string; sha: string; flaky?: true; first_failure?: { code: number | null; timed_out: boolean; output: string } };
   // M9: the triage model scored a new ticket's size (0 trivial … 4 epic); split = it became a "Split:" epic. error: ran directly.
-  triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; error?: string };
+  // reason: a chat model's one sentence (System One gives probabilities and confidence instead).
+  triage: { model: string; split: boolean; score?: number; probabilities?: Record<string, number>; confidence?: number; reason?: string; error?: string };
+  // POL-30: this attempt runs on the escalation model instead of the previous attempt's (logged first, before run_started).
+  escalated: { from: string; to: string; reason: string; attempt: number };
   // M10: a wiki maintainer run ended: the wiki commit it made, nothing to commit (unchanged), or the mechanical problems that rejected it.
   wiki: { op: "ingest" | "bootstrap" | "lint"; commit?: string; unchanged?: boolean; problems?: string[] };
 };
