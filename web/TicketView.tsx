@@ -275,6 +275,38 @@ function activity(events: Ev[], live: LivePart[]): { text: ReactNode; title?: st
 }
 const clock = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}`;
 
+const modelTimeAnchors = new Set(["tool_result", "run_started", "gate_fix", "test_result", "model_review_started", "model_review", "compaction"]);
+function runTimes(events: Ev[], until: number | undefined) {
+  let model = 0, tools = 0, shell = 0;
+  let anchor: number | undefined;
+  const pending = new Map<string, { start: number; shell: boolean }>();
+  for (const e of events) {
+    if (e.created_at === undefined) continue;
+    if (e.type === "assistant_message" && anchor !== undefined) model += Math.max(0, e.created_at - anchor);
+    if (modelTimeAnchors.has(e.type)) anchor = e.created_at;
+    if (e.type === "tool_call") pending.set(e.payload.id, { start: e.created_at, shell: e.payload.name === "shell" });
+    if (e.type === "tool_result") {
+      const call = pending.get(e.payload.tool_use_id);
+      if (call) {
+        const elapsed = Math.max(0, e.created_at - call.start);
+        tools += elapsed;
+        if (call.shell) shell += elapsed;
+        pending.delete(e.payload.tool_use_id);
+      }
+    }
+  }
+  // An interrupted tool without a result stops at the run's end, never at the viewer's current time.
+  if (until !== undefined) for (const call of pending.values()) {
+    const elapsed = Math.max(0, until - call.start);
+    tools += elapsed;
+    if (call.shell) shell += elapsed;
+  }
+  return { model, tools, shell };
+}
+const timeSpent = (ms: number, omitMinutes = false) => ms < 60_000
+  ? `${Math.round(ms / 1000)} s`
+  : `${ms < 600_000 ? (ms / 60_000).toFixed(1) : Math.round(ms / 60_000)}${omitMinutes ? "" : " min"}`;
+
 // The running run's status line, kept at the bottom of the viewport while its transcript is on screen; elapsed time ticks
 // here (static text, no looping motion: DESIGN.md). Out of view of the latest, it offers a jump back.
 function LiveBar({ run, events, live, unseen, atEnd, jump }: { run: Run; events: Ev[]; live: LivePart[]; unseen: number; atEnd: boolean; jump: () => void }) {
@@ -360,6 +392,15 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
   const usage = run.usage ?? { input_uncached: projected.input, tokens_in: projected.input + projected.cache_write, tokens_out: projected.output, tokens_cached: projected.cache_read,
     tokens_cache_write: projected.cache_write, tokens_total: projected.input + projected.output + projected.cache_read + projected.cache_write, partial: 0, unavailable: 0 };
   const finished = events.find((e) => e.type === "run_finished");
+  const running = !finished && (run.status === "running" || run.status === "queued");
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const times = runTimes(events, finished?.created_at ?? run.ended_at ?? (running ? now : undefined));
   const skills = events.find((e) => e.type === "setup" && e.payload.step === "skills")?.payload.skills as any[] | undefined;
 
   return (
@@ -370,6 +411,9 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
           {run.prompt_version && <span className="muted mono"> · prompt v{run.prompt_version}</span>}
         </h3>
         <span className="tokens mono" role="status" aria-label="Token usage">in {fmt(usage.input_uncached)} · out {fmt(usage.tokens_out)} · cached {fmt(usage.tokens_cached)} · cache write {fmt(usage.tokens_cache_write)} · total {fmt(usage.tokens_total)} · cache hit {hitRate(usage.tokens_in, usage.tokens_cached)}{(usage.partial > 0 || usage.unavailable > 0) && " · some usage partial/unavailable"}</span>
+        <span className="tokens mono" role="status" aria-label="Run timing" title={`model ${(times.model / 1000).toFixed(1)} s · tools ${(times.tools / 1000).toFixed(1)} s (shell ${(times.shell / 1000).toFixed(1)} s)`}>
+          model {timeSpent(times.model)} · tools {timeSpent(times.tools)} (shell {timeSpent(times.shell, times.tools >= 60_000)})
+        </span>
         {!finished && (run.status === "running" || run.status === "queued") && (
           <button className="btn" onClick={() => api(`/api/runs/${run.id}/cancel`, "POST").catch((e) => setError(e.message))}>Cancel</button>
         )}
