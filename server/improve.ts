@@ -147,8 +147,8 @@ Answer exactly in this format:
 The full revised system prompt.
 </prompt>`;
 
-const SECRET = /\b(sk-[\w-]{16,}|ghp_\w{20,}|github_pat_\w{20,}|xox[abp]-[\w-]{10,}|AKIA[0-9A-Z]{16})\b/g;
-export const scrub = (s: string) => s.replace(SECRET, "[redacted]"); // ponytail: common key shapes only; the prompt forbids the rest
+import { scrub } from "./egress.ts";
+export { scrub }; // ponytail: common key shapes only; the prompt forbids the rest
 
 // Over the cap: cut at the last line break before it.
 export function capLessons(s: string) {

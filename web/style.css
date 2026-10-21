@@ -648,3 +648,4 @@ nav details > summary:hover { background: var(--hover); }
 .pc-btn { justify-self: end; width: 40%; height: 12px; border-radius: 4px; background: var(--accent); }
 .pc-name { font-weight: 500; margin-top: 4px; }
 .pc-hint { font-size: 12px; color: var(--muted); }
+.providers select { max-width: 220px; } /* a long model name must not push the row's buttons onto a second line */

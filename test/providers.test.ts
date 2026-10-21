@@ -62,7 +62,7 @@ test("provider API never returns secrets, validates input, and is isolated per w
   for (const t of every) assert.ok(!t.includes("SUPERSECRET") && !t.includes("encrypted"), t);
   // Patch without api_key keeps the secret; with one replaces it.
   assert.equal(decrypt((db.prepare("SELECT encrypted_secret FROM providers WHERE id = ?").get(id) as any).encrypted_secret), key);
-  assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { api_key: "new-key-0000" })).body.secret_last4, "0000");
+  assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { api_key: "new-key-abcd-0000" })).body.secret_last4, "0000");
 
   for (const bad of [{}, { name: "x", kind: "bogus" }, { name: "x", kind: "ollama", auth_type: "api_key" }, { name: "x", kind: "anthropic", base_url: "ftp://x" }, { name: "", kind: "ollama" }, { name: "x", kind: "ollama", api_key: "k" }])
     assert.equal((await call("POST", "/api/providers", alice, bad)).status, 400, JSON.stringify(bad));
@@ -93,7 +93,7 @@ test("changing the base URL drops the stored secret", async () => {
   assert.equal((await call("PATCH", `/api/providers/${id}`, alice, { name: "Moved", base_url: null })).body.has_secret, true, "same (empty) base URL keeps it");
   const moved = await call("PATCH", `/api/providers/${id}`, alice, { base_url: "https://attacker.example" });
   assert.deepEqual([moved.status, moved.body.has_secret, secret()], [200, false, null]);
-  const rekeyed = await call("PATCH", `/api/providers/${id}`, alice, { base_url: "https://other.example", api_key: "sk-ant-new-2222" });
+  const rekeyed = await call("PATCH", `/api/providers/${id}`, alice, { base_url: "https://other.example", api_key: "sk-ant-new-key-2222" });
   assert.deepEqual([rekeyed.body.has_secret, rekeyed.body.secret_last4], [true, "2222"], "a key sent with the new URL is kept");
 });
 

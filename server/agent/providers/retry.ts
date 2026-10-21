@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AgentError, noUsage, type ProviderResponse, type StreamEvent } from "../types.ts";
+import { scrub } from "../../egress.ts";
 
 // Provider retries: HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to RETRIES times with
 // exponential backoff + jitter (or the server's retry-after), but only while nothing was streamed to the caller yet:
@@ -26,7 +27,7 @@ export function retryable(e: AgentError, afterMs?: number) {
 export function httpError(res: Response, body: string) {
   let code: string | undefined;
   try { code = JSON.parse(body)?.error?.code; } catch {}
-  const e = new AgentError("ProviderError", `HTTP ${res.status}: ${body.slice(0, 1000)}`);
+  const e = new AgentError("ProviderError", `HTTP ${res.status}: ${scrub(body).slice(0, 1000)}`); // error bodies sometimes echo the key
   e.code = code;
   e.requestId = res.headers.get("x-request-id") ?? undefined;
   if (code && /subscription_sharing_usage_limit_exceeded|subscription_sharing_user_not_eligible|subscription_sharing_unsupported_capability|subscription_sharing_route_not_supported|subscription_sharing_invalid_user|chatpass_v2_/.test(code)) return e;
@@ -47,7 +48,7 @@ export async function withRetry<T>(onEvent: (e: StreamEvent) => void, signal: Ab
     try {
       const result = await once((e) => ((started = true), onEvent(e)));
       const r = result as ProviderResponse;
-      if (metering) onEvent({ type: "request_usage", request: { id, started_at, usage: r.usage ?? noUsage(), status: r.usageStatus ?? "unavailable", outcome: "completed" } });
+      if (metering) onEvent({ type: "request_usage", request: { id, started_at, usage: r.usage ?? noUsage(), status: r.usageStatus ?? "unavailable", outcome: "completed", cost_usd: r.costUsd } });
       return result;
     } catch (e) {
       if (metering) onEvent({ type: "request_usage", request: { id, started_at, usage: e instanceof AgentError ? e.usage ?? noUsage() : noUsage(), status: e instanceof AgentError ? e.usageStatus ?? "unavailable" : "unavailable", outcome: signal?.aborted ? "cancelled" : "failed" } });

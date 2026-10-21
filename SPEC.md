@@ -198,8 +198,35 @@ interface Provider {
 | Ollama | Messages (Anthropic-compatible endpoint) | none + `base_url` |
 | OpenAI | Responses | API key |
 | OpenAI subscription | Public Responses API (`store:false`, `stream:true`) | Sign in with ChatGPT dynamic registration |
+| OpenRouter (M16) | Chat Completions (`agent/providers/chat.ts`), always `https://openrouter.ai/api/v1` (no base URL) | API key |
+| LiteLLM proxy (M16) | Chat Completions at `<base_url>/v1/chat/completions` (a trailing `/v1` is not doubled) | master/virtual key, or none; `base_url` required |
 
-Internal message format is Anthropic-style content blocks. Reasoning is an opaque block passed back verbatim.
+Internal message format is Anthropic-style content blocks. Reasoning is an opaque block passed back verbatim (Chat
+Completions: dropped; streamed `reasoning`/`reasoning_content` deltas still show live).
+
+- **OpenRouter.** Models: the public catalog (`/models`, cached an hour), only those whose `supported_parameters` include
+  `tools`, with their names. Every request asks for `usage: {include: true}`: the cost OpenRouter bills comes back with the
+  usage and is what the ledger records (`RequestUsage.cost_usd`; spending caps count it). `options.data_collection`
+  (migration 003, `providers.options` JSON): `deny` (default) sends `provider: {data_collection: "deny"}`, so only providers
+  that neither retain nor train on prompts serve the request; `allow` lifts it. Attribution headers `HTTP-Referer` and
+  `X-Title: Polaris`. Context window left at the default (128000): each model's `context_length` from the catalog.
+- **LiteLLM.** Models: the proxy's `/v1/models` (its `model_list` aliases the key may use). Cost: unknown (priced from the
+  table when the model is in it).
+- **Provider egress** (`server/egress.ts`, every provider call including model lists and Ollama's window detection):
+  `providerFetch` checks the URL first: http(s) only, no `user:pass@`; never link-local, unspecified or multicast addresses
+  (cloud metadata: 169.254.0.0/16, fe80::/10, `fd00:ec2::254`, also as IPv4-mapped IPv6); plain http only when every address
+  the host resolves to is loopback or private (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7), checked again at request
+  time (cached a minute per origin) because a name can point anywhere; `POLARIS_ALLOW_HTTP_PROVIDERS=1` lifts the http rule,
+  never the metadata one. A saved base URL gets the same checks without DNS (a single-label, `.local`, `.internal`, `.lan`
+  name counts as local). Redirects are refused (a key never follows one), no response headers within 120 s (model lists
+  10–15 s) fails the call, and error bodies are read up to 64 KiB. Policy failures are not retried.
+- **Secrets.** Keys must be printable without spaces (a key is a header value: no header injection), at most 500 chars.
+  `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()`: the provider's own key and common key
+  and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses
+  to start with `NODE_TLS_REJECT_UNAUTHORIZED=0` unless `POLARIS_ALLOW_INSECURE_TLS=1` (a private CA goes in
+  `NODE_EXTRA_CA_CERTS`).
+- **Migrations** run with foreign keys off and `PRAGMA foreign_key_check` before each commit, so one can rebuild a table
+  (003 widens the `kind` CHECK) without the drop cascading.
 
 ## Self-improvement (M6)
 
@@ -676,7 +703,8 @@ A workspace holds projects; a **project is one git repository** with its own boa
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
   non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or
   `Sec-Fetch-Site: same-origin`, else 403 `forbidden_origin` (no Origin and no cookie passes: CLI, curl). Changing a
-  provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it.
+  provider's `base_url` clears its stored key or OAuth tokens unless a new key comes with it. Provider calls follow the
+  egress policy (Providers): https off-network, no metadata addresses, no redirects, scrubbed errors, TLS checks on.
 - The harness never edits its running code; changes land through the review queue.
 - Every run has a token budget; every passing run is a commit on its own branch.
 

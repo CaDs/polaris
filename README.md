@@ -72,7 +72,7 @@ cost per run, and replay any transcript.
 | **Chat** | A side panel (Cmd/Ctrl+J) to talk with the project. It knows the page you're on, takes `@` mentions of tickets, reads the code and the wiki, asks what's unclear, and proposes tickets as cards. Nothing is filed until you click **File** (or **File and run**); you can edit a proposal first. Replies stream; chats are private and resumable. |
 | **Dashboard** | Linear-style UI with dark and light themes: board and list layouts, live transcripts, runs table with tokens, cache hit rate, cost and time per run, Usage page with execution and background token accounting for every provider. |
 | **Accounts** | Email/password sign-in; the first account is the owner and sign-up then closes. Everything is scoped per workspace; inside it, each project is one repository with its own board, cycles, wiki and ticket keys. The UI creates one workspace per account; inviting members and switching workspaces have no UI yet. |
-| **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
+| **Providers** | Anthropic API, OpenAI API (and ChatGPT plan sign-in), local Ollama, OpenRouter (hundreds of models behind one key; its billed cost is tracked; providers that retain or train on prompts are excluded by default), a LiteLLM proxy. Provider calls are hardened: https off your network, no cloud-metadata addresses, no redirects, keys scrubbed from errors. ChatGPT plan connections use Polaris’s own OAuth registration and the public Responses API. Keys and tokens are encrypted at rest. A per-provider model picker and a "Test" button that checks tool calling. Ollama's real context window is detected automatically. |
 | **Agent loop** | Tools `read_file`, `edit_file` (or `apply_patch` for OpenAI models), `search`, `shell`. Append-only conversations (prompt caching friendly), provider retries, long output spilled to files. The first message states the environment: test command, read-only paths, budget, git read-only. |
 | **Isolation** | One git worktree and branch per run, one Docker container per run, protected paths (your tests) mounted read-only and enforced three ways, the repo's `.git` mounted read-only so agents can `git diff` but not commit or rewrite history. |
 | **Test gate** | Your test command must pass. A failure is re-run once (flaky tests don't fail good work), then fed back into the same conversation for a fix, then retried fresh (up to 3 attempts). |
@@ -187,12 +187,15 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama) |
 | `POLARIS_MODEL` | Model of the fallback provider and the CLI (default `claude-sonnet-5-5`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI providers saved without one (default `https://api.openai.com`) |
+| `POLARIS_ALLOW_HTTP_PROVIDERS=1` | Allow plain http to a provider on a public address (default: http only on this machine or a private network, so a key never crosses the internet unencrypted). Never opens cloud-metadata addresses |
+| `NODE_EXTRA_CA_CERTS` | A private CA (PEM) for a provider or LiteLLM proxy with an internal certificate |
+| `POLARIS_ALLOW_INSECURE_TLS=1` | Start even with `NODE_TLS_REJECT_UNAUTHORIZED=0` (certificate checks off: not recommended) |
 | `POLARIS_OAUTH_PORT` | Local callback port of the ChatGPT sign-in (default 1455) |
 | `POLARIS_SLACK_WEBHOOK` | Slack incoming webhook: "ready for review" and "failed" pings with a link to the ticket |
 | `POLARIS_PROVIDER=fake` | Scripted demo provider used by the tests |
 
 Tests only: `POLARIS_SANDBOX=host` (commands on the host, no isolation), `POLARIS_COMPACT_AT`, `POLARIS_RETRY_BASE_MS`,
-`POLARIS_OPENAI_AUTH_URL`, `POLARIS_OPENAI_PLAN_URL`; for `npm run e2e`: `E2E_PORT`, `HEADED`, `REAL_MODEL`.
+`POLARIS_OPENAI_AUTH_URL`, `POLARIS_OPENAI_PLAN_URL`, `POLARIS_OPENROUTER_URL`; for `npm run e2e`: `E2E_PORT`, `HEADED`, `REAL_MODEL`.
 
 ### Workspace settings (Settings page)
 

@@ -1,5 +1,6 @@
 import { AgentError, noUsage, type Block, type Msg, type Provider, type ProviderRequest, type StreamEvent, type Usage } from "../types.ts";
 import { httpError, retryable, withRetry } from "./retry.ts";
+import { cappedText, EgressError, providerFetch } from "../../egress.ts";
 
 type Item = Record<string, any>;
 function toInput(messages: Msg[]): Item[] {
@@ -65,14 +66,15 @@ export function openai(opts: { url: string; headers: () => Promise<Record<string
       };
       let res: Response;
       try {
-        res = await fetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: req.signal });
+        res = await providerFetch(opts.url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: req.signal });
       } catch (e) {
         if (req.signal?.aborted) throw e;
+        if (e instanceof EgressError) throw new AgentError("ProviderError", e.message); // policy: a retry would be refused too
         throw retryable(new AgentError("ProviderError", `request failed: ${(e as Error).message}`));
       }
       const requestId = res.headers.get("x-request-id") ?? undefined;
       if (!res.ok || !res.body) {
-        const text = await res.text();
+        const text = await cappedText(res);
         let err: Item | undefined;
         try {
           const payload = JSON.parse(text);
