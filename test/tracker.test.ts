@@ -405,3 +405,11 @@ test("planner create_ticket: labels by name (created when unknown), priority, es
     assert.match((await use({ title: "x", spec: "s", ...input })).content, re);
   assert.equal(queued.length, 2);
 });
+
+test("projects that build the server's own checkout are found (the --watch startup warning)", async () => {
+  const { ownCheckoutProjects } = await import("../server/tracker.ts");
+  const p = await project(alice, "Selfie");
+  const repo = (db.prepare("SELECT repo_path FROM projects WHERE id = ?").get(p.id) as { repo_path: string }).repo_path;
+  assert.deepEqual(ownCheckoutProjects(repo).map((x) => x.key), [p.key]);
+  assert.equal(ownCheckoutProjects(`${repo}/..`).length, 0);
+});
