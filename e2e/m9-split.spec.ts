@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, newTicket, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openSection, openTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 // SPLIT-ME: the demo worker also writes tests/broken.txt (refused: tests/ is mounted read-only even when the repo has none),
 // and never creates part1.txt/part2.txt, so every attempt fails the gate and the harness splits the ticket.
@@ -56,10 +56,12 @@ test("M9: a ticket that fails every attempt is split into an epic whose children
     // Children pass their own gates and are merged; the epic gate passes on main; the epic waits for a human.
     await expect(status).toHaveValue("review", { timeout: 180_000 });
     for (const key of ["APP-3", "APP-4"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
+    await openSection(page, "How it got here");
     await expect(transcript).toContainText("Epic gate passed: test -f part1.txt && test -f part2.txt");
     await expect(page.getByLabel("Summary")).toContainText("Done: APP-3 Create part1.txt; APP-4 Create part2.txt.");
     expect(git(repo, "ls-tree", "-r", "--name-only", "main").split("\n")).toEqual(["README.md", "part1.txt", "part2.txt"]);
 
+    await openSection(page, "Ticket");
     await page.getByText("Split from").getByRole("button", { name: "APP-1" }).click();
     await expect(page.getByLabel("Title")).toHaveValue("Big change");
     await expect(page.getByText("Escalated to")).toContainText("APP-2");

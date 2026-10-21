@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, more, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, more, newTicket, openSection, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M6: reflection → lessons, eval case from an approved ticket, eval-gated prompt promotion", async ({ page }) => {
   test.setTimeout(240_000);
@@ -14,6 +14,7 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   const transcript = page.getByRole("region", { name: "Transcript" });
   await page.getByRole("button", { name: "Run agent" }).click();
   await expect(status).toHaveValue("review", { timeout: 90_000 });
+  await openSection(page, "How it got here");
   await expect(transcript).toContainText("prompt v1");
   await expect(transcript).toContainText("Reflection: lessons updated (v1");
   await page.getByRole("button", { name: "Show run #1" }).click();

@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { git, newTicket, openTicket, putSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openSection, openTicket, putSettings, signUp, tempRepo } from "./helpers.ts";
 
 const column = (page: Page, name: string) => page.getByRole("region", { name, exact: true });
 
@@ -53,6 +53,8 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
 
   // Attempt 1 runs in the sandbox and fails the gate; attempt 2 gets the failure and passes.
   await openTicket(page, "Make ok file");
+  await expect(status).toHaveValue("review", { timeout: 90_000 }); // the history folds away once the ticket is in review
+  await openSection(page, "How it got here");
   await expect(page.getByRole("button", { name: "Show run #2" })).toBeVisible({ timeout: 60_000 });
   await page.getByRole("button", { name: "Show run #1" }).click();
   await expect(transcript).toContainText("Worktree on branch polaris/ORC-1-1-");
@@ -123,6 +125,7 @@ test("M3: a failed gate is fixed in the same run; the ticket's own test command 
   await expect(transcript.getByRole("separator").filter({ hasText: "Tests failed — fixing in the same run" })).toBeVisible({ timeout: 60_000 });
   await expect(transcript.locator("details.gate.ok")).toContainText("Tests passed", { timeout: 60_000 });
   await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 30_000 });
+  await openSection(page, "How it got here");
   await expect(page.getByRole("button", { name: "Show run #2" })).toHaveCount(0);
   await expect(transcript.locator("details.gate.err")).toContainText("Tests failed: `test -f ok.txt` exited with code 1");
 });

@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { addProvider, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { addProvider, newTicket, openSection, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 // A tiny Anthropic-compatible (and Ollama /api/tags) server: a tool call first, then a final answer.
 const sse = (events: object[]) => events.map((e: any) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
@@ -81,6 +81,7 @@ test("M4: providers, tool-calling test, masked keys, defaults, model picker and 
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("mock-a");
   await page.getByRole("button", { name: "Run agent" }).click();
   await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 120_000 });
+  await openSection(page, "How it got here");
   const runs = page.locator("table.runs");
   await expect(runs.getByRole("row", { name: /#1/ })).toContainText("mock-a");
   expect(modelsSeen.at(-1)).toBe("mock-a");

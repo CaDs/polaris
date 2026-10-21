@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { git, newTicket, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
+import { git, newTicket, openSection, saveSettings, saveTab, signUp, tempRepo } from "./helpers.ts";
 
 // The demo planner creates "Create a.txt" and "Create b.txt" (after a.txt); the demo worker creates the file its ticket
 // names and hands off. The gate passes once either file exists; children run in the real Docker sandbox.
@@ -59,6 +59,7 @@ test("M7: epic → planner round → children with a dependency → approvals dr
 
   // Approve A (auto-approve is off): B is queued from the updated main and runs.
   await page.getByRole("button", { name: /Create a\.txt/ }).click();
+  await openSection(page, "How it got here");
   await expect(transcript).toContainText("Handoff to the planner");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(status).toHaveValue("done");
@@ -71,6 +72,7 @@ test("M7: epic → planner round → children with a dependency → approvals dr
   // The settled children woke the planner: a later round sees both handoffs and completes the epic → review.
   await page.getByRole("button", { name: "APP-1", exact: true }).click();
   await expect(status).toHaveValue("review", { timeout: 90_000 });
+  await openSection(page, "How it got here");
   await expect(page.getByLabel("Summary")).toContainText("Done: APP-2 Create a.txt; APP-3 Create b.txt.");
   await expect(transcript).toContainText("Epic completed");
   await expect(page.getByRole("button", { name: "Show run #2" })).toBeVisible();

@@ -116,3 +116,10 @@ export async function addProvider(page: Page, f: { name: string; kind: string; b
   await d.getByRole("button", { name: "Add provider" }).click();
   await expect(d).toBeHidden();
 }
+
+// A ticket in review keeps its history, spec and diff in collapsed sections; open one the way a person would (a no-op when
+// it is already open, or when the ticket is not in review and shows the content directly).
+export async function openSection(page: Page, title: string) {
+  const details = page.locator("details.review-details").filter({ has: page.locator("> summary", { hasText: title }) });
+  if ((await details.count()) && (await details.getAttribute("open")) === null) await details.locator("> summary").click();
+}
