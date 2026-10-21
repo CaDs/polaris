@@ -37,7 +37,8 @@ export function providerBody(o: { provider: string; ollama: string; "api-key-env
   const keyEnv = o["api-key-env"] ?? KEY_ENV[o.provider];
   if (!keyEnv) fail(`--provider must be one of ollama, ${Object.keys(KEY_ENV).join(", ")} (the ChatGPT plan can't be benchmarked: see bench/README.md)`);
   const key = env[keyEnv]?.trim();
-  if (!key && o.provider !== "litellm") fail(`--provider ${o.provider} needs an API key in $${keyEnv} (or --api-key-env NAME)`);
+  // Never echo --api-key-env's value: a key pasted there by mistake would land in the log.
+  if (!key && o.provider !== "litellm") fail(o["api-key-env"] ? `--provider ${o.provider}: the variable named by --api-key-env is empty` : `--provider ${o.provider} needs an API key in $${KEY_ENV[o.provider]} (or --api-key-env NAME)`);
   if (o.provider === "litellm" && !o["base-url"]) fail("--provider litellm needs --base-url");
   return { name: o.provider, kind: o.provider, auth_type: key ? "api_key" : "none", ...(key ? { api_key: key } : {}), ...(o["base-url"] ? { base_url: o["base-url"] } : {}) };
 }
