@@ -15,3 +15,8 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # The sandbox base image is pinned by digest; this proposes the new digest (and bump IMAGE_VERSION in server/sandbox.ts).
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly

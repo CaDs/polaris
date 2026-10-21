@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { isProtected } from "./agent/tools.ts";
+import { isProtected, MAX_FILE } from "./agent/tools.ts";
 
 // All git work happens on the host via the git CLI; the sandbox never sees the repo's .git (see README).
 const execFileP = promisify(execFile);
@@ -114,6 +114,22 @@ export async function addDetached(repo: string, sha: string, path: string) {
   await excludeScratch(repo);
 }
 
+// A git dir for the sandbox at `dest`: the run's HEAD and index, the repository's branches and (hard-linked) objects, the
+// repo's info/exclude, and none of its config (remote URLs and credentials), hooks, stashes or other worktrees' metadata.
+// ponytail: one hard link per object file (a copy across filesystems), once per run; alternates would be instant but put the
+// repo's path in the container.
+export async function sandboxGitDir(worktree: string, dest: string) {
+  const admin = gitDirs.get(worktree);
+  if (!admin) return false;
+  const common = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  mkdirSync(dirname(dest), { recursive: true });
+  await execFileP("git", ["clone", "-q", "--local", "--bare", common, dest]);
+  writeFileSync(join(dest, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+  for (const f of ["HEAD", "index"]) if (existsSync(join(admin, f))) copyFileSync(join(admin, f), join(dest, f));
+  if (existsSync(join(common, "info/exclude"))) copyFileSync(join(common, "info/exclude"), join(dest, "info/exclude"));
+  return true;
+}
+
 // Best effort: a half-created or already-removed worktree/branch is fine. `dataRoot` guards the rm fallback.
 export async function removeWorktree(repo: string, path: string | null, branch: string | null, dataRoot: string) {
   if (path) {
@@ -139,9 +155,12 @@ export async function changedLines(worktree: string, baseSha: string) {
   const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, POLARIS_SCRATCH));
   const count = (f: string) => {
     try {
-      return readFileSync(join(worktree, f), "utf8").match(/\n/g)?.length ?? 0;
+      const file = join(worktree, f);
+      // A FIFO would block the server in open(), a huge sparse file would fill its memory: only small regular files.
+      const st = lstatSync(file);
+      return st.isFile() && st.size <= MAX_FILE ? readFileSync(file, "utf8").match(/\n/g)?.length ?? 0 : 0;
     } catch {
-      return 0; // a symlink to a directory, an unreadable file
+      return 0; // an unreadable file
     }
   };
   return fresh.reduce((n, f) => n + count(f), sum);

@@ -406,6 +406,22 @@ test("planner create_ticket: labels by name (created when unknown), priority, es
   assert.equal(queued.length, 2);
 });
 
+test("sandbox network: a project setting, setup-only by default, and the docker flags it gives (POL-8)", async () => {
+  const { dockerRunArgs } = await import("../server/sandbox.ts");
+  const p = await project(alice, "Offline");
+  const patch = (b: object) => call("PATCH", `/api/projects/${p.id}`, alice, b);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "setup-only");
+  assert.equal((await patch({ sandbox_network: "none" })).status, 200);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "none");
+  assert.match((await patch({ sandbox_network: "host" })).body.error, /must be one of/);
+  assert.equal((await patch({ sandbox_network: null })).status, 200);
+  assert.equal((await call("GET", `/api/projects/${p.id}`, alice)).body.sandbox_network, "setup-only");
+  const flags = (network: string) => dockerRunArgs("n", "/wt", [], "img:1", { cpus: 1, memory_gb: 1, network });
+  assert.ok(flags("none").join(" ").includes("--network none"));
+  assert.ok(!flags("setup-only").includes("--network") && !flags("full").includes("--network"));
+  assert.ok(["--init", "--read-only", "--memory-swap"].every((f) => flags("full").includes(f)));
+});
+
 test("sandbox size: a project setting with defaults and limits, and the docker run flags it gives", async () => {
   const { dockerRunArgs } = await import("../server/sandbox.ts");
   const p = await project(alice, "Roomy");

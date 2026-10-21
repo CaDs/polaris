@@ -1,6 +1,6 @@
 # Per-run sandbox: built automatically as polaris-sandbox:1 by server/sandbox.ts, which labels it polaris.image.version
 # and rebuilds when that label is missing or older than its IMAGE_VERSION (bump it when this file changes).
-FROM node:26-bookworm-slim
+FROM node:26-bookworm-slim@sha256:742a0fe7320e09e0321222b68165e6ac731d30470e7ea7f98f9bfc3a6e1034fe
 ARG UID=1000
 ARG GID=1000
 RUN apt-get update \

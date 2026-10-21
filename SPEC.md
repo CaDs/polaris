@@ -761,19 +761,32 @@ A workspace holds projects; a **project is one git repository** with its own boa
 ## Guardrails
 
 - `tests/` and `evals/` are read-only to agents (harness rejects writes), and so is `.polaris/wiki` (M10). Any `.git` path is
-  never writable by agent tools, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
+  never writable by agent tools, file tools open only regular files up to 5 MB (a FIFO or sparse file can't hang or fill the server) and re-check after opening that a swapped parent dir didn't redirect them, path checks are case-insensitive on a case-insensitive filesystem, and the worktree's `.git`
   file is mounted read-only in the sandbox.
 - Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;
   the image's `polaris` 1000:1000 under Docker Desktop, which maps bind-mount ownership), with `--cap-drop ALL`,
-  `--security-opt no-new-privileges`, `--pids-limit 512`, and the project's `sandbox_cpus` / `sandbox_memory_gb` (default 4 and
-  4 GB, 1–32 and 1–64; `node --test` runs one test file per CPU, so two CPUs ran a large suite serially). The built-in image is built with that uid:gid,
-  labelled `polaris.image.version`, and rebuilt when the label is missing or older than `IMAGE_VERSION` (bump it with the
-  Dockerfile); the shared npm cache volume is chowned to the sandbox user once per harness start if it isn't theirs.
+  `--security-opt no-new-privileges`, `--pids-limit 512`, `--init` (orphans are reaped), no swap, a read-only root with tmpfs
+  `/tmp` and HOME (512 MB each), and the project's `sandbox_cpus` / `sandbox_memory_gb` (default 4 and 4 GB, 1–32 and 1–64;
+  `node --test` runs one test file per CPU, so two CPUs ran a large suite serially). A watchdog stops a sandbox whose worktree
+  grows past `POLARIS_WORKTREE_MAX_MB` (default 5120): its commands then fail with that reason. Polaris refuses to start
+  sandboxes as uid 0 unless `POLARIS_ALLOW_ROOT_SANDBOX=1`. The built-in image is pinned by digest (Dependabot proposes
+  updates), built with that uid:gid, labelled `polaris.image.version`, and rebuilt when the label is missing or older than
+  `IMAGE_VERSION` (bump it with the Dockerfile or the digest).
+- Sandbox network, per project (`sandbox_network`): `setup-only` (the default, and what existing projects get) has the bridge
+  network for the setup command only and is disconnected before the first agent turn and every test run; `none` never has
+  one (setup then needs a warm cache); `full` keeps it. So a prompt-injected agent can't send the worktree out or reach
+  host services (Ollama, cloud metadata) unless the project opts in. The npm cache volume is per repository
+  (`polaris-npm-cache-<hash of repo_path>`), so a cache an agent poisoned reaches only that repository's later runs.
+- Git inside the sandbox is a throwaway dir per run at `/git` (read-only; `/work/.git` is a file pointing at it): the run's
+  HEAD and index, the repository's branches, its objects hard-linked, and no config, so no remote URLs or credentials, and no
+  host path. `git status/diff/log` work; the harness commits on the host.
 - Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
   dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Submodules are ignored, and a nested
   repository the agent made (a directory with its own `.git`) fails the gate and is never committed: host git would read its
   config, filters included. Harness writes into the worktree
-  (`.polaris/outputs`, `.polaris/history`) refuse symlinks. The sandbox image setting must be a plain docker image reference.
+  (`.polaris/outputs`, `.polaris/history`) refuse symlinks; so does run setup for `.polaris/workspace-skills` and
+  `.polaris/wiki` (a symlinked `.polaris` fails the run), and skills are read through the root-bounded file tools'
+  path check (a symlink leaving the checkout is skipped). The sandbox image setting must be a plain docker image reference.
 - Server surface (single trusted user by default): the API binds `HOST` (default `127.0.0.1`), the ChatGPT OAuth callback
   binds `127.0.0.1`; sign-up closes once the first account exists unless `POLARIS_OPEN_SIGNUP=1`; a cookie-authenticated
   non-GET `/api/*` request needs a trusted `Origin` (Better Auth's trusted origins or the request's own host) or
