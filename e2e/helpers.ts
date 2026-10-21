@@ -45,8 +45,8 @@ export async function putSettings(page: Page, data: Record<string, unknown>) {
   await page.goto("/p/APP");
 }
 
-// A project through the New project form: name App (key APP), this repository, no setup command, this test command, tests/
-// protected read-only (the demo provider's "broken" change writes tests/broken.txt). Ends on its board.
+// A project through the New project form: name App (key APP), this repository, no setup command, this test command, tests and
+// evals protected read-only (the old defaults). Ends on its board.
 export async function saveSettings(page: Page, repo: string, testCommand: string) {
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Projects", exact: true }).click();
   const form = page.locator("details.new-project");
@@ -56,8 +56,10 @@ export async function saveSettings(page: Page, repo: string, testCommand: string
   await form.getByLabel("Repository path").fill(repo);
   await form.getByLabel("Setup command").fill("");
   await form.getByLabel("Test command").fill(testCommand);
-  await form.getByLabel("Add a path").fill("tests");
-  await form.getByLabel("Add a path").press("Enter");
+  for (const path of ["tests", "evals"]) {
+    await form.getByLabel("Add a path").fill(path);
+    await form.getByLabel("Add a path").press("Enter");
+  }
   await form.getByLabel("Agents can't touch these paths at all").check();
   await form.getByRole("button", { name: "Create project" }).click();
   await expect(page).toHaveURL(/\/p\/APP$/);
