@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // M11 tracker: labels, ticket fields, filters, search, views, projects (one repo each), cycles, parent epics, priority
 // queue, planner.
@@ -216,7 +218,7 @@ test("projects: key and repository checked, ordered milestones, progress by stat
   const ok = { name: "Launch", key: "lch", repo_path: repo };
   const bad: [Record<string, unknown>, RegExp][] = [
     [{}, /name/], [{ name: "x", repo_path: repo }, /key/], [{ ...ok, key: "L" }, /key/], [{ ...ok, key: "1AB" }, /key/], [{ ...ok, key: "TOOLONG" }, /key/],
-    [{ ...ok, key: "pro" }, /already has the key PRO/], [{ ...ok, repo_path: "relative/path" }, /absolute/], [{ ...ok, repo_path: tmpdir() }, /not a git repository/],
+    [{ ...ok, key: "pro" }, /already has the key PRO/], [{ ...ok, repo_path: "relative/path" }, /absolute/], [{ ...ok, repo_path: mkdtempSync(join(tmpdir(), "plain-")) }, /not a git repository/],
     [{ ...ok, base_branch: "nope" }, /Branch "nope" does not exist/], [{ ...ok, image: "Not An Image" }, /docker image/], [{ ...ok, protected_paths: "../x" }, /Protected paths/],
     [{ ...ok, status: "done" }, /status/], [{ ...ok, lead_id: userId("alice") }, /not a member/], [{ ...ok, target_date: "2026-13-01" }, /target_date/],
   ];

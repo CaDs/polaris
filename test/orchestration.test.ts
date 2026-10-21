@@ -61,7 +61,7 @@ test("project repository: validation, defaults, per-workspace; runs need a valid
   for (const [body, error] of [
     [{ repo_path: "relative/path" }, /absolute/],
     [{ repo_path: "/nonexistent/x" }, /not a git repository/],
-    [{ repo_path: tmpdir() }, /not a git repository/],
+    [{ repo_path: mkdtempSync(join(tmpdir(), "plain-")) }, /not a git repository/],
     [{ repo_path: empty }, /no commits/],
     [{ repo_path: repo, base_branch: "nope" }, /"nope" does not exist/],
     [{ repo_path: repo, protected_paths: "../x" }, /relative/],

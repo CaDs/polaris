@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, copyFileSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -188,12 +188,17 @@ export async function changedLines(worktree: string, baseSha: string) {
   const fresh = (await git(worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter((f) => f && !isProtected(f, POLARIS_SCRATCH));
   const count = (f: string) => {
     try {
-      const file = join(worktree, f);
-      // A FIFO would block the server in open(), a huge sparse file would fill its memory: only small regular files.
-      const st = lstatSync(file);
-      return st.isFile() && st.size <= MAX_FILE ? readFileSync(file, "utf8").match(/\n/g)?.length ?? 0 : 0;
+      // A FIFO would block the server in open(), a huge sparse file would fill its memory: only small regular files. Checked
+      // on the open descriptor (non-blocking, no symlinks), so the agent can't swap the file between the check and the read.
+      const fd = openSync(join(worktree, f), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        const st = fstatSync(fd);
+        return st.isFile() && st.size <= MAX_FILE ? readFileSync(fd, "utf8").match(/\n/g)?.length ?? 0 : 0;
+      } finally {
+        closeSync(fd);
+      }
     } catch {
-      return 0; // an unreadable file
+      return 0; // an unreadable file, or a symlink
     }
   };
   return fresh.reduce((n, f) => n + count(f), sum);
