@@ -200,7 +200,8 @@ One tab per concern, each with its own Save: **Models** (providers, default mode
 **Automation** (auto-approve child tickets (off), automatic splitting (on), triage model (off, picked from the default
 Ollama provider's models), child size hint, project wiki (on)), **Limits** (monthly spending caps, max turns and max
 minutes per attempt, compaction cap), **Labels**. Saving merges: a field left out keeps its value, `null` resets it to
-the default. Theme and sign-out are in the account menu at the foot of the sidebar. A project's repository, base branch,
+the default. **Appearance** is yours alone: a palette (Black + Blue by default, Graphite, Stone & Ink, Polar Night, Ember,
+Deep Teal) and light/dark/system, saved for your account. Mode and sign-out are also in the account menu at the foot of the sidebar. A project's repository, base branch,
 setup and test commands, protected paths and sandbox image are on its **Overview** page.
 
 ### In your repository

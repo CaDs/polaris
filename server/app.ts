@@ -354,6 +354,29 @@ app.put("/api/settings", async (c) => {
   return c.json(settingsFor(c.get("workspaceId")));
 });
 
+// The caller's own appearance, the same in every workspace (Settings → Appearance). Palette ids match web/style.css.
+const PALETTES = ["black", "graphite", "stone", "polar", "ember", "teal"];
+const MODES = ["system", "light", "dark"];
+const preferences = (userId: string) =>
+  ({ palette: "black", mode: "system", ...(db.prepare("SELECT palette, mode FROM user_preferences WHERE user_id = ?").get(userId) as object | undefined) });
+app.get("/api/me/preferences", (c) => c.json(preferences(c.get("userId"))));
+// Merges: an omitted field keeps its value.
+app.put("/api/me/preferences", async (c) => {
+  const b = await c.req.json().catch(() => null);
+  const v = { ...preferences(c.get("userId")) };
+  if (b?.palette !== undefined) {
+    if (!PALETTES.includes(b.palette)) return c.json({ error: `palette must be one of ${PALETTES.join(", ")}` }, 400);
+    v.palette = b.palette;
+  }
+  if (b?.mode !== undefined) {
+    if (!MODES.includes(b.mode)) return c.json({ error: `mode must be one of ${MODES.join(", ")}` }, 400);
+    v.mode = b.mode;
+  }
+  db.prepare(`INSERT INTO user_preferences (user_id, palette, mode, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT (user_id) DO UPDATE SET palette = excluded.palette, mode = excluded.mode, updated_at = excluded.updated_at`).run(c.get("userId"), v.palette, v.mode, Date.now());
+  return c.json(v);
+});
+
 // One accounting source for execution, background calls and caps.
 app.get("/api/usage", (c) => {
   const ws = c.get("workspaceId");

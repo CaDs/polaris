@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Providers } from "./Providers.tsx";
 import { LabelSettings } from "./tracker.tsx";
 import { Caps, type Usage } from "./Usage.tsx";
-import { Alert, Loading, ModelPicker, api, useApi, useProviders } from "./ui.tsx";
+import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useProviders } from "./ui.tsx";
 
 type WorkspaceSettings = {
   compact_at_tokens: number; updated_at?: number; default_provider_id: string | null; default_model: string | null;
@@ -18,8 +18,9 @@ const PHASES = [
 ] as const;
 type Phase = (typeof PHASES)[number][0];
 
-// One page per concern, in setup order. A project's repository and commands are on its Overview page.
-const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"]] as const;
+// One page per concern, in setup order; Appearance is the caller's own. A project's repository and commands are on its
+// Overview page.
+const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["appearance", "Appearance"]] as const;
 
 export function Settings({ tab = "models", go }: { tab?: string; go: (to: string) => void }) {
   const [s, setS] = useState<WorkspaceSettings | null>(null);
@@ -41,6 +42,8 @@ export function Settings({ tab = "models", go }: { tab?: string; go: (to: string
           <LimitsTab s={s} saved={setS} go={go} />
         ) : tab === "labels" ? (
           <LabelSettings />
+        ) : tab === "appearance" ? (
+          <AppearanceTab />
         ) : null}
       </div>
     </div>
@@ -217,5 +220,39 @@ function LimitsTab({ s, saved, go }: Tab & { go: (to: string) => void }) {
         <span className="hint">A run summarizes and starts a fresh conversation when its context passes this, or 70% of the provider's context window if that is lower.</span>
       </label>
     </Form>
+  );
+}
+
+// Yours alone, in every workspace and browser: saved on the server the moment you pick. Each card previews its palette
+// (data-palette scopes the tokens to the card) in the current light or dark mode.
+function AppearanceTab() {
+  const { appearance, set } = useAppearance();
+  return (
+    <section aria-label="Appearance">
+      <h2>Mode</h2>
+      <span className="seg" role="group" aria-label="Mode">
+        {(["system", "light", "dark"] as const).map((m) => (
+          <button key={m} aria-pressed={appearance.mode === m} onClick={() => set({ mode: m })}>{m[0].toUpperCase() + m.slice(1)}</button>
+        ))}
+      </span>
+      <h2>Palette</h2>
+      <p className="muted">Only for you; everyone in the workspace picks their own.</p>
+      <div className="palettes" role="radiogroup" aria-label="Palette">
+        {PALETTES.map((p) => (
+          <button key={p.id} role="radio" aria-checked={appearance.palette === p.id} className="palette-card" data-palette={p.id} onClick={() => set({ palette: p.id })}>
+            <span className="pc-preview" aria-hidden="true">
+              <span className="pc-side"><i /><i /><i /></span>
+              <span className="pc-main">
+                <span className="pc-row"><i className="s-running" /><i className="s-review" /><i className="s-done" /><i className="s-failed" /></span>
+                <span className="pc-card" /><span className="pc-card" />
+                <span className="pc-btn" />
+              </span>
+            </span>
+            <span className="pc-name">{p.name}</span>
+            <span className="pc-hint">{p.hint}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }

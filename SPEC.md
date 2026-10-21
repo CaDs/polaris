@@ -654,7 +654,8 @@ A workspace holds projects; a **project is one git repository** with its own boa
   `/my-issues`, `/reviews`, `/issues`, `/projects`, `/p/KEY` (board), `/p/KEY/cycles[/id|current]`, `/p/KEY/wiki`,
   `/p/KEY/overview` (fields, milestones, repository, delete), `/t/KEY-12`; `/` opens the first project's board (none:
   Projects, to create one). A board's filter bar keeps its project as a fixed scope (a view saved from it includes it).
-  Settings tabs: Models, Automation, Limits, Labels.
+  Settings tabs: Models, Automation, Limits, Labels, Appearance (the caller's own: palette and mode, `user_preferences`,
+  `GET/PUT /api/me/preferences {palette?, mode?}` merging like settings; palettes and tokens: DESIGN.md).
 - **CLI.** `npm run seed-tasks -- --workspace <slug> --project <KEY>`; `npm run agent -- --task` files into a `CLI`
   project of the `cli` workspace. The MCP `create_ticket` takes `project` (a key; optional when the workspace has one).
 
