@@ -35,19 +35,19 @@ function fields(e: FormEvent<HTMLFormElement>) {
   return Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
 }
 
-// Unauthenticated screens: brand panel + the form.
+// Unauthenticated screens: the brand over the form, on the night sky.
 function Landing({ children }: { children: ReactNode }) {
   return (
-    <div className="landing">
-      <div className="brand">
-        <div className="aurora" aria-hidden="true" />
-        <div className="stars" aria-hidden="true" />
+    // data-palette re-declares the palette's tokens here, where color-scheme is dark: tokens resolved at the root would stay light.
+    <div className="landing" data-palette={document.documentElement.dataset.palette || "black"}>
+      <div className="aurora" aria-hidden="true" />
+      <div className="stars" aria-hidden="true" />
+      <div className="landing-col">
         <Mark />
         <div className="wordmark">Polaris</div>
         <p className="tagline">A fixed point while your agents work: tickets in, reviewed diffs out.</p>
-        <div className="brand-rule" aria-hidden="true" />
+        {children}
       </div>
-      {children}
     </div>
   );
 }
@@ -55,6 +55,8 @@ function Landing({ children }: { children: ReactNode }) {
 function AuthForm() {
   const [mode, setMode] = useState<"in" | "up">("in");
   const [error, setError] = useState("");
+  const [forgot, setForgot] = useState(false);
+  const [email, setEmail] = useState("");
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     const f = fields(e);
@@ -75,7 +77,7 @@ function AuthForm() {
           </label>
         )}
         <label>
-          Email <input name="email" type="email" required autoComplete="email" />
+          Email <input name="email" type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         </label>
         <label>
           Password
@@ -99,6 +101,13 @@ function AuthForm() {
         >
           {mode === "in" ? "No account? Create one" : "Have an account? Sign in"}
         </button>
+        {mode === "in" && (forgot ? (
+          // Polaris runs on your machine and sends no email: whoever can run commands where it runs resets the password.
+          <p className="forgot muted" role="status">
+            On the machine running Polaris, in its folder, run <code>npm run reset-password -- {email || "you@example.com"}</code>. It prints a new
+            password and signs that account out everywhere.
+          </p>
+        ) : <button type="button" className="link" onClick={() => setForgot(true)}>Forgot your password?</button>)}
       </form>
     </Landing>
   );

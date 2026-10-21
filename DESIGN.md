@@ -25,7 +25,7 @@ Review is never the accent's hue (periwinkle or violet next to a blue accent), s
 One block per palette (`:root` = the default, `[data-palette="…"]` the others; the attribute also scopes a palette to an
 Appearance preview card), each `light-dark(light, dark)`:
 bg, sidebar, surface, hover (raised), border, text, muted, accent, on-accent, accent-text, warn (running), review, ok
-(done), error (failed), and for the always-dark landing panel night, glow, glow-on. Derived for every palette:
+(done), error (failed), and for the always-dark landing night, glow, glow-on. Derived for every palette:
 `--accent-hover` (accent mixed 15% toward text), `--flow-a/b` (accent → accent-text).
 
 Contrast (WCAG AA, checked for every palette and mode): text, muted, accent-text and the four status colors ≥ 4.5:1 on bg,
@@ -51,12 +51,13 @@ and a running card's static gradient hairline says a model is working. Selects u
 
 "Circumpolar": a fixed point with two star trails turning around it; Polaris holds still while the agents work. Inline SVG
 (`Mark` in web/App.tsx) on a 32-unit grid: two arcs at a 2.6 stroke with round caps and a filled center dot, all in
-`currentColor`. Monochrome, no tile, no glow: it takes the text color (the landing's starlight on the night panel). The
+`currentColor`. Monochrome, no tile, no glow: it takes the text color (the landing's starlight on the night sky). The
 favicon is the same mark in white on a black rounded tile, so it reads on light and dark tabs.
 
 ## Gradient rule
 
 Inside the app a gradient means "a model is working": the 2px top hairline on a running board card and the 2px left rule on
 the model's own transcript in a run (`--flow-a → --flow-b`). Chat replies carry no rule: they sit in a gutter behind the
-mark (16px, muted), which takes the accent while the reply is still coming. Buttons and the mark are flat. The landing panel is the
-palette's night with a soft accent glow and stars. Never on page, card, table or sidebar backgrounds, or on text.
+mark (16px, muted), which takes the accent while the reply is still coming. Buttons and the mark are flat. The landing is one
+night sky across the whole page (the palette's night, a soft accent glow behind the brand, stars), always dark: the
+mark, wordmark and tagline centered over the form card. Never on page, card, table or sidebar backgrounds, or on text.

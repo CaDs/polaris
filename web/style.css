@@ -179,31 +179,29 @@ button.link:hover { text-decoration: underline; }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .row.end { justify-content: flex-end; }
 
-/* landing + auth: night-sky brand panel beside the form; stacks on phones */
-.landing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 100vh; }
-.brand {
-  position: relative; overflow: hidden;
-  display: grid; align-content: center; gap: 12px; padding: 48px clamp(24px, 6vw, 80px);
-  color: var(--star); background: var(--night);
-  --accent: var(--glow); --on-accent: var(--glow-on); /* the mark on the dark panel */
+/* landing + auth: one night sky behind everything (always dark, whatever the mode), the brand over the form, centered */
+.landing {
+  position: relative; overflow: hidden; display: grid; place-items: center; min-height: 100vh; padding: 48px 16px;
+  color-scheme: dark; color: var(--text); background: var(--night);
 }
-.brand > * { position: relative; }
-.brand > .aurora, .brand > .stars { position: absolute; inset: 0; pointer-events: none; }
-.aurora { background: radial-gradient(420px 320px at 78% 18%, color-mix(in srgb, var(--glow) 40%, transparent), transparent 70%), radial-gradient(360px 260px at 12% 92%, color-mix(in srgb, var(--glow) 16%, transparent), transparent 70%); }
+.landing > .aurora, .landing > .stars { position: absolute; inset: 0; pointer-events: none; }
+.aurora { background: radial-gradient(640px 420px at 50% 22%, color-mix(in srgb, var(--glow) 30%, transparent), transparent 70%), radial-gradient(520px 360px at 50% 110%, color-mix(in srgb, var(--glow) 12%, transparent), transparent 70%); }
 .stars {
   opacity: 0.8;
   background:
     radial-gradient(1px 1px at 14% 18%, #f4f6fb 50%, transparent), radial-gradient(1.4px 1.4px at 66% 9%, #c9d3ea 50%, transparent),
-    radial-gradient(1px 1px at 88% 34%, #f4f6fb 50%, transparent), radial-gradient(1.6px 1.6px at 42% 27%, #f4f6fb 50%, transparent),
-    radial-gradient(1px 1px at 8% 64%, #c9d3ea 50%, transparent), radial-gradient(1.2px 1.2px at 76% 72%, #f4f6fb 50%, transparent),
-    radial-gradient(1px 1px at 31% 86%, #c9d3ea 50%, transparent), radial-gradient(1.4px 1.4px at 93% 90%, #f4f6fb 50%, transparent),
-    radial-gradient(1px 1px at 55% 56%, #c9d3ea 50%, transparent);
+    radial-gradient(1px 1px at 88% 34%, #f4f6fb 50%, transparent), radial-gradient(1.6px 1.6px at 32% 31%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 8% 64%, #c9d3ea 50%, transparent), radial-gradient(1.2px 1.2px at 81% 72%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 22% 88%, #c9d3ea 50%, transparent), radial-gradient(1.4px 1.4px at 93% 90%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 72% 46%, #c9d3ea 50%, transparent), radial-gradient(1.2px 1.2px at 4% 38%, #f4f6fb 50%, transparent),
+    radial-gradient(1px 1px at 58% 94%, #c9d3ea 50%, transparent), radial-gradient(1.4px 1.4px at 96% 12%, #f4f6fb 50%, transparent);
 }
-.brand .mark { width: 44px; height: 44px; color: #f4f6fb; }
-.wordmark { font-size: 34px; font-weight: 650; letter-spacing: -0.015em; line-height: 1.1; }
-.tagline { margin: 0; max-width: 32ch; font-size: 15px; color: #c9d3ea; }
-.brand-rule { width: 72px; height: 2px; background: linear-gradient(90deg, var(--glow), transparent); }
-.landing .card { margin: auto; width: min(360px, calc(100% - 32px)); }
+.landing-col { position: relative; display: grid; justify-items: center; gap: 12px; width: min(360px, 100%); text-align: center; }
+.landing-col .mark { width: 44px; height: 44px; color: var(--star); }
+.wordmark { font-size: 34px; font-weight: 650; letter-spacing: -0.015em; line-height: 1.1; color: var(--star); }
+.tagline { margin: 0 0 16px; max-width: 32ch; font-size: 15px; color: #c9d3ea; }
+.landing .card { margin: 0; width: 100%; text-align: left; }
+.forgot { margin: 0; font-size: 12px; line-height: 1.5; }
 .card {
   display: grid;
   gap: 14px;
@@ -219,11 +217,6 @@ button.link:hover { text-decoration: underline; }
 .card label { margin: 0; }
 .card > .btn { padding: 7px 10px; }
 .mark { flex: none; display: block; width: 20px; height: 20px; }
-@media (max-width: 720px) {
-  .landing { grid-template-columns: minmax(0, 1fr); align-content: start; }
-  .brand { padding: 32px 16px 28px; }
-  .landing .card { margin: 24px auto; }
-}
 
 /* shell */
 .shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
