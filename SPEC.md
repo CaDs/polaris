@@ -723,6 +723,15 @@ A workspace holds projects; a **project is one git repository** with its own boa
   validated like the old settings (`inspectRepo`: the root of a repo with commits, the base branch exists, empty = its
   current branch; image reference; protected paths relative) on create and whenever given; `null` resets a command to
   `PROJECT_DEFAULTS`.
+- **Repository inspection** (`POST /api/projects/inspect {repo_path, base_branch?}`, `server/inspect.ts`): what the project form
+  shows once a folder is set. A folder that `inspectRepo` would refuse gets its 400 plus a `state` the form can act on:
+  `not_found`, `not_a_repo`, `inside_repo` (with the repository's `root`) or `no_commits`. Otherwise `ok`: the local
+  branches newest first (`polaris/*` run branches left out, the checked-out one marked), `base_branch` (default: the
+  checked-out one; `base_exists` false when it is gone), **protected-path candidates** (directories at depth <= 2 named
+  `test(s)`, `spec(s)`, `__tests__`, `e2e`, `eval(s)`, or holding at least 3 test files, with a file count and the dominant
+  test-file pattern; top-level test files are listed unsuggested) and **suggested setup/test commands** by lockfile
+  (npm, pnpm, yarn, bun, uv, pip, go, cargo; first match wins). All of it is read from git objects of the base branch
+  (`ls-tree`, `cat-file`), never the working tree.
 - **What stays workspace-wide** (`workspace_settings`, `GET/PUT /api/settings`): models (default, reviewer, per phase),
   model review, auto-approve, auto-split + triage, child size hint, the wiki toggle, budgets, compaction, spending caps;
   providers, labels, views, lessons, prompts, evals, failure mining, usage, notifications. A run's settings are

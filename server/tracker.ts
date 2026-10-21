@@ -7,6 +7,7 @@ import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
+import { inspectProject } from "./inspect.ts";
 import { IMAGE_REF, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
 
@@ -405,6 +406,13 @@ trackerRoutes.get("/projects", (c) => {
   const ws = c.get("workspaceId");
   const ids = db.prepare("SELECT id FROM projects WHERE workspace_id = ? ORDER BY created_at, rowid").all(ws) as { id: string }[];
   return c.json(ids.map((p) => project(ws, p.id)));
+});
+// The repository form's detection and suggestions (POL-29). A folder that is not a usable repository gets project create's 400,
+// with its `state` (and `root` for inside_repo) so the form can offer the fix.
+trackerRoutes.post("/projects/inspect", async (c) => {
+  const b = await body(c);
+  const r = await inspectProject(typeof b.repo_path === "string" ? b.repo_path.trim() : "", typeof b.base_branch === "string" ? b.base_branch.trim() : "");
+  return c.json(r, r.state === "ok" ? 200 : 400);
 });
 trackerRoutes.post("/projects", async (c) => {
   const v = await projectBody(c.get("workspaceId"), await body(c));

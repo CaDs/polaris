@@ -37,17 +37,27 @@ export async function git(cwd: string, args: string[], extraEnv?: Record<string,
   }
 }
 
-// Settings validation: absolute path to the root of a repo with at least one commit, and an existing base branch
-// (default: the branch checked out there).
-export async function inspectRepo(repoPath: string, baseBranch: string): Promise<{ error: string } | { repo_path: string; base_branch: string }> {
-  if (!isAbsolute(repoPath)) return { error: "Repository path must be an absolute path" };
+// What is at a folder, as a state the form can act on (POL-29): not_found, not_a_repo, inside_repo (`root` is the repository's
+// root), no_commits, or ok. `error` is the message project create/update fail with.
+export type RepoState = { state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok"; root?: string; error?: string };
+export async function repoState(repoPath: string): Promise<RepoState> {
+  if (!isAbsolute(repoPath)) return { state: "not_found", error: "Repository path must be an absolute path" };
+  if (!existsSync(repoPath)) return { state: "not_found", error: `${repoPath} is not a git repository (or does not exist)` };
   const top = await git(repoPath, ["rev-parse", "--show-toplevel"]).catch(() => "");
-  if (!top) return { error: `${repoPath} is not a git repository (or does not exist)` };
-  if (realpathSync(top) !== realpathSync(repoPath)) return { error: `${repoPath} is inside a git repository; use its root ${top}` };
+  if (!top) return { state: "not_a_repo", error: `${repoPath} is not a git repository (or does not exist)` };
+  if (realpathSync(top) !== realpathSync(repoPath)) return { state: "inside_repo", root: top, error: `${repoPath} is inside a git repository; use its root ${top}` };
   // Not `rev-list --all`: it also reads every linked worktree's HEAD and fails while a run's `git worktree add` is half done
   // (~13% of checks under concurrent runs), so a run queued then got "no commits yet".
   const commit = (await git(repoPath, ["rev-list", "-n1", "--branches", "--tags", "--remotes"]).catch(() => "")) || (await git(repoPath, ["rev-parse", "--verify", "-q", "HEAD"]).catch(() => ""));
-  if (!commit) return { error: "Repository has no commits yet" };
+  if (!commit) return { state: "no_commits", root: top, error: "Repository has no commits yet" };
+  return { state: "ok", root: top };
+}
+
+// Settings validation: absolute path to the root of a repo with at least one commit, and an existing base branch
+// (default: the branch checked out there).
+export async function inspectRepo(repoPath: string, baseBranch: string): Promise<{ error: string } | { repo_path: string; base_branch: string }> {
+  const st = await repoState(repoPath);
+  if (st.error) return { error: st.error };
   const base = baseBranch || (await git(repoPath, ["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => ""));
   if (!base) return { error: "HEAD is detached; set a base branch" };
   if (!(await git(repoPath, ["rev-parse", "--verify", "-q", `refs/heads/${base}^{commit}`]).catch(() => ""))) return { error: `Branch "${base}" does not exist` };
