@@ -74,6 +74,8 @@ export function isLocalUrl(raw: string) {
 
 // The parts of the policy that need no DNS: for validating a base URL when it is saved.
 export function checkUrl(raw: string): URL {
+  // A ? or # would swallow the path Polaris appends, letting the base URL choose the request path.
+  if (/[?#]/.test(raw)) throw new EgressError("base URL must not contain a query string or fragment");
   let u: URL;
   try {
     u = new URL(raw);

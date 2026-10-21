@@ -57,6 +57,10 @@ test("IPv6 forms of blocked addresses are refused (POL-13)", () => {
   assert.doesNotThrow(() => checkUrl("https://[64:ff9b::808:808]/")); // NAT64 to a public IPv4
 });
 
+test("base URLs with a query string, fragment or userinfo are refused (POL-12)", () => {
+  for (const u of ["http://10.0.0.5:8080/admin?x=", "https://api.example.com/v1?", "https://api.example.com/v1#x"]) refused(u, /query string or fragment/);
+});
+
 test("providerFetch refuses redirects (the key would follow) and gives up on silent servers; error bodies are capped", async () => {
   const srv = createServer((req, res) => {
     if (req.url === "/redirect") return void res.writeHead(302, { location: "https://elsewhere.example/steal" }).end();

@@ -116,6 +116,24 @@ test("models and the tool-calling smoke test", async () => {
   assert.equal((await call("GET", `/api/providers/${dead}/models`, alice)).status, 502);
 });
 
+test("Test and the model list never reflect an upstream body; a base URL with ? or # is a 400 (POL-12)", async () => {
+  const { srv: internal, url } = await listen((_req, res) => void res.writeHead(404).end("SECRET-BODY"));
+  try {
+    for (const kind of ["ollama", "litellm", "anthropic"] as const) {
+      const id = (await call("POST", "/api/providers", alice, { name: `Int ${kind}`, kind, base_url: url, ...(kind === "anthropic" ? { api_key: "k-1234" } : {}) })).body.id;
+      const t = await call("POST", `/api/providers/${id}/test`, alice, { model: "m" });
+      const l = await call("GET", `/api/providers/${id}/models`, alice);
+      for (const r of [t, l]) assert.ok(!JSON.stringify(r.body).includes("SECRET-BODY"), kind);
+      if (kind === "ollama") assert.match(t.body.error, /HTTP 404/);
+    }
+  } finally {
+    internal.closeAllConnections();
+    internal.close();
+  }
+  for (const base_url of [`${mock}/admin?x=`, `${mock}/#frag`])
+    assert.equal((await call("POST", "/api/providers", alice, { name: "Q", kind: "litellm", base_url })).status, 400, base_url);
+});
+
 test("runs record the chosen provider/model; retry-with picks another; gate retries keep it", async () => {
   assert.equal((await configure(alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f ok.txt" })).status, 200);
   const providers = (await call("GET", "/api/providers", alice)).body;

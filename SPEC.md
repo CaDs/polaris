@@ -253,7 +253,9 @@ summaries. Encrypted-only reasoning shows nothing.
   name counts as local). Redirects are refused (a key never follows one), no response headers within 120 s (model lists
   10–15 s; a local model, Ollama or a LiteLLM proxy on this network, 10 minutes: it may be swapping a model in or
   prefilling a long prompt) fails the call, and a one-off request (reflection, mining) to a local model gets the same
-  10 minutes, and error bodies are read up to 64 KiB. Policy failures are not retried.
+  10 minutes, and error bodies are read up to 64 KiB. Policy failures are not retried. A base URL has no query string, fragment
+  or userinfo (a `?` would swallow the path Polaris appends). Test and the model list answer with the HTTP status and a fixed
+  reason, never the upstream body (it goes to the server log): a base URL must not turn them into a reader of internal services.
 - **Secrets.** Keys must be printable without spaces (a key is a header value: no header injection), at most 500 chars.
   `secret_last4` only for keys of 16+ chars. Provider error messages pass `scrub()`: the provider's own key and common key
   and bearer-token shapes become `[redacted]` before they reach events, transcripts, the ledger or the UI. The server refuses

@@ -324,6 +324,18 @@ providerRoutes.delete("/:id", async (c) => {
   return c.body(null, 204);
 });
 
+// What Test and the model list may tell the caller about a failed provider call: the HTTP status and a fixed reason, or an
+// egress policy refusal (about the URL they typed). Never the upstream body or parse error: an internal service behind a
+// base URL must not be readable through them. The detail goes to the server log only.
+function reason(e: unknown) {
+  const m = scrub((e as Error)?.message ?? String(e));
+  console.error("provider call failed:", m);
+  if (e instanceof EgressError) return m;
+  const status = /\bHTTP (\d{3})\b/.exec(m)?.[1];
+  if (status) return `the provider answered HTTP ${status}${status === "401" || status === "403" ? " (check the key)" : ""}`;
+  return "request failed: no valid answer from the provider (see the server log)";
+}
+
 providerRoutes.get("/:id/models", async (c) => {
   const p = own(c.get("workspaceId"), c.req.param("id"));
   if (!p) return c.json({ error: "not_found" }, 404);
@@ -338,7 +350,7 @@ providerRoutes.get("/:id/models", async (c) => {
     }
     return c.json({ models: await listModels(p) });
   } catch (e) {
-    return c.json({ error: `could not list models: ${scrub((e as Error).message)}` }, 502);
+    return c.json({ error: `could not list models: ${reason(e)}` }, 502);
   }
 });
 
@@ -369,7 +381,7 @@ providerRoutes.post("/:id/test", async (c) => {
         { role: "user", content: calls.map((x) => ({ type: "tool_result", tool_use_id: x.id, content: "ping", ...(x.namespace ? { namespace: x.namespace } : {}) })) }] }, () => {});
     return c.json({ model, ok: true, tool_call: calls.length > 0, latency_ms: Date.now() - t0 });
   } catch (e) {
-    return c.json({ model, ok: false, tool_call: false, latency_ms: Date.now() - t0, error: (e as Error).message });
+    return c.json({ model, ok: false, tool_call: false, latency_ms: Date.now() - t0, error: reason(e) });
   }
 });
 
