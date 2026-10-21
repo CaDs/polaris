@@ -33,12 +33,17 @@ npm run bench -- --check                  # no model: every level's base fails t
 node bench/report.ts bench/results/a.jsonl bench/results/b.jsonl
 ```
 
-Flags: `--model` (Ollama model, required), `--levels` (default all), `--runs N` (repeat each level), `--split 0|1`
+Flags: `--model` (required), `--provider` (`ollama` by default; `anthropic`, `openai`, `openrouter` or `litellm`, with the
+key in `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `LITELLM_API_KEY` or the variable `--api-key-env`
+names; `--base-url` for LiteLLM or a non-default endpoint), `--levels` (default all), `--runs N` (repeat each level), `--split 0|1`
 (auto-split into an epic, default 0), `--wiki 0|1` (default 0), `--max-turns` / `--max-minutes` (per attempt, default
 120 / 60), `--out`, `--tag` (default: the server checkout's short sha), `--server-dir <checkout>` (run another build's
 server, e.g. a `git worktree` of an older commit), `--ollama <url>`.
 
-Needs Docker and Ollama. A level takes 5 to 60 minutes; one model call at a time (`POLARIS_CONCURRENCY=1`).
+The ChatGPT plan can't be benchmarked here: its sign-in lives in an instance's database and its refresh tokens rotate, so
+the bench server can't hold a copy without logging that instance out.
+
+Needs Docker, and Ollama for the default provider. A level takes 5 to 60 minutes; one model call at a time (`POLARIS_CONCURRENCY=1`).
 
 ## What happens per run
 

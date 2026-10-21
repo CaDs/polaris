@@ -39,3 +39,15 @@ test("bench grader: locked tests decide, the agent's copy of them does not", { s
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("bench --provider: Ollama by default; API-key providers read the key from the environment; the plan is refused", async () => {
+  const { providerBody } = await import("../bench/run.ts");
+  const o = { provider: "ollama", ollama: "http://localhost:11434" };
+  assert.deepEqual(providerBody(o, {}), { name: "Ollama", kind: "ollama", base_url: "http://localhost:11434" });
+  assert.deepEqual(providerBody({ ...o, provider: "anthropic" }, { ANTHROPIC_API_KEY: " sk-ant-x " }), { name: "anthropic", kind: "anthropic", auth_type: "api_key", api_key: "sk-ant-x" });
+  assert.deepEqual(providerBody({ ...o, provider: "openai", "api-key-env": "MY_KEY" }, { MY_KEY: "sk-y" }), { name: "openai", kind: "openai", auth_type: "api_key", api_key: "sk-y" });
+  assert.throws(() => providerBody({ ...o, provider: "openai" }, {}), /needs an API key in \$OPENAI_API_KEY/);
+  assert.throws(() => providerBody({ ...o, provider: "chatgpt" }, {}), /ChatGPT plan can't be benchmarked/);
+  assert.throws(() => providerBody({ ...o, provider: "litellm" }, {}), /needs --base-url/);
+  assert.deepEqual(providerBody({ ...o, provider: "litellm", "base-url": "http://127.0.0.1:4000" }, {}), { name: "litellm", kind: "litellm", auth_type: "none", base_url: "http://127.0.0.1:4000" });
+});

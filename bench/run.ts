@@ -1,4 +1,5 @@
-// npm run bench -- --model <ollama model> [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N]
+// npm run bench -- --model <model> [--provider ollama|anthropic|openai|openrouter|litellm] [--api-key-env NAME] [--base-url URL]
+//                  [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N]
 //                  [--out bench/results/x.jsonl] [--tag <label>] [--server-dir <polaris checkout>] [--ollama URL]
 // npm run bench -- --check [--levels ...]   (no model: each level's base must fail the grader, base + answer key must pass)
 // Complexity ladder (bench/README.md): one Polaris server on a free port with a temp DB and data dir; per level and run a
@@ -23,6 +24,23 @@ export const LEVELS: Level[] = JSON.parse(readFileSync(join(BENCH, "tickets.json
 export const SETUP = "npm ci --no-audit --no-fund";
 export const TEST = "npm test";
 const PROTECTED = "test/,e2e/"; // covers every level's locked test (and the rest of the target's suite)
+
+// The provider the bench server's workspaces run on. Keys come from the environment (never a flag: shell history). The
+// ChatGPT plan is not offered: its sign-in lives in an instance's database and its refresh tokens rotate, so a copy here
+// would log the instance out.
+const fail = (msg: string): never => {
+  throw new Error(msg);
+};
+const KEY_ENV: Record<string, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY", litellm: "LITELLM_API_KEY" };
+export function providerBody(o: { provider: string; ollama: string; "api-key-env"?: string; "base-url"?: string }, env: NodeJS.ProcessEnv = process.env) {
+  if (o.provider === "ollama") return { name: "Ollama", kind: "ollama", base_url: o["base-url"] ?? o.ollama };
+  const keyEnv = o["api-key-env"] ?? KEY_ENV[o.provider];
+  if (!keyEnv) fail(`--provider must be one of ollama, ${Object.keys(KEY_ENV).join(", ")} (the ChatGPT plan can't be benchmarked: see bench/README.md)`);
+  const key = env[keyEnv]?.trim();
+  if (!key && o.provider !== "litellm") fail(`--provider ${o.provider} needs an API key in $${keyEnv} (or --api-key-env NAME)`);
+  if (o.provider === "litellm" && !o["base-url"]) fail("--provider litellm needs --base-url");
+  return { name: o.provider, kind: o.provider, auth_type: key ? "api_key" : "none", ...(key ? { api_key: key } : {}), ...(o["base-url"] ? { base_url: o["base-url"] } : {}) };
+}
 
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=bench", "-c", "user.email=bench@localhost", ...args], { encoding: "utf8" }).trim();
 const level = (id: string) => LEVELS.find((l) => l.level === id.toUpperCase() || l.level === `L${id}`) ?? die(`unknown level ${id}`);
@@ -185,6 +203,9 @@ if (import.meta.main) {
   const { values: o } = parseArgs({
     options: {
       model: { type: "string" },
+      provider: { type: "string", default: "ollama" },
+      "api-key-env": { type: "string" },
+      "base-url": { type: "string" },
       levels: { type: "string", default: LEVELS.map((l) => l.level).join(",") },
       runs: { type: "string", default: "1" },
       split: { type: "string", default: "0" },
@@ -202,7 +223,13 @@ if (import.meta.main) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "polaris-bench-")));
   process.env.POLARIS_DATA_DIR = join(home, "data"); // grader containers carry the bench server's data-dir label, not ./data's
   if (o.check) await check(levels);
-  if (!o.model) die("--model is required (an Ollama model name)");
+  if (!o.model) die("--model is required (a model of --provider, default Ollama)");
+  let providerSpec: ReturnType<typeof providerBody>;
+  try {
+    providerSpec = providerBody(o); // checked before any server starts
+  } catch (e) {
+    die((e as Error).message);
+  }
   const serverDir = resolve(o["server-dir"]);
   const tag = o.tag ?? git(serverDir, "rev-parse", "--short", "HEAD");
   const out = resolve(o.out);
@@ -211,7 +238,7 @@ if (import.meta.main) {
   const stop = (code: number) => (child.kill(), process.exit(code));
   process.on("SIGINT", () => stop(130));
   const dbPath = join(home, "polaris.db");
-  log(`bench ${tag}: ${o.model}, ${levels.map((l) => l.level).join(" ")} x${o.runs}, server ${serverDir} at ${base}, temp ${home}`);
+  log(`bench ${tag}: ${o.provider} ${o.model}, ${levels.map((l) => l.level).join(" ")} x${o.runs}, server ${serverDir} at ${base}, temp ${home}`);
   const t00 = Date.now();
   for (const l of levels) {
     for (let run = 1; run <= Number(o.runs); run++) {
@@ -226,7 +253,7 @@ if (import.meta.main) {
         model_review: true, auto_split: o.split === "1", auto_approve_children: true, wiki: o.wiki === "1",
         max_turns: Number(o["max-turns"]), max_minutes: Number(o["max-minutes"]),
       });
-      const prov = await api("POST", "/api/providers", { name: "Ollama", kind: "ollama", base_url: o.ollama });
+      const prov = await api("POST", "/api/providers", providerSpec);
       await api("PUT", "/api/settings/default-provider", { provider_id: prov.id, model: o.model });
       const t = await api("POST", "/api/tickets", { title: l.title, spec: l.spec });
       await api("POST", `/api/tickets/${t.id}/runs`);
@@ -246,7 +273,7 @@ if (import.meta.main) {
       const stat = ref ? git(repo, "diff", "--shortstat", baseSha, ref) : "";
       const diff_lines = ref ? [/(\d+) insertion/, /(\d+) deletion/].reduce((n, re) => n + Number(re.exec(stat)?.[1] ?? 0), 0) : null;
       const row = {
-        tag, model: o.model, level: l.level, run, ticket: t.key, pass: !!g?.pass, harness_pass, status, chain: s?.chain ?? [t.key], kind: s?.kind ?? "task", children: s?.children ?? 0,
+        tag, provider: o.provider, model: o.model, level: l.level, run, ticket: t.key, pass: !!g?.pass, harness_pass, status, chain: s?.chain ?? [t.key], kind: s?.kind ?? "task", children: s?.children ?? 0,
         wall_secs: Math.round((Date.now() - t0) / 1000), ...metrics(dbPath, ws), diff_lines, key_lines: l.key_lines,
         budget: { max_turns: Number(o["max-turns"]), max_minutes: Number(o["max-minutes"]) }, split: o.split === "1", wiki: o.wiki === "1",
         date: new Date().toISOString(), home, flaky: g?.flaky, grade: g?.tail || undefined,
