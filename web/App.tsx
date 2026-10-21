@@ -13,7 +13,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Alert, AppearanceProvider, DateInput, Dialog, Icon, Loading, api, errorText, useAppearance, useWorkspaceEvents, type Ticket } from "./ui.tsx";
+import { Alert, AppearanceProvider, DateInput, Dialog, Icon, Loading, api, errorText, useAppearance, useWorkspaceEvents, type IconName, type Ticket } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -35,13 +35,14 @@ function fields(e: FormEvent<HTMLFormElement>) {
   return Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
 }
 
-// The north-star mark: long cardinal rays, short diagonals, on a tile in the palette's accent. Inline so it needs no asset.
+// The Polaris mark, "circumpolar": a fixed point with two star trails turning around it (Polaris holds still while the
+// agents work). One stroke weight on a 32-unit grid, drawn in currentColor: monochrome, no tile, no glow (DESIGN.md).
 function Mark() {
   return (
-    <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="8" fill="var(--accent)" />
-      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--on-accent)" opacity=".55" transform="rotate(45 16 16)" />
-      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--on-accent)" />
+    <svg className="mark" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" aria-hidden="true">
+      <path d="M9.42 18.39A7 7 0 0 1 22.06 12.5" />
+      <path d="M27.75 20.28A12.5 12.5 0 1 1 11.72 4.25" />
+      <circle cx="16" cy="16" r="2.6" fill="currentColor" stroke="none" />
     </svg>
   );
 }
@@ -232,7 +233,8 @@ const PAGES: Record<string, string> = {
   "my-issues": "My issues", reviews: "Reviews", agent: "Agent", issues: "All issues", projects: "Projects", views: "Views", usage: "Usage", improvement: "Learning", settings: "Settings",
 };
 // A project's pages: /p/KEY (the board), /p/KEY/cycles[/id|current], /p/KEY/wiki, /p/KEY/overview.
-const PROJECT_PAGES: [string, string][] = [["", "Board"], ["cycles", "Cycles"], ["wiki", "Wiki"], ["overview", "Overview"]];
+const PROJECT_PAGES: [string, string, IconName][] = [["", "Board", "board"], ["cycles", "Cycles", "cycle"], ["wiki", "Wiki", "book"], ["overview", "Overview", "home"]];
+const PAGE_ICONS: Record<string, IconName> = { projects: "box", issues: "layers", views: "views", usage: "chart", improvement: "bulb" };
 
 function Dashboard({ email }: { email: string }) {
   const { data: workspace } = authClient.useActiveOrganization();
@@ -297,8 +299,10 @@ function Dashboard({ email }: { email: string }) {
   const title = ticket ? ticket.key : section === "t" ? "Ticket" : project && page !== undefined
     ? `${project.name} · ${page === "cycles" && path.split("/")[4] ? (cycle ? cycleName(cycle) : "Cycle") : PROJECT_PAGES.find(([p]) => p === page)?.[1] ?? ""}`
     : (PAGES[section] ?? "");
-  const link = (to: string, label: ReactNode, active: boolean, cls = "") => (
-    <a key={to} href={to} className={`${cls}${active ? " active" : ""}`.trim()} aria-current={active ? "page" : undefined} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>
+  const link = (to: string, label: ReactNode, active: boolean, cls = "", icon?: IconName) => (
+    <a key={to} href={to} className={`${cls}${active ? " active" : ""}`.trim()} aria-current={active ? "page" : undefined} onClick={(e) => (e.preventDefault(), go(to))}>
+      {icon && <Icon name={icon} size={15} />}{label}
+    </a>
   );
 
   return (
@@ -308,29 +312,29 @@ function Dashboard({ email }: { email: string }) {
           <Mark />
           <strong>{name}</strong>
         </header>
-        <button className="btn palette-btn" onClick={() => setPalette(true)}>Search or jump… <kbd>⌘K</kbd></button>
+        <button className="btn palette-btn" onClick={() => setPalette(true)}><Icon name="search" size={14} /> Search or jump… <kbd>⌘K</kbd></button>
         <nav aria-label="Main">
-          {link("/my-issues", "My issues", section === "my-issues")}
-          {link("/reviews", <>Reviews{reviews.length > 0 && <span className="count">{reviews.length}</span>}</>, section === "reviews")}
-          {link("/agent", "Agent", section === "agent")}
+          {link("/my-issues", "My issues", section === "my-issues", "", "user")}
+          {link("/reviews", <>Reviews{reviews.length > 0 && <span className="count">{reviews.length}</span>}</>, section === "reviews", "", "review")}
+          {link("/agent", "Agent", section === "agent", "", "chat")}
           <div className="nav-group">Workspace</div>
-          {(["projects", "issues", "views"] as const).map((p) => link(`/${p}`, PAGES[p], section === p))}
+          {(["projects", "issues", "views"] as const).map((p) => link(`/${p}`, PAGES[p], section === p, "", PAGE_ICONS[p]))}
           <details className="nav-more" open={section === "usage" || section === "improvement" || undefined}>
             <summary>More</summary>
-            {(["usage", "improvement"] as const).map((p) => link(`/${p}`, PAGES[p], section === p, "sub"))}
+            {(["usage", "improvement"] as const).map((p) => link(`/${p}`, PAGES[p], section === p, "sub", PAGE_ICONS[p]))}
           </details>
           <div className="nav-group">Your projects</div>
           {tracker?.projects.map((p) => (
             <details key={p.id} className="nav-project" open={p.id === project?.id || tracker.projects.length === 1 || undefined}>
               <summary><span className="key mono">{p.key}</span> {p.name}</summary>
-              {PROJECT_PAGES.map(([pg, label]) => [
-                link(`/p/${p.key}${pg && `/${pg}`}`, label, section === "p" && p.id === project?.id && page === pg && !(pg === "cycles" && path.split("/")[4] === "current"), "sub"),
+              {PROJECT_PAGES.map(([pg, label, icon]) => [
+                link(`/p/${p.key}${pg && `/${pg}`}`, label, section === "p" && p.id === project?.id && page === pg && !(pg === "cycles" && path.split("/")[4] === "current"), "sub", icon),
                 pg === "cycles" && tracker.cycles.some((c) => c.project_id === p.id && c.state === "current") &&
-                  link(`/p/${p.key}/cycles/current`, "Current cycle", section === "p" && p.id === project?.id && path.split("/")[4] === "current", "sub sub2"),
+                  link(`/p/${p.key}/cycles/current`, "Current cycle", section === "p" && p.id === project?.id && path.split("/")[4] === "current", "sub sub2", "clock"),
               ])}
             </details>
           ))}
-          {tracker && !tracker.projects.length && link("/projects", "Create a project", false, "sub muted")}
+          {tracker && !tracker.projects.length && link("/projects", "Create a project", false, "sub muted", "plus")}
         </nav>
         <div className="side-bottom">
           <Account email={email} />
@@ -343,8 +347,8 @@ function Dashboard({ email }: { email: string }) {
           <h1>{title}</h1>
           <span className="grow" />
           <Bell open={open} />
-          {!chat && section !== "agent" && <button className="btn" onClick={() => setChat(true)} title="⌘J">Ask Polaris</button>}
-          <button className="btn primary" onClick={() => setCreating(true)} disabled={!tracker?.projects.length} title={tracker?.projects.length ? undefined : "Create a project first"}>New ticket</button>
+          {!chat && section !== "agent" && <button className="btn with-icon" onClick={() => setChat(true)} title="⌘J"><Icon name="chat" size={14} /> Ask Polaris</button>}
+          <button className="btn primary with-icon" onClick={() => setCreating(true)} disabled={!tracker?.projects.length} title={tracker?.projects.length ? "New ticket (C)" : "Create a project first"}><Icon name="edit" size={14} /> New ticket</button>
         </div>
         <main>
           {section === "settings" ? (

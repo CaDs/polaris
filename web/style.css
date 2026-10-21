@@ -199,7 +199,7 @@ button.link:hover { text-decoration: underline; }
     radial-gradient(1px 1px at 31% 86%, #c9d3ea 50%, transparent), radial-gradient(1.4px 1.4px at 93% 90%, #f4f6fb 50%, transparent),
     radial-gradient(1px 1px at 55% 56%, #c9d3ea 50%, transparent);
 }
-.brand .mark { width: 44px; height: 44px; filter: drop-shadow(0 6px 24px color-mix(in srgb, var(--glow) 45%, transparent)); }
+.brand .mark { width: 44px; height: 44px; color: #f4f6fb; }
 .wordmark { font-size: 34px; font-weight: 650; letter-spacing: -0.015em; line-height: 1.1; }
 .tagline { margin: 0; max-width: 32ch; font-size: 15px; color: #c9d3ea; }
 .brand-rule { width: 72px; height: 2px; background: linear-gradient(90deg, var(--glow), transparent); }
@@ -241,7 +241,9 @@ aside {
 .ws { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
 .ws strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .avatar { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; flex: none; }
-nav a { display: block; padding: 4px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
+nav a { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
+nav a .glyph { color: var(--muted); }
+nav a.active .glyph, nav a:hover .glyph { color: var(--text); }
 nav a:hover { background: var(--hover); text-decoration: none; }
 nav a.active { background: var(--hover); font-weight: 500; }
 .nav-group { padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -529,7 +531,7 @@ h2.cycle-title { font-size: 16px; margin: 0; text-transform: none; }
 nav a.sub { padding-left: 20px; font-size: 12px; color: var(--muted); }
 nav a.sub.active { color: var(--text); }
 nav a.sub2 { padding-left: 32px; }
-nav a .count { float: right; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; line-height: 16px; text-align: center; background: var(--hover); color: var(--muted); }
+nav a .count { margin-left: auto; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; line-height: 16px; text-align: center; background: var(--hover); color: var(--muted); }
 /* Collapsible groups (More, each project): native <details>. */
 nav details > summary { padding: 4px 8px; border-radius: 6px; cursor: pointer; list-style: none; }
 nav details > summary::-webkit-details-marker { display: none; }
@@ -543,7 +545,8 @@ nav details > summary:hover { background: var(--hover); }
 .new-project form .row { align-items: start; }
 .new-project form .row > label { display: grid; gap: 4px; }
 .new-project form > .btn { justify-self: start; }
-.palette-btn { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--muted); text-align: left; }
+.palette-btn { display: flex; align-items: center; gap: 6px; color: var(--muted); text-align: left; }
+.palette-btn kbd { margin-left: auto; }
 
 /* new ticket dialog */
 .fields { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
@@ -688,3 +691,6 @@ nav details > summary:hover { background: var(--hover); }
 .skill-option { align-items: flex-start; }
 .skill-option .badge { margin-left: 6px; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
+/* A button with a leading glyph (New ticket, Ask Polaris, Skills): icon and label on one line. */
+.btn.with-icon { display: inline-flex; align-items: center; gap: 6px; }
+.chat-example .glyph { color: var(--accent-text); margin-bottom: 4px; }

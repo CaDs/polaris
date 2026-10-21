@@ -4,7 +4,7 @@ import { Markdown } from "./Wiki.tsx";
 import { PRIORITIES, useTracker, type ProjectRef } from "./tracker.tsx";
 import { Popover } from "./Filters.tsx";
 import { SkillDialog } from "./Skills.tsx";
-import { Alert, Icon, StatusIcon, api, type Ticket } from "./ui.tsx";
+import { Alert, Icon, StatusIcon, api, type IconName, type Ticket } from "./ui.tsx";
 
 // M13: the chat (Cmd/Ctrl+J panel, or the full-width Agent page: variant "page"). Talks with a project's agent about the
 // page you're on; the agent proposes tickets as cards and you file them into that project. A new chat starts in the page's
@@ -17,10 +17,10 @@ type Proposal = { id: string; number: number; status: "open" | "filed" | "dismis
 type ChatInfo = { id: string; title: string; project_key?: string };
 type SkillRef = { id: string; name: string };
 // The Agent page's starting points: they fill the composer, the member finishes the sentence.
-const EXAMPLES = [
-  { title: "Plan a feature", text: "Turn an idea into scoped tickets", prompt: "I want to add … Ask me what's unclear, then propose tickets." },
-  { title: "Explain the code", text: "How a part of the repository works", prompt: "How does … work in this repository? Point me to the files." },
-  { title: "Groom the backlog", text: "Stale, duplicated or oversized tickets", prompt: "Which open tickets look stale, duplicated or too large to finish in one run? Suggest what to split or close." },
+const EXAMPLES: { icon: IconName; title: string; text: string; prompt: string }[] = [
+  { icon: "list", title: "Plan a feature", text: "Turn an idea into scoped tickets", prompt: "I want to add … Ask me what's unclear, then propose tickets." },
+  { icon: "code", title: "Explain the code", text: "How a part of the repository works", prompt: "How does … work in this repository? Point me to the files." },
+  { icon: "layers", title: "Groom the backlog", text: "Stale, duplicated or oversized tickets", prompt: "Which open tickets look stale, duplicated or too large to finish in one run? Suggest what to split or close." },
 ];
 
 const remembered = () => {
@@ -141,7 +141,7 @@ export function Chat({ context, label, project, tickets, go, filed, close, varia
               <div className="chat-examples" aria-label="Examples">
                 {EXAMPLES.map((x) => (
                   <button key={x.title} className="chat-example" onClick={() => setDraft(x.prompt)}>
-                    <strong>{x.title}</strong><span className="muted">{x.text}</span>
+                    <Icon name={x.icon} /><strong>{x.title}</strong><span className="muted">{x.text}</span>
                   </button>
                 ))}
               </div>
@@ -271,7 +271,7 @@ function SkillPicker({ projectId, selected, setSelected }: { projectId: string; 
   return (
     <>
       <span className="menu-anchor">
-        <button className="btn skills-btn" aria-expanded={open} onClick={() => setOpen(!open)}>Skills{selected.length > 0 && ` · ${selected.length}`}</button>
+        <button className="btn skills-btn with-icon" aria-expanded={open} onClick={() => setOpen(!open)}><Icon name="bolt" size={13} /> Skills{selected.length > 0 && ` · ${selected.length}`}</button>
         {open && (
           <Popover close={() => setOpen(false)}>
             {typeof options === "string" && <p className="error item">{options}</p>}
