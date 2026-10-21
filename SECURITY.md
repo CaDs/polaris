@@ -16,3 +16,11 @@ outside their worktree are the most valuable.
 - Changing a provider's base URL drops its stored key unless a new one comes with it.
 - Known limit: the address checks run when a URL is saved and again (cached a minute) before requests; a DNS answer that
   changes in between is not caught. Keep `HOST` on loopback, or put Polaris behind an authenticating proxy.
+
+## Repositories
+
+- A project's `repo_path` is refused when it is inside the Polaris data dir (where agent-written worktrees live), when its
+  owner is not the server's user, or, with `POLARIS_REPO_ROOTS` set (colon-separated), when it is outside those directories.
+  Set it on a shared instance: any member can register a project.
+- Known limit: host git runs in a registered repository, so its own `.git/config` and `.gitattributes` (smudge/clean filters,
+  `core.sshCommand`, ...) run on the host. Only register repositories you trust; the system config is not read.

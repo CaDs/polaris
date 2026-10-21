@@ -6,7 +6,7 @@ import { join } from "node:path";
 // M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { configure, fileTicket, call, db, events, idle, sh, task, until, user, workspace: base } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events, idle, sh, task, until, user, workspace: base, worktreeOf } = await import("./helpers.ts");
 const { createRun, subscribe } = await import("../server/agent/events.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { extractHandoff, handoffText, plannerTools, MAX_CHILDREN } = await import("../server/planner.ts");
@@ -64,7 +64,7 @@ test("epic: read-only planner round, B waits for A, approve A → B from the upd
   const calls = events(r1.id).filter((x) => x.type === "tool_call").map((x) => x.p.name);
   assert.deepEqual(calls, ["read_file", "create_ticket", "create_ticket", "finish_round"]);
   assert.equal(events(r1.id).find((x) => x.type === "round_finished")!.p.notes, "Created a.txt and b.txt tickets. Next: read their handoffs, then complete the epic.");
-  assert.equal(existsSync(r1.worktree), false);
+  assert.equal(existsSync(worktreeOf(r1.id)), false);
   assert.doesNotMatch(sh(w.repo, "git worktree list"), new RegExp(r1.id));
   assert.equal(sh(w.repo, "git status --porcelain"), "");
   assert.equal(sh(w.repo, "git rev-parse main"), init);

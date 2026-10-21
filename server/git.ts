@@ -1,15 +1,19 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { isProtected } from "./agent/tools.ts";
+import { dataDir } from "./sandbox.ts";
 
 // All git work happens on the host via the git CLI; the sandbox never sees the repo's .git (see README).
 const execFileP = promisify(execFile);
 const env = {
   ...process.env,
   GIT_TERMINAL_PROMPT: "0",
+  // No /etc/gitconfig or system gitattributes (filters, helpers) on the host's git.
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_ATTR_NOSYSTEM: "1",
   // Harness commits (passing runs, merges) never depend on the user's git identity.
   GIT_AUTHOR_NAME: "polaris",
   GIT_AUTHOR_EMAIL: "polaris@localhost",
@@ -37,10 +41,28 @@ export async function git(cwd: string, args: string[], extraEnv?: Record<string,
   }
 }
 
+const under = (p: string, root: string) => p === root || p.startsWith(root + sep);
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+
 // Settings validation: absolute path to the root of a repo with at least one commit, and an existing base branch
-// (default: the branch checked out there).
+// (default: the branch checked out there). Host git runs in it (worktree add, merge), and repo-local config such as a smudge
+// filter would run there, so before any git command: not under the data dir (worktrees and wikis are agent-writable), under
+// POLARIS_REPO_ROOTS when the operator set it (colon-separated), and owned by the server's user.
+// ponytail: repo-local filters and attributes of an allowed repo still run on the host; the allowlist is what keeps members off foreign repos.
 export async function inspectRepo(repoPath: string, baseBranch: string): Promise<{ error: string } | { repo_path: string; base_branch: string }> {
   if (!isAbsolute(repoPath)) return { error: "Repository path must be an absolute path" };
+  const at = real(repoPath);
+  if (under(at, real(dataDir()))) return { error: "Repository path is inside Polaris's data directory" };
+  const roots = (process.env.POLARIS_REPO_ROOTS ?? "").split(":").filter(Boolean);
+  if (roots.length && !roots.some((r) => under(at, real(r)))) return { error: "Repository path is outside POLARIS_REPO_ROOTS" };
+  const owner = existsSync(at) ? statSync(at).uid : undefined;
+  if (owner !== undefined && process.getuid && owner !== process.getuid()) return { error: "Repository must be owned by the user Polaris runs as" };
   const top = await git(repoPath, ["rev-parse", "--show-toplevel"]).catch(() => "");
   if (!top) return { error: `${repoPath} is not a git repository (or does not exist)` };
   if (realpathSync(top) !== realpathSync(repoPath)) return { error: `${repoPath} is inside a git repository; use its root ${top}` };

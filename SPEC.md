@@ -720,7 +720,8 @@ A workspace holds projects; a **project is one git repository** with its own boa
 - **Data.** `projects {key, name, …, repo_path, base_branch, setup_command, test_command, protected_paths, image}`. The key
   (2-5 capitals or digits, a capital first, unique in the workspace) prefixes ticket keys: `tickets.number` counts per
   project (`KEY-12`); `ticketKey()` reads the project's key, so renaming a key renames its tickets. Repository fields are
-  validated like the old settings (`inspectRepo`: the root of a repo with commits, the base branch exists, empty = its
+  validated like the old settings (`inspectRepo`: the root of a repo with commits, owned by the server's user, not under the
+  data dir, under `POLARIS_REPO_ROOTS` when that is set (colon-separated; unset = any path), the base branch exists, empty = its
   current branch; image reference; protected paths relative) on create and whenever given; `null` resets a command to
   `PROJECT_DEFAULTS`.
 - **What stays workspace-wide** (`workspace_settings`, `GET/PUT /api/settings`): models (default, reviewer, per phase),
@@ -763,7 +764,8 @@ A workspace holds projects; a **project is one git repository** with its own boa
   4 GB, 1–32 and 1–64; `node --test` runs one test file per CPU, so two CPUs ran a large suite serially). The built-in image is built with that uid:gid,
   labelled `polaris.image.version`, and rebuilt when the label is missing or older than `IMAGE_VERSION` (bump it with the
   Dockerfile); the shared npm cache volume is chowned to the sandbox user once per harness start if it isn't theirs.
-- Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git
+- Host git never trusts the worktree: hooks and fsmonitor are off, no system git config or attributes are read, run objects in
+  the API carry no `worktree` path, and worktrees the harness created are addressed by the git
   dir it recorded at creation (`--git-dir`/`--work-tree`), not by their `.git` file. Submodules are ignored, and a nested
   repository the agent made (a directory with its own `.git`) fails the gate and is never committed: host git would read its
   config, filters included. Harness writes into the worktree

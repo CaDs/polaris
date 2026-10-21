@@ -7,7 +7,7 @@ import { join } from "node:path";
 // M5: spilled tool output, compaction, skills, cache-friendly prefix, usage API, reliability fixes.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { configure, fileTicket, keyOf, call, db, events, listen, reply, sh, tempRepo, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, keyOf, call, db, events, listen, reply, sh, tempRepo, user, waitFor, wsOf, worktreeOf } = await import("./helpers.ts");
 const { runAgent } = await import("../server/agent/loop.ts");
 const { fakeProvider } = await import("../server/agent/providers/fake.ts");
 const { listSkills, skillsText } = await import("../server/agent/context.ts");
@@ -356,13 +356,13 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
   assert.match(ev.find((e) => e.type === "run_started")!.p.task, /deploy — Deploy — \.polaris\/skills\/deploy\.md/);
 
   // On disk in the worktree, but not in the branch, the diff or the status.
-  assert.equal(readFileSync(join(run.worktree, ".polaris/outputs/1-shell-1.txt"), "utf8").split("\n").length, 4000 + 5);
-  assert.match(readFileSync(join(run.worktree, ".polaris/history/1.md"), "utf8"), /seq 1 4000/);
+  assert.equal(readFileSync(join(worktreeOf(run.id), ".polaris/outputs/1-shell-1.txt"), "utf8").split("\n").length, 4000 + 5);
+  assert.match(readFileSync(join(worktreeOf(run.id), ".polaris/history/1.md"), "utf8"), /seq 1 4000/);
   assert.equal(sh(repo, `git ls-tree -r --name-only ${run.branch}`), ".polaris/skills/deploy.md\nREADME.md\nnotes.txt");
   const diff = (await call("GET", `/api/tickets/${t.id}/diff`, cookie)).body.diff;
   assert.match(diff, /notes\.txt/);
   assert.doesNotMatch(diff, /\.polaris/);
-  assert.equal(sh(run.worktree, "git status --porcelain"), "");
+  assert.equal(sh(worktreeOf(run.id), "git status --porcelain"), "");
 
   // 5 turns of (100, 300) per message: 14 messages → 1400 uncached, 4200 cached.
   assert.deepEqual([run.tokens_in, run.tokens_out, run.tokens_cached], [1400, 100, 4200]);

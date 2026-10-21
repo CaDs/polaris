@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
-import { addWorktree, changedLines, changedPaths, commitAll, git, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
+import { addWorktree, changedLines, changedPaths, commitAll, git, inspectRepo, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
@@ -138,4 +138,35 @@ test("compaction refuses a planted .polaris/history symlink and writes nothing o
   const r = await runAgent({ provider: fake.provider, model: "fake", system: "s", task: "T", tools, root, compactAt: 1000, budget: { maxTurns: 20, maxTokens: 1e6 }, onEvent: () => {} });
   assert.equal(r.status, "failed");
   assert.deepEqual(readdirSync(outside), []);
+});
+
+test("POL-2: a project repo_path under the data dir is refused before any git command runs; POLARIS_REPO_ROOTS limits the rest", async () => {
+  const base = tmp("sec-roots-");
+  const data = join(base, "data");
+  process.env.POLARIS_DATA_DIR = data;
+  try {
+    // A repo a sandbox built under the worktrees dir, with a smudge filter that would run on `git worktree add`.
+    const evil = repoWith(join(data, "worktrees", "run1", "evil"));
+    const marker = join(base, "SMUDGE");
+    writeFileSync(join(evil, ".gitattributes"), "* filter=evil\n");
+    sh(evil, `git config filter.evil.smudge 'touch ${marker}; cat'`);
+    assert.match(((await inspectRepo(evil, "")) as { error: string }).error, /data directory/);
+    assert.match(((await inspectRepo(join(data, "wikis", "../worktrees/run1/evil"), "")) as { error: string }).error, /data directory/);
+    const link = join(base, "link");
+    symlinkSync(evil, link);
+    assert.match(((await inspectRepo(link, "")) as { error: string }).error, /data directory/); // by realpath
+    assert.equal(existsSync(marker), false);
+
+    const mine = repoWith(join(base, "mine"));
+    const other = repoWith(join(base, "other"));
+    assert.equal("error" in (await inspectRepo(other, "")), false); // unset: any repo
+    process.env.POLARIS_REPO_ROOTS = `/nonexistent:${mine}`;
+    assert.equal("error" in (await inspectRepo(mine, "")), false);
+    assert.match(((await inspectRepo(other, "")) as { error: string }).error, /POLARIS_REPO_ROOTS/);
+    process.env.POLARIS_REPO_ROOTS = base;
+    assert.equal("error" in (await inspectRepo(other, "")), false);
+  } finally {
+    delete process.env.POLARIS_REPO_ROOTS;
+    delete process.env.POLARIS_DATA_DIR;
+  }
 });

@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_RETRY_BASE_MS = "1"; // the dead provider below: retries don't wait seconds
 process.env.POLARIS_CONCURRENCY = "2";
-const { configure, fileTicket, app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, app, call, db, events, listen, origin, reply, sh, tempRepo, until, user, waitFor, wsOf, worktreeOf } = await import("./helpers.ts");
 const { activePrompt, addPrompt, promote, promotion, REFLECT_SYSTEM, seriesDigest, LESSONS_MAX } = await import("../server/improve.ts");
 
 const worker = readFileSync(new URL("../server/agent/prompts/worker.md", import.meta.url), "utf8");
@@ -197,7 +197,7 @@ test("eval run: every case in a fresh worktree at base_sha; the ticket is untouc
   assert.deepEqual([after.status, after.runs.length, after.tokens_in, after.run_status], [before.status, before.runs.length, before.tokens_in, before.run_status]);
   assert.equal(sh(repo, "git worktree list").split("\n").length, 1);
   assert.equal(sh(repo, "git for-each-ref refs/heads/polaris"), "");
-  assert.equal(existsSync(res.worktree), false);
+  assert.equal(existsSync(worktreeOf(res.id)), false);
   // Viewable like any run of the workspace.
   assert.equal((await call("GET", `/api/runs/${res.id}`, alice)).status, 200);
   assert.equal((await call("GET", `/api/runs/${res.id}`, bob)).status, 404);

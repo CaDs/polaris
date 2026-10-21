@@ -182,6 +182,7 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 | `POLARIS_OPEN_SIGNUP=1` | Allow sign-ups after the first account (by default the first account is the owner and sign-up then closes) |
 | `DB_PATH` | SQLite database file (default `polaris.db`) |
 | `POLARIS_DATA_DIR` | Worktrees, wikis and run data (default `./data`) |
+| `POLARIS_REPO_ROOTS` | Optional, colon-separated: a project's repository must sit under one of these directories (unset: any path; the data dir is always refused) |
 | `POLARIS_CONCURRENCY` | Runs at the same time (default 2; use 1 with a single local model) |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama) |
 | `POLARIS_MODEL` | Model of the fallback provider and the CLI (default `claude-sonnet-5-5`) |

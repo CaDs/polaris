@@ -97,6 +97,9 @@ const METRICS = "SELECT payload FROM events WHERE run_id = r.id AND seq = (SELEC
 // The run r's latest event of a type: its last model review (findings) and how it finished (status, reason).
 const LAST = (type: string) => `SELECT payload FROM events WHERE run_id = r.id AND type = '${type}' ORDER BY seq DESC LIMIT 1`;
 
+// A run as the API shows it: without the host path of its worktree (it names the data dir and gives a member a target for repo_path).
+const pub = ({ worktree: _, ...r }: Record<string, any>) => r;
+
 // Runs are only reachable through a ticket in the caller's workspace.
 const runIn = (c: Context<Env>) =>
   db.prepare("SELECT r.* FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.id = ? AND t.workspace_id = ?").get(c.req.param("id") as string, c.get("workspaceId")) as
@@ -222,7 +225,7 @@ app.get("/api/tickets/:id", (c) => {
   const runs = (db.prepare(`SELECT r.*, p.auth_type AS auth_type, (${METRICS}) AS metrics, (${LAST("model_review")}) AS last_review, (${LAST("run_finished")}) AS finished
     FROM runs r LEFT JOIN providers p ON p.id = r.provider_id
     WHERE r.ticket_id = ? AND r.eval_run_id IS NULL ORDER BY r.rowid`).all(t.id) as Record<string, any>[]).map((r) => ({
-    ...r, metrics: r.metrics && JSON.parse(r.metrics), last_review: r.last_review && JSON.parse(r.last_review), finished: r.finished && JSON.parse(r.finished),
+    ...pub(r), metrics: r.metrics && JSON.parse(r.metrics), last_review: r.last_review && JSON.parse(r.last_review), finished: r.finished && JSON.parse(r.finished),
     usage: attributedUsage("run_id", r.id, false), background_usage: attributedUsage("run_id", r.id, true),
   }));
   if (t.kind !== "epic") return c.json({ ...t, runs, usage: attributedUsage("ticket_id", t.id), background_usage: attributedUsage("ticket_id", t.id, true) });
@@ -275,7 +278,7 @@ app.post("/api/tickets/:id/runs", async (c) => {
   if ("error" in m) return c.json(m, 400);
   const r = await enqueueRun(t.id, m.v);
   if ("error" in r) return c.json({ error: r.error }, r.status);
-  return c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
+  return c.json(pub(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId) as Record<string, any>), 201);
 });
 
 // Review queue: diff of the latest passed run, then approve (merge into the base branch) or reject (back to todo).
@@ -521,7 +524,7 @@ app.get("/api/evals", (c) => {
   return c.json({
     cases: db.prepare(`SELECT c.*, ${ticketKey()} AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
       WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
-    runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id) })),
+    runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id).map(pub) })),
   });
 });
 
@@ -610,12 +613,12 @@ app.get(`${WIKI}/diff`, async (c) => {
 for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const)
   app.post(`${WIKI}/${path}`, async (c) => {
     const r = await enqueueWiki(projectOf(c).project_id, op);
-    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
+    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(pub(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId) as Record<string, any>), 201);
   });
 
 app.get("/api/runs/:id", (c) => {
   const r = runIn(c);
-  return r ? c.json(r) : c.json({ error: "not_found" }, 404);
+  return r ? c.json(pub(r)) : c.json({ error: "not_found" }, 404);
 });
 
 app.get("/api/runs/:id/metrics", (c) => {

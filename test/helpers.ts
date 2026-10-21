@@ -45,6 +45,8 @@ export async function user(name: string, workspace = true) {
   const { cookie } = await signUp(name);
   return workspace ? (await call("POST", "/api/auth/organization/create", cookie, { name, slug: name })).cookie : cookie;
 }
+// The host path of a run's worktree: the API does not return it.
+export const worktreeOf = (runId: string) => (db.prepare("SELECT worktree FROM runs WHERE id = ?").get(runId) as { worktree: string | null }).worktree!;
 export const wsOf = (slug: string) => (db.prepare("SELECT id FROM organization WHERE slug = ?").get(slug) as { id: string }).id;
 
 export async function until<T>(what: string, fn: () => Promise<T | undefined | false> | T | undefined | false, ms = 60_000): Promise<T> {
