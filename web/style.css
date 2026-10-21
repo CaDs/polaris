@@ -719,3 +719,13 @@ nav details > summary:hover { background: var(--hover); }
 /* A button with a leading glyph (New ticket, Ask Polaris, Skills): icon and label on one line. */
 .btn.with-icon { display: inline-flex; align-items: center; gap: 6px; }
 .chat-example .glyph { color: var(--accent-text); margin-bottom: 4px; }
+
+/* POL-29: the repository section of the project form */
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 10px; }
+fieldset.plain:disabled { opacity: 0.55; }
+fieldset.plain label > select { display: block; width: 100%; margin-top: 4px; }
+.repo-state { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -6px 0 0; }
+.repo-state:empty { display: none; }
+.protected { display: grid; gap: 6px; }
+.protected h4 { margin: 4px 0 0; font-size: 13px; }
+.protected label.check { gap: 8px; }

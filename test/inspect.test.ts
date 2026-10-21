@@ -69,3 +69,9 @@ test("nothing in the repository is executed or written: a nested repo's filter l
   assert.equal((await inspect(repo)).body.state, "ok");
   assert.equal(existsSync(marker), false);
 });
+
+test("check_paths: protected paths with no file at the base branch come back as missing", async () => {
+  const repo = tempRepo({ "test/a.test.ts": "x\n", "e2e.config.ts": "x\n" });
+  const r = (await call("POST", "/api/projects/inspect", me, { repo_path: repo, check_paths: ["test/", "evals", "e2e", "e2e.config.ts"] })).body;
+  assert.deepEqual(r.missing, ["evals", "e2e"]);
+});

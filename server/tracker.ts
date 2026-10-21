@@ -409,11 +409,12 @@ trackerRoutes.get("/projects", (c) => {
   const ids = db.prepare("SELECT id FROM projects WHERE workspace_id = ? ORDER BY created_at, rowid").all(ws) as { id: string }[];
   return c.json(ids.map((p) => project(ws, p.id)));
 });
-// The repository form's detection and suggestions (POL-29). A folder that is not a usable repository gets project create's 400,
+// The repository form's detection and suggestions (POL-29); `check_paths` (optional) are protected paths to look for in the branch. A folder that is not a usable repository gets project create's 400,
 // with its `state` (and `root` for inside_repo) so the form can offer the fix.
 trackerRoutes.post("/projects/inspect", async (c) => {
   const b = await body(c);
-  const r = await inspectProject(typeof b.repo_path === "string" ? b.repo_path.trim() : "", typeof b.base_branch === "string" ? b.base_branch.trim() : "");
+  const r = await inspectProject(typeof b.repo_path === "string" ? b.repo_path.trim() : "", typeof b.base_branch === "string" ? b.base_branch.trim() : "",
+    Array.isArray(b.check_paths) ? b.check_paths.filter((p: unknown): p is string => typeof p === "string") : []);
   return c.json(r, r.state === "ok" ? 200 : 400);
 });
 trackerRoutes.post("/projects", async (c) => {

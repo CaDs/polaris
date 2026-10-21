@@ -114,6 +114,9 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 1. Open the dashboard, create an account (the first one; sign-up then closes) and a workspace.
 2. **Projects → New project**: a name, a key (it prefixes ticket keys, `KEY-12`), the absolute path of a git repository
    with at least one commit, the base branch, a setup command (e.g. `npm ci`) and a test command (e.g. `npm test`).
+   The form detects the repository as soon as the folder is set (from a subfolder it offers the repository root), lists its branches
+   (the checked-out one is preselected) and prefills the commands and protected paths from the base branch; it warns when the settings
+   protect or gate nothing.
    Protected paths are your tests, which agents must not weaken; they default to `tests/,evals/`, and `POST /api/projects/inspect`
    suggests them (and the commands) from the repository's base branch. **Add-only** (the default) lets agents add new files there,
    such as regression tests, but not change, delete or rename ones that existed when the run started; **read-only** lets them touch nothing there.

@@ -1,3 +1,4 @@
+import { isProtected, parseProtected } from "./agent/tools.ts";
 import { git, repoState, type RepoState } from "./git.ts";
 
 // What the project form shows once a folder is set (POL-29): branches, protected-path candidates and command suggestions,
@@ -74,7 +75,8 @@ async function commands(root: string, base: string, top: Set<string>): Promise<{
   return { setup: { value: setup, why: file }, test: hasScript ? { value: test, why: needsScript ? "package.json scripts.test" : file } : null };
 }
 
-export async function inspectProject(repoPath: string, baseBranch: string) {
+// checkPaths: the form's protected paths; `missing` lists those with no file at the base branch (they protect nothing).
+export async function inspectProject(repoPath: string, baseBranch: string, checkPaths: string[] = []) {
   const st: RepoState = await repoState(repoPath);
   if (st.state !== "ok") return st;
   const root = st.root!;
@@ -86,5 +88,5 @@ export async function inspectProject(repoPath: string, baseBranch: string) {
   const exists = rows.some(([n]) => n === base);
   const paths = exists ? (await git(root, ["ls-tree", "-r", "--name-only", "-z", `refs/heads/${base}`])).split("\0").slice(0, MAX_PATHS) : [];
   const { setup, test } = await commands(root, base, new Set(paths.filter((p) => !p.includes("/"))));
-  return { state: "ok" as const, repo_path: repoPath, root, current, branches, base_branch: base, base_exists: exists, protected: protectedCandidates(paths), setup_command: setup, test_command: test };
+  return { state: "ok" as const, repo_path: repoPath, root, current, branches, base_branch: base, base_exists: exists, missing: checkPaths.filter((c) => !paths.some((f) => isProtected(f, parseProtected(c)))), protected: protectedCandidates(paths), setup_command: setup, test_command: test };
 }

@@ -731,7 +731,11 @@ A workspace holds projects; a **project is one git repository** with its own boa
   `test(s)`, `spec(s)`, `__tests__`, `e2e`, `eval(s)`, or holding at least 3 test files, with a file count and the dominant
   test-file pattern; top-level test files are listed unsuggested) and **suggested setup/test commands** by lockfile
   (npm, pnpm, yarn, bun, uv, pip, go, cargo; first match wins). All of it is read from git objects of the base branch
-  (`ls-tree`, `cat-file`), never the working tree.
+  (`ls-tree`, `cat-file`), never the working tree. `check_paths` makes it also return `missing`, the given protected paths with no
+  file at the branch. The form (`web/Projects.tsx` RepoFields) calls it as the folder is typed, pasted or left, and on every branch or
+  path change; it offers "Use the root", a base-branch select (typing another name stays possible), the candidates as checkboxes (a new
+  project starts with the suggested ones checked and the suggested commands filled in until typed over; a saved project's values are
+  only ever offered a "Use"), the mode radios, and warns about missing paths, no protected paths, no test command and a deleted base branch.
 - **What stays workspace-wide** (`workspace_settings`, `GET/PUT /api/settings`): models (default, reviewer, per phase),
   model review, auto-approve, auto-split + triage, child size hint, the wiki toggle, budgets, compaction, spending caps;
   providers, labels, views, lessons, prompts, evals, failure mining, usage, notifications. A run's settings are
