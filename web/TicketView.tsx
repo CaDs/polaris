@@ -431,10 +431,11 @@ export function Transcript({ run, onFinish, autoFollow = true }: { run: Run; onF
     (a, e) => ({ input: a.input + e.payload.input, output: a.output + e.payload.output, cache_read: a.cache_read + e.payload.cache_read, cache_write: a.cache_write + e.payload.cache_write }),
     { input: 0, output: 0, cache_read: 0, cache_write: 0 },
   );
-  const usage = run.usage ?? { input_uncached: projected.input, tokens_in: projected.input + projected.cache_write, tokens_out: projected.output, tokens_cached: projected.cache_read,
-    tokens_cache_write: projected.cache_write, tokens_total: projected.input + projected.output + projected.cache_read + projected.cache_write, partial: 0, unavailable: 0 };
   const finished = events.find((e) => e.type === "run_finished");
   const running = !finished && (run.status === "running" || run.status === "queued");
+  // While running, the live events: run.usage is the snapshot from the last ticket fetch, refreshed only when the run ends.
+  const usage = (!running && run.usage) || { input_uncached: projected.input, tokens_in: projected.input + projected.cache_write, tokens_out: projected.output, tokens_cached: projected.cache_read,
+    tokens_cache_write: projected.cache_write, tokens_total: projected.input + projected.output + projected.cache_read + projected.cache_write, partial: 0, unavailable: 0 };
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!running) return;
