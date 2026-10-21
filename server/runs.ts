@@ -232,11 +232,23 @@ function queue(t: TicketRow, model: string, attempt: number, providerId: string 
 
 export type Choice = { provider_id?: string | null; model?: string | null };
 
+// The operator's ANTHROPIC_API_KEY fallback is for the operator's workspaces: the first account's (it owns the instance), or
+// those listed in POLARIS_ENV_PROVIDER_WORKSPACES (comma-separated ids). With open sign-up any registrant can create a
+// workspace; it must not spend this key. Nothing to protect when no env key is set (the usual "set ANTHROPIC_API_KEY" error follows).
+function envProviderAllowed(ws: string) {
+  if (process.env.POLARIS_PROVIDER === "fake" || !(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_BASE_URL)) return true;
+  if ((process.env.POLARIS_ENV_PROVIDER_WORKSPACES ?? "").split(",").map((x) => x.trim()).includes(ws)) return true;
+  return !!db.prepare("SELECT 1 FROM member WHERE organizationId = ? AND userId = (SELECT id FROM user ORDER BY createdAt, id LIMIT 1)").get(ws);
+}
+
 // Provider + model for a new run: the first of explicit choice → ticket → the phase's setting → workspace default that
 // sets either; none → env.
 function choose(t: TicketRow, s: Settings, pick?: Choice, phase?: Choice): { provider_id: string | null; model: string } {
   const level = [pick, t, phase, { provider_id: s.default_provider_id, model: s.default_model }].find((l) => l && (l.provider_id || l.model));
-  if (!level?.provider_id) return { provider_id: null, model: providerConfig({ model: level?.model ?? undefined }).model };
+  if (!level?.provider_id) {
+    if (!envProviderAllowed(t.workspace_id)) throw new Error("add a provider in Settings → Models");
+    return { provider_id: null, model: providerConfig({ model: level?.model ?? undefined }).model };
+  }
   const p = providerById(level.provider_id);
   if (!p || p.workspace_id !== t.workspace_id) throw new Error("the chosen provider no longer exists. Pick another one.");
   const model = level.model ?? (p.kind === "anthropic" ? DEFAULT_MODEL : undefined);

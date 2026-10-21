@@ -183,7 +183,8 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 | `DB_PATH` | SQLite database file (default `polaris.db`) |
 | `POLARIS_DATA_DIR` | Worktrees, wikis and run data (default `./data`) |
 | `POLARIS_CONCURRENCY` | Runs at the same time (default 2; use 1 with a single local model) |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama) |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Fallback provider when a workspace has none configured (the base URL can point at Ollama). Used only by the first account's workspaces and those in `POLARIS_ENV_PROVIDER_WORKSPACES` |
+| `POLARIS_ENV_PROVIDER_WORKSPACES` | Comma-separated workspace ids besides the first account's that may use the fallback provider |
 | `POLARIS_MODEL` | Model of the fallback provider and the CLI (default `claude-sonnet-5-5`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI providers saved without one (default `https://api.openai.com`) |
 | `POLARIS_ALLOW_HTTP_PROVIDERS=1` | Allow plain http to a provider on a public address (default: http only on this machine or a private network, so a key never crosses the internet unencrypted). Never opens cloud-metadata addresses |
@@ -351,5 +352,5 @@ tasks.md          milestone checklist
   and a change that contains one fails the test gate. Harness writes into a worktree (spilled
   output, history) refuse symlinks. The sandbox image setting must be a plain image reference.
 - **Scope.** Built for a single trusted user on their own machine. Anyone who can sign in can point a workspace at any
-  git repository the server's user can read, merge into it, and spend the `ANTHROPIC_API_KEY` fallback. It is not
+  git repository the server's user can read, merge into it, and spend the `ANTHROPIC_API_KEY` fallback (only the first account's workspaces use it unless listed in `POLARIS_ENV_PROVIDER_WORKSPACES`). It is not
   hardened for untrusted users or workspaces side by side.

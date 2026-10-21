@@ -243,6 +243,9 @@ summaries. Encrypted-only reasoning shows nothing.
   `X-Title: Polaris`. Context window left at the default (128000): each model's `context_length` from the catalog.
 - **LiteLLM.** Models: the proxy's `/v1/models` (its `model_list` aliases the key may use). Cost: unknown (priced from the
   table when the model is in it).
+- **Env fallback.** A workspace with no provider uses `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` only when it is one of the first account's
+  workspaces or is listed in `POLARIS_ENV_PROVIDER_WORKSPACES` (comma-separated ids); any other workspace gets 400 "add a provider in Settings → Models"
+  (open sign-up must not let a registrant spend the operator's key).
 - **Provider egress** (`server/egress.ts`, every provider call including model lists and Ollama's window detection):
   `providerFetch` checks the URL first: http(s) only, no `user:pass@`; never link-local, unspecified or multicast addresses
   (cloud metadata: 169.254.0.0/16, 192.0.0.0/24, 168.63.129.16, fe80::/10, fec0::/10, `fd00:ec2::254`, `fd20:ce::254`, also as
