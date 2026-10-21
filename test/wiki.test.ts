@@ -332,6 +332,9 @@ test("bootstrap writes overview.md at the base branch head; the planner and the 
   assert.equal(x.wikiLog().at(-1), `bootstrap: ${sh(x.repo, "basename $PWD")} at main ${sh(x.repo, "git rev-parse --short=8 HEAD")}`);
   assert.match(x.wikiFile("overview.md"), /^---\ntitle: Overview\nsources: \[README\.md\]\nverified: [0-9a-f]{40}/);
   assert.match(x.wikiFile("log.md"), /\] ingest \| bootstrap from main \(/);
+  // A first build writes as it goes (a run that only reads is stopped as stuck) and gets 60 turns.
+  const boot = (db.prepare("SELECT id FROM runs WHERE wiki_op = 'bootstrap' ORDER BY started_at DESC LIMIT 1").get() as { id: string }).id;
+  assert.match(task(boot), /Write as you go, not at the end: first `overview\.md` from the README and the file tree/);
 
   // Reviewer: a ticket's run has a second run_started (the reviewer) whose first message carries the section.
   const { run } = await x.ticket("Reviewed");

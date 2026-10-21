@@ -319,6 +319,8 @@ test("system prompt and tools are byte-identical across repos and runs; per-run 
 
   const m0 = a.first.messages[0].content[0].text as string;
   assert.match(m0, /^# Environment\n- Sandbox: .+\n- Repository: repo-.+, branched from main\. It is at \/work in the sandbox.*\n- Test command: none \(the harness runs no tests\)\n- Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki\n- git is read-only: .+\n- Budget: 120 turns and 60 minutes for this attempt .+\n\nSkills /);
+  // What the sandbox lacks, so the worker doesn't probe for Docker or install Playwright.
+  assert.match(m0, /- Sandbox: .+; node, npm, git and ripgrep; no Docker, no browser and no Playwright: don't install them, skip acceptance criteria that need them and say so in your reply\n/);
   assert.match(m0, /- deploy — Deploy the thing — \.polaris\/skills\/deploy\.md\n\n# Task\n\n# ticket of zed\n\ndo it$/);
   assert.doesNotMatch(m0, /STEP-ONE/); // description only; the body is read on demand
   assert.doesNotMatch(b.first.messages[0].content[0].text, /Skills/);

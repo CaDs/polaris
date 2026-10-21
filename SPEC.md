@@ -148,13 +148,18 @@ never changed mid-conversation either (cache prefix, model behaviour).
 
 - **Request layout** (stable prefix first): tools (static per provider kind, keys serialized in sorted order) → system
   prompt (the workspace's active prompt version, v1 = `prompts/worker.md`; static, no per-run or per-repo text) → messages.
-  The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node,
-  repo, base branch, test command, read-only paths, git read-only, turn and minute budget), the skills list, `# Lessons
+  The *first user message* carries everything that differs per run, ahead of the ticket: `# Environment` (sandbox OS/node
+  and what it has and lacks, `SANDBOX_TOOLS`: no Docker, browser or Playwright, so don't install them; the planner gets
+  the same line for its child tickets), repo, base branch, test command, read-only paths, git read-only, turn and minute budget), the skills list, `# Lessons
   from earlier runs` (M6), the wiki index (M10), the epic's handoff request (M7), the latest reviewer note, the previous
   attempt's failure, then `# Task`. The environment block is the one place for those facts; `worker.md` only points at it.
 - **Cache breakpoints** (Anthropic, 3 of the 4 allowed): end of tools, end of system, and a moving one on the last content
   block of the last message, so each turn reads the previous turn's prefix. OpenAI sends `prompt_cache_key` (the ticket id,
-  so retries of a ticket share a cache). Cache hit rate = `cache_read / (input + cache_read + cache_write)`, shown per run
+  so retries of a ticket share a cache). On the ChatGPT-plan endpoint `gpt-6.1-sol` caches nothing that a request can
+  ask for: three identical calls of 5.7k tokens reported `cached_tokens: 0` and `cache_write_tokens: 0`, the prefix moved
+  from `instructions` into a message changed nothing, and `prompt_cache_options` and `prompt_cache_breakpoint` are
+  rejected for the model (probe of 2026-10-21; the occasional hits are the backend's). Plan runs rely on the token
+  budget retrying (`max_tokens`), not on the cache. Cache hit rate = `cache_read / (input + cache_read + cache_write)`, shown per run
   and on the Usage page (`GET /api/usage`: totals, last 14 days, per model, top 10 tickets by tokens).
 - **Long tool output → file.** `shell` and `search` results over 8,000 chars are written in full to
   `.polaris/outputs/<turn>-<tool>-<id>.txt` in the run root (`/work/.polaris/...` in the sandbox); the model gets the path,
@@ -527,7 +532,9 @@ bootstrap (existing pages stay readable in the UI).
   symlinks). On commit (maintainer and human edit) also: each page's `verified` is a commit of the project repo and each of its
   `sources` exists at that commit.
 - **Bootstrap** (**Build wiki**, `POST …/wiki/bootstrap`): the same flow on the base branch head, task: overview, a page per main
-  part, howto pages (from README/AGENTS.md/CLAUDE.md and the code), gotchas. Commit `bootstrap: <repo> at <branch> <sha8>`.
+  part, howto pages (from README/AGENTS.md/CLAUDE.md and the code), gotchas, written as it goes (overview first from the
+  README and file tree, then a module page after reading each part: a maintainer that read 17 turns without writing was
+  stopped as stuck), with 60 turns instead of the other operations' 30. Commit `bootstrap: <repo> at <branch> <sha8>`.
   **Refresh stale pages** (`POST …/wiki/lint`, 409 when nothing is stale): the task lists the pages stale against the base head;
   the maintainer re-verifies each against the code and fixes or deletes it. Commit `lint: re-verify N stale pages at <sha8>`. A
   lint run that finds nothing stale when it starts (an earlier run or an edit fixed it) passes with `wiki {unchanged}`.

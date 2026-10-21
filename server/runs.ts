@@ -15,7 +15,7 @@ import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, openrouterWindow,
 import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun, failureClass } from "./failures.ts";
-import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_TOOLS, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
@@ -159,7 +159,7 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
   const parts = [
     [
       "# Environment",
-      `- Sandbox: ${info.sandbox || "unknown"}`,
+      `- Sandbox: ${info.sandbox || "unknown"}; ${SANDBOX_TOOLS}: don't install them, skip acceptance criteria that need them and say so in your reply`,
       `- Repository: ${info.repo}, branched from ${info.base}. It is at /work in the sandbox, which is also every shell command's working directory; tool paths are relative to it (absolute /work/... is accepted too)`,
       `- Test command: ${info.test.trim() ? `\`${info.test}\`. The harness runs it after you finish and it must exit 0` : "none (the harness runs no tests)"}`,
       ...(info.protectedPaths.length ? [`- Read-only paths (changes there fail the run): ${info.protectedPaths.join(", ")}`] : []),
@@ -894,6 +894,8 @@ export function wake(epicId: string, removed = false) {
 // --- M10 project wiki (see SPEC "Project wiki (M10)") ---
 
 const WIKI_BUDGET = { maxTurns: 30, maxTokens: BUDGET.maxTokens };
+// A first build reads most of the repository and writes a page per part (it writes as it goes: wikiTask).
+const WIKI_BOOTSTRAP_BUDGET = { maxTurns: 60, maxTokens: BUDGET.maxTokens };
 const WIKI_FIX_BUDGET = { maxTurns: 10, maxTokens: BUDGET.maxTokens };
 const WIKI_FIX_ROUNDS = 2; // more conversation rounds to fix what the mechanical lint found, then the result is rejected
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -1000,7 +1002,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
         provider: providerFor(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
         protectedPaths: WIKI_PROTECTED, signal, cacheKey: pid, compactAt, onEvent: relay(log), onStream: liveStream(runId),
       };
-      let a = await runAgent({ ...common, budget: WIKI_BUDGET });
+      let a = await runAgent({ ...common, budget: op === "bootstrap" ? WIKI_BOOTSTRAP_BUDGET : WIKI_BUDGET });
       for (let fix = 0; ; fix++) {
         addUsage(res.usage, a.usage);
         res.metrics = res.metrics ? addMetrics(res.metrics, a.metrics) : a.metrics;

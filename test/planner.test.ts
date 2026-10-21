@@ -60,6 +60,7 @@ test("epic: read-only planner round, B waits for A, approve A → B from the upd
   assert.deepEqual([r1.role, r1.attempt, r1.status, r1.prompt_version, r1.branch], ["planner", 1, "passed", null, null]);
   assert.match(task(r1.id), /# Epic\n\n# Two files\n\nAdd a\.txt and b\.txt\.\n\n# Children\n\n\(none yet\)$/);
   assert.match(task(r1.id), /Test gate for every child ticket: `test -f a.txt \|\| test -f b.txt` must exit 0, and changes under tests, evals fail it/);
+  assert.match(task(r1.id), /- Workers' sandbox: node, npm, git and ripgrep; no Docker, no browser and no Playwright: don't write child tickets whose acceptance needs them\n/);
   const calls = events(r1.id).filter((x) => x.type === "tool_call").map((x) => x.p.name);
   assert.deepEqual(calls, ["read_file", "create_ticket", "create_ticket", "finish_round"]);
   assert.equal(events(r1.id).find((x) => x.type === "round_finished")!.p.notes, "Created a.txt and b.txt tickets. Next: read their handoffs, then complete the epic.");
