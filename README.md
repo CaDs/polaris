@@ -123,6 +123,19 @@ Or as a single process: `npm run build && npm start` (everything on http://local
 
 For bigger work, choose **Epic** when creating the ticket and click **Run planner**.
 
+### Working on Polaris with Polaris
+
+Don't point a project at the checkout the server runs from. `npm run dev` restarts the API on every change there, and an
+approved ticket merges into that checkout's `main`, so the restart fails every running run. Use two checkouts:
+
+- **The instance**: its own clone (e.g. `../polaris-instance`), run with `npm run build && npm start`. It owns
+  `polaris.db` and `data/`. Upgrade it when no run is live: `git pull && npm ci && npm run build`, then restart.
+- **The repository it builds**: your usual checkout. The project's repository path points here; merges land here, and
+  nothing watches it. Run `npm run dev` here only with its own database (the default `polaris.db` in this folder is a
+  different file from the instance's).
+
+The server warns at startup when it runs with `--watch` from a project's own repository.
+
 ## Ollama and your ChatGPT plan
 
 Keep an Ollama provider as the workspace default (for example `qwen3.8:27b-mlx`, with context window left on auto).
