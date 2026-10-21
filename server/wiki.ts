@@ -332,7 +332,7 @@ export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
       `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? truncate(o.reply.trim(), 4000, "head") : "(none)"}`,
     );
   } else if (op === "bootstrap")
-    parts.push("# Task: build the wiki\n\nWrite `overview.md` (architecture map), a `modules/` page for each main part, `howto/` pages for common changes (from the README, AGENTS.md or CLAUDE.md if present, and from the code) and `gotchas.md`. Pages that already exist: improve them rather than duplicating.");
+    parts.push("# Task: build the wiki\n\nWrite `overview.md` (architecture map), a `modules/` page for each main part, `howto/` pages for common changes (from the README, AGENTS.md or CLAUDE.md if present, and from the code) and `gotchas.md`. Pages that already exist: improve them rather than duplicating.\n\nWrite as you go, not at the end: first `overview.md` from the README and the file tree, then read one part of the code and write its `modules/` page before you read the next part. A run that only reads for many turns is stopped as stuck.");
   else
     parts.push(`# Task: re-verify stale pages\n\nThe sources of these pages changed in the project since they were verified. Check each against the current code and fix or delete it, then set verified to ${o.sha}.\n\n${o.stale!.map((p) => `- ${p.path} — changed: ${p.why}`).join("\n")}`);
   parts.push(`# Current wiki/index.md\n\n${o.index.trim() || "(empty)"}`);

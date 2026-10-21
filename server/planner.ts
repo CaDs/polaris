@@ -5,6 +5,7 @@ import { touch } from "./agent/events.ts";
 import { skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
+import { SANDBOX_TOOLS } from "./sandbox.ts";
 import { applyTracker, ESTIMATES, Invalid, KINDS, labelIds, ticketKey, trackerHeader } from "./tracker.ts";
 
 // M7 planner (see SPEC "Planner (M7)"). An epic's runs are planner rounds: each a fresh conversation with a read-only
@@ -138,6 +139,7 @@ export function plannerTask(epic: Epic, o: {
     [
       "# Environment",
       `- Repository: ${o.repo}; read_file and search see a read-only checkout of ${o.base} at ${o.sha.slice(0, 8)} (it includes the merged work of done children)`,
+      `- Workers' sandbox: ${SANDBOX_TOOLS}: don't write child tickets whose acceptance needs them`,
       `- Test gate for every child ticket: ${o.gate.trim() ? `\`${o.gate}\` must exit 0` : "no test command"}${o.protectedPaths.length ? `, and changes under ${o.protectedPaths.join(", ")} fail it` : ""}; a child's own test_command replaces the command`,
       `- Epic gate: ${o.gate.trim() ? `complete_epic first runs \`${o.gate}\` on ${o.base} as it is then, and is refused unless it exits 0` : "none (no test command)"}`,
       ...(o.sizeHint.trim() ? [`- Child size: the worker model reliably finishes tickets of this size: ${o.sizeHint.trim()}; make every child at most that size`] : []),
