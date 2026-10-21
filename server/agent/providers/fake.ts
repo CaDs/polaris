@@ -14,6 +14,7 @@ export function fakeProvider(script: Turn[], usage: Usage | ((req: ProviderReque
       if (!turn) throw new Error(`fake provider: script has no turn ${requests.length}`);
       const content = typeof turn === "function" ? turn(req) : "blocks" in turn ? turn.blocks : turn;
       for (const b of content) {
+        if (b.type === "reasoning" && typeof (b.data as { thinking?: unknown })?.thinking === "string") onEvent({ type: "reasoning", text: (b.data as { thinking: string }).thinking });
         if (b.type === "text") onEvent({ type: "text", text: b.text });
         if (b.type === "tool_use") onEvent({ type: "tool_use", id: b.id, name: b.name });
       }

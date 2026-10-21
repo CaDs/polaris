@@ -76,6 +76,7 @@ test("streams a Responses turn into Msg + Usage and resends reasoning and call p
   assert.equal(first.prompt_cache_key, "ticket-1");
   assert.equal(s.requests[1].body.prompt_cache_key, undefined); // only sent when the caller has a key
   assert.deepEqual(first.include, ["reasoning.encrypted_content"]);
+  assert.equal(first.reasoning, undefined); // summaries only on the ChatGPT plan (an API key may need a verified org)
   assert.equal(first.instructions, "sys");
   assert.equal(first.max_output_tokens, undefined);
   assert.deepEqual(first.tools, [{ type: "function", name: "read_file", description: "r", parameters: tools[0].input_schema }]);
@@ -122,6 +123,8 @@ test("subscription streams preserve tool calls and reasoning when the completed 
     messages.push(r.message, { role: "user", content: [{ type: "tool_result", namespace: "polaris", tool_use_id: "call_1", content: "hello" }] });
     await p.stream({ system, messages, tools, model: "gpt-x" }, () => {});
     assert.ok(s.requests[1].body.input.some((i: any) => i.type === "function_call_output" && i.namespace === "polaris" && i.call_id === "call_1"));
+    assert.deepEqual(s.requests[0].body.reasoning, { summary: "auto" }); // readable reasoning for the run view
+    assert.deepEqual(s.requests[1].body.input[1], reasoning); // the stored item replays verbatim
   } finally { s.close(); }
 });
 

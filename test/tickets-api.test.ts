@@ -69,8 +69,10 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
   // SSE: replay + live, closes after run_finished
   const sse = await app.request(`/api/runs/${run.body.id}/events`, { headers: { cookie: alice, origin } });
   const text = await sse.text();
-  const seen = text.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
+  const frames = text.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
+  const seen = frames.filter((e) => e.type !== "live"); // live output: the model's text as it streamed, never stored
   assert.deepEqual(seen.map((e) => e.seq), seen.map((_, i) => i + 1));
+  assert.ok(frames.some((e) => e.type === "live" && e.parts.some((p: any) => p.kind === "text")));
   const types = seen.map((e) => e.type);
   assert.deepEqual(types.slice(0, 3), ["setup", "setup", "setup"]); // worktree, sandbox (no setup command), context
   assert.deepEqual(types.slice(-5), ["test_result", "commit", "reflection", "run_metrics", "run_finished"]);

@@ -287,7 +287,16 @@ nav a.active { background: var(--hover); font-weight: 500; }
 .s-failed { color: var(--error); }
 
 /* ticket view */
-.ticket-view { max-width: 860px; padding: 12px 16px 48px; }
+/* The ticket takes the whole center column: specs, runs and transcripts are wide, and a fixed cap left half the screen empty. */
+.ticket-view { padding: 12px 16px 48px; }
+/* Title and spec grow with their text instead of clipping it (Firefox, without field-sizing, keeps their rows and scrolls). */
+textarea.h-input { resize: none; overflow: hidden; field-sizing: content; line-height: 1.35; }
+.ticket-view textarea.spec { field-sizing: content; min-height: calc(5lh + 14px); max-height: 40vh; }
+@media (min-width: 1500px) {
+  .ticket-body { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 24px; align-items: start; }
+  .ticket-view textarea.spec { max-height: 70vh; }
+  .ticket-work > :first-child { margin-top: 4px; }
+}
 .crumbs { margin-bottom: 8px; }
 .crumbs .link { padding: 0; }
 .h-input { font-size: 18px; font-weight: 600; border-color: transparent; background: transparent; margin: 0; padding: 4px 6px; margin-left: -6px; width: calc(100% + 6px); }
@@ -311,6 +320,13 @@ td .icon { vertical-align: -2px; }
 .result summary { cursor: pointer; color: var(--muted); }
 .result pre { margin: 4px 0; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--hover); border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
 .result.err summary, .result.err pre { color: var(--error); }
+.thinking .msg { margin: 4px 0; color: var(--muted); }
+.thinking.live { margin: 4px 0 6px; }
+.thinking.live .msg { margin: 2px 0 0; }
+/* the running run's status line: stays at the bottom of the viewport while the transcript is on screen */
+.live-bar .ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript > .row h3 { flex: 1 0 auto; }
+.live-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; margin: 8px -12px -8px; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--surface); border-radius: 0 0 8px 8px; }
 
 /* dialogs */
 .backdrop { position: fixed; inset: 0; display: grid; place-items: start center; padding-top: 12vh; background: rgb(0 0 0 / 0.45); z-index: 10; }

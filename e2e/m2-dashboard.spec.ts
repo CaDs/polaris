@@ -60,8 +60,11 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await column("todo").getByRole("button", { name: /Slow ticket/ }).click();
   await page.getByRole("button", { name: "Run agent" }).click();
   await expect(page.getByLabel("Status")).toBeDisabled(); // a running ticket's status belongs to its run
+  const activity = page.getByRole("status", { name: "Run activity" }); // instead of "Waiting for events…"
+  await expect(activity).toContainText(/Running sleep 30\s*· 0:0[1-9]/); // the command, and how long it has run
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(transcript).toContainText("cancelled");
+  await expect(activity).toBeHidden();
   await expect(page.getByLabel("Status")).toHaveValue("todo");
 
   // Changed elsewhere (another tab, the CLI): the workspace event stream moves the card without a focus or a reload.

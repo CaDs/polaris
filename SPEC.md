@@ -214,6 +214,18 @@ interface Provider {
 Internal message format is Anthropic-style content blocks. Reasoning is an opaque block passed back verbatim (Chat
 Completions: dropped; streamed `reasoning`/`reasoning_content` deltas still show live).
 
+**Watching a run.** `GET /api/runs/:id/events` replays the stored events, then live ones (de-duped by seq), plus transient
+`{type: "live", parts}` messages with no id: the running model call's text, reasoning and tool calls as they stream
+(`liveStream` in `agent/events.ts`), coalesced to one message per 100 ms, sent only while someone watches, and never
+stored. Any stored event of the run sends what is pending first, so a turn's live output never arrives after its
+`assistant_message`. The run view shows the live output at the end of the transcript, and a status line pinned to the
+bottom of the viewport says what the run is doing now ("Thinking…", "Writing…", "Running `<command>` · 1:12 of 10:00",
+"Checking the change…"), with "Jump to latest · N new" when the reader has scrolled away. It follows new output only once
+the reader has scrolled to the end, so opening a ticket doesn't scroll away from it. Reasoning with text is kept in the
+transcript as a collapsed "Thinking" block: Anthropic and Ollama `thinking`, an OpenAI reasoning `summary`. The ChatGPT
+plan asks for `reasoning: {summary: "auto"}`; an API key doesn't, since OpenAI can require a verified organization for
+summaries. Encrypted-only reasoning shows nothing.
+
 - **OpenRouter.** Models: the public catalog (`/models`, cached an hour), only those whose `supported_parameters` include
   `tools`, with their names. Every request asks for `usage: {include: true}`: the cost OpenRouter bills comes back with the
   usage and is what the ledger records (`RequestUsage.cost_usd`; spending caps count it). `options.data_collection`

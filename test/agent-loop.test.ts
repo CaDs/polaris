@@ -22,7 +22,7 @@ function run(script: Turn[], opts: Partial<RunOptions> = {}) {
   const root = mkdtempSync(join(tmpdir(), "loop-"));
   const runId = createRun({ ticketId: "t", model: "fake", worktree: root });
   const live: number[] = [];
-  const unsubscribe = subscribe(runId, (e) => live.push(e.seq));
+  const unsubscribe = subscribe(runId, (e) => e.type !== "live" && live.push(e.seq));
   const fake = fakeProvider(script, { input: 100, output: 20, cache_read: 7, cache_write: 3 });
   const done = runAgent({
     provider: fake.provider, model: "fake", system: "sys", task: "do it", tools, root,
