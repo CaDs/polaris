@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -112,6 +112,22 @@ export async function addDetached(repo: string, sha: string, path: string) {
   await git(repo, ["worktree", "add", "-q", "--detach", path, sha]);
   gitDirs.set(path, await git(path, ["rev-parse", "--absolute-git-dir"]));
   await excludeScratch(repo);
+}
+
+// A git dir for the sandbox at `dest`: the run's HEAD and index, the repository's branches and (hard-linked) objects, the
+// repo's info/exclude, and none of its config (remote URLs and credentials), hooks, stashes or other worktrees' metadata.
+// ponytail: one hard link per object file (a copy across filesystems), once per run; alternates would be instant but put the
+// repo's path in the container.
+export async function sandboxGitDir(worktree: string, dest: string) {
+  const admin = gitDirs.get(worktree);
+  if (!admin) return false;
+  const common = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  mkdirSync(dirname(dest), { recursive: true });
+  await execFileP("git", ["clone", "-q", "--local", "--bare", common, dest]);
+  writeFileSync(join(dest, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+  for (const f of ["HEAD", "index"]) if (existsSync(join(admin, f))) copyFileSync(join(admin, f), join(dest, f));
+  if (existsSync(join(common, "info/exclude"))) copyFileSync(join(common, "info/exclude"), join(dest, "info/exclude"));
+  return true;
 }
 
 // Best effort: a half-created or already-removed worktree/branch is fine. `dataRoot` guards the rm fallback.

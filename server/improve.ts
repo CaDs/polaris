@@ -233,12 +233,13 @@ export async function validateCase(c: Omit<EvalCase, "id" | "workspace_id" | "ti
   try {
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     await addDetached(c.repo_path, c.base_sha, wt);
-    sandbox = await openSandbox(id, wt, parseProtected(c.protected_paths), c.image);
+    sandbox = await openSandbox(id, wt, parseProtected(c.protected_paths), c.image, undefined, c.repo_path);
     const sh = (command: string) => sandbox!.exec(command, { cwd: wt, timeoutMs: COMMAND_TIMEOUT });
     if (c.setup_command.trim()) {
       const s = await sh(c.setup_command);
       if (s.code !== 0) return `The setup command fails at ${c.base_sha.slice(0, 8)} (exit ${s.code}), so the case can't run.`;
     }
+    await sandbox.endSetup();
     const t = await sh(c.test_command);
     if (t.code === 0)
       return `\`${c.test_command}\` already passes at ${c.base_sha.slice(0, 8)} (the commit the ticket's run started from), so this case can't tell an agent that solved it from one that did nothing.`;

@@ -7,7 +7,7 @@ import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
-import { IMAGE_REF, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
+import { IMAGE_REF, NETWORKS, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
 
 // Projects whose repository is the checkout this server runs from. A server started with --watch there restarts on every
@@ -389,6 +389,7 @@ async function projectBody(ws: string, b: Record<string, any>, cur?: Record<stri
     const n = b[k] === null || b[k] === "" ? def : typeof b[k] === "number" || typeof b[k] === "string" ? Number(b[k]) : NaN;
     v[k] = Number.isInteger(n) && n >= lo && n <= hi ? n : fail(`${label} must be a whole number from ${lo} to ${hi}`);
   }
+  if (b.sandbox_network !== undefined) v.sandbox_network = b.sandbox_network === null || b.sandbox_network === "" ? SANDBOX_RESOURCES.network : NETWORKS.includes(b.sandbox_network) ? b.sandbox_network : fail(`Sandbox network must be one of ${NETWORKS.join(", ")}`);
   if (v.image !== undefined && !IMAGE_REF.test(v.image as string)) fail("Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag");
   if (typeof v.protected_paths === "string" && v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
     fail("Protected paths must be relative to the repository root, without ..");

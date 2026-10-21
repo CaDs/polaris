@@ -307,7 +307,7 @@ an Apple M4 Max:
   - inviting members and switching workspaces in the UI;
   - formatted dates.
 - **Hardening:**
-  - containers have network access;
+  - the sandbox's network is cut after the setup command, but a project set to `full` (or the setup command itself) can still send data out;
   - spending caps are checked between agent sessions, so a session in flight can overshoot a cap;
   - a reviewer that errors is skipped (fail-open) and the change still goes to human review;
   - the CLI (`npm run agent`) runs on the host with no sandbox, test gate or spending cap;
@@ -338,12 +338,13 @@ tasks.md          milestone checklist
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.
-- **Agents.** Workers and reviewers run in Docker containers limited to the project's CPUs and memory (default 4 and 4 GB) and 512 processes, with network
-  access, as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
+- **Agents.** Workers and reviewers run in Docker containers limited to the project's CPUs and memory (default 4 and 4 GB) and 512 processes, with a read-only root, no swap, and a network only while the setup command runs (project setting
+  *Sandbox network*: setup-only (default), none, full; agents and tests never have one unless `full`), as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
   gid, so files agents create in the worktree are yours; under Docker Desktop it is the image's `polaris` (1000:1000),
-  and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid, so it needs a writable `HOME`.
+  and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid with `HOME=/home/polaris` (a tmpfs). Polaris refuses to run sandboxes as root
+  (`POLARIS_ALLOW_ROOT_SANDBOX=1` overrides) and stops a sandbox whose worktree passes 5 GB (`POLARIS_WORKTREE_MAX_MB`).
   The built-in image is rebuilt when its `polaris.image.version` label is older than the harness expects.
-  Your protected paths, the worktree's `.git` file and the repo's git dir are mounted read-only. The file tools never
+  Your protected paths and a throwaway git dir (the run's HEAD, index, branches and objects; no config, remotes or host path) are mounted read-only; the npm cache is a volume per repository. The file tools never
   write a path with a `.git` segment, and compare paths case-insensitively on a case-insensitive filesystem. Planner and
   wiki agents run on the host with file tools only (no shell). Changes reach your branch only through Approve.
 - **Host git.** Every git command the harness runs has hooks and fsmonitor off, and addresses a run's worktree by the git
