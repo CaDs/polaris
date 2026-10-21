@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // turn, model "demo": no price). Earlier usage is inserted as runs rows; a priced model name there gives a USD figure.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, idle, workspace } = await import("./helpers.ts");
+const { call, db, events, idle, workspace, worktreeOf } = await import("./helpers.ts");
 
 const monthStart = Date.parse(`${new Date().toISOString().slice(0, 7)}-01T00:00:00Z`);
 // A finished run of `model` with these tokens, on a fresh ticket of workspace ws.
@@ -63,7 +63,7 @@ test("workspace cap reached: the next run fails before it starts, with the reaso
   const run = failed.runs[0];
   const month = new Date().toISOString().slice(0, 7);
   assert.equal(finished(run.id).reason, `SpendingCap: spending cap reached: workspace ${month} cost $2/$1.5`);
-  assert.deepEqual([finished(run.id).turns, run.tokens_in, run.worktree], [0, 0, null]); // no worktree, no model call
+  assert.deepEqual([finished(run.id).turns, run.tokens_in, worktreeOf(run.id)], [0, 0, null]); // no worktree, no model call
   assert.deepEqual(errors(run.id, "SpendingCap"), [{ kind: "SpendingCap", message: `spending cap reached: workspace ${month} cost $2/$1.5`, cap: { which: `workspace ${month} cost`, used: 2, cap: 1.5 } }]);
   assert.equal(events(run.id).filter((e) => e.type === "reflection").length, 0); // reflecting would be another call
 

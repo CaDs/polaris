@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
-import { skillsText, type Skill } from "./agent/context.ts";
+import { referenceNotes, skillsText, type Skill } from "./agent/context.ts";
 import { readOnlyTools, truncate, type Tool } from "./agent/tools.ts";
 import { AgentError, type Msg } from "./agent/types.ts";
 import { SANDBOX_TOOLS } from "./sandbox.ts";
@@ -147,9 +147,8 @@ export function plannerTask(epic: Epic, o: {
       `- Round ${o.round} of at most ${MAX_ROUNDS}; child tickets: ${childrenOf(epic.id).length} of at most ${MAX_CHILDREN}; sub-epics: ${epic.parent_id ? "not allowed (this epic is a sub-epic)" : "allowed (their planners cannot create epics)"}`,
     ].join("\n"),
   ];
-  if (o.skills.length) parts.push(skillsText(o.skills));
-  if (o.lessons) parts.push(`# Lessons from earlier runs\n\n${o.lessons}`);
-  if (o.wiki) parts.push(o.wiki);
+  const notes = referenceNotes([o.skills.length ? skillsText(o.skills) : "", o.lessons && `# Lessons from earlier runs\n\n${o.lessons}`, o.wiki]);
+  if (notes) parts.push(notes);
   if (o.review) parts.push(`A reviewer sent the completed epic back: ${o.review}`);
   const header = trackerHeader(epic.id); // M11: priority, labels, milestone, due date
   parts.push(`# Epic\n\n# ${epic.title}${header ? `\n\n${header}` : ""}${epic.spec ? `\n\n${epic.spec}` : ""}`);

@@ -136,7 +136,8 @@ test("mining: one structured call per class with ≥ 2 runs; mined todo tickets 
   const t = await w.get(r.created[0].ticket_id);
   assert.deepEqual([t.status, t.mined_class, t.labels.map((l: any) => l.name), t.run_count], ["todo", "gate_tests", ["mined"], 0]);
   assert.match(t.spec, /^Make gate_tests stop: add a test\.\n\n## Mined from failures\n\nClass `gate_tests` \(the tests failed after the agent finished\): 3 runs on 2 tickets in the last 30 days\. Model confidence 0\.80\. Examples:\n- MAX-1 \(m1\): `npm test` exited with code 1\n/);
-  assert.equal((await call("GET", "/api/lessons", w.cookie)).body.versions[0].body, "- Retry the setup command once before giving up");
+  const mined = (await call("GET", "/api/lessons", w.cookie)).body.versions[0];
+  assert.deepEqual([mined.body, mined.state], ["- Retry the setup command once before giving up", "pending"]); // POL-10: waits for a human
   assert.deepEqual(JSON.parse((db.prepare("SELECT result FROM minings WHERE id = ?").get(r.id) as { result: string }).result).created.length, 2);
   assert.equal((await tickets(w)).filter((x) => x.labels.some((l: any) => l.name === "mined")).length, 2); // one label, reused
 

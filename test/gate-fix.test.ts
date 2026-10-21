@@ -28,7 +28,7 @@ test("GATE-FIX-ONCE: the gate fails, the worker fixes it in the same run, the se
   assert.equal(t.status, "review");
   assert.equal(t.runs.length, 1);
   const id = t.runs[0].id;
-  assert.deepEqual(events(id, "test_result").map((g) => g.passed), [false, true]);
+  assert.deepEqual(events(id, "test_result").map((g) => g.passed), [false, true, true]); // the last is the clean run of the commit
   assert.match(events(id, "gate_fix")[0].reason, /`test -f ok\.txt` exited with code 1/);
   const types = (db.prepare("SELECT type FROM events WHERE run_id = ? ORDER BY seq").all(id) as { type: string }[]).map((e) => e.type);
   assert.ok(types.indexOf("gate_fix") < types.lastIndexOf("test_result") && types.indexOf("test_result") < types.indexOf("gate_fix"));
@@ -74,7 +74,8 @@ test("flaky: a failure that passes on an immediate re-run passes the gate, flagg
   assert.equal(t.runs.length, 1);
   const id = t.runs[0].id;
   const gates = events(id, "test_result");
-  assert.equal(gates.length, 1);
+  assert.equal(gates.length, 1 + 1); // + the clean run of the commit
+  assert.equal(gates[1].clean, true);
   assert.deepEqual([gates[0].passed, gates[0].flaky], [true, true]);
   assert.deepEqual(gates[0].first_failure, { code: 3, timed_out: false, output: "first run fails" });
   assert.equal(events(id, "gate_fix").length, 0);
@@ -144,4 +145,22 @@ test("a worker stopped as stuck is retried fresh (unlike a budget failure), with
   assert.deepEqual(a1.metrics.stuck, { turn: 6, signal: "repeat_call", action: "stop" });
   assert.deepEqual([a1.metrics.files_changed, a2.metrics.files_changed, a2.metrics.stuck], [0, 2, null]); // notes.txt, ok.txt
   assert.match(events(a2.id, "run_started")[0].task, new RegExp(`Previous attempt was stopped because it repeated ${detail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\. Do not repeat that`));
+});
+
+test("POL-4: tests that pass only in the agent's own tree fail the recorded gate, which runs on a clean checkout of the commit", async () => {
+  await settings({ test_command: "test -f notes.txt" });
+  // The agent's tree and the clean checkout differ by directory name (stand-in for git-ignored files the agent planted).
+  const t = await ticketRun("plain change planted files", 'case "$PWD" in *-gate) echo only the clean tree fails; exit 1;; esac');
+  assert.equal(t.status, "failed");
+  for (const run of t.runs) {
+    const gates = events(run.id, "test_result");
+    assert.deepEqual(gates.map((g) => [g.passed, !!g.clean]), [[true, false], [false, true]]);
+    assert.match(gates[1].output, /only the clean tree fails/);
+    assert.equal(events(run.id, "commit").length, 0);
+    assert.match(events(run.id, "run_finished")[0].reason, /exited with code 1/);
+  }
+  const t2 = await ticketRun("plain change ok everywhere", "true");
+  assert.equal(t2.status, "review");
+  assert.deepEqual(events(t2.runs[0].id, "test_result").map((g) => !!g.clean), [false, true]);
+  assert.equal(events(t2.runs[0].id, "commit").length, 1);
 });

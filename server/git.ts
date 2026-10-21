@@ -1,15 +1,19 @@
 import { execFile } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { foldPath, isProtected, MAX_FILE } from "./agent/tools.ts";
+import { dataDir } from "./sandbox.ts";
 
 // All git work happens on the host via the git CLI; the sandbox never sees the repo's .git (see README).
 const execFileP = promisify(execFile);
 const env = {
   ...process.env,
   GIT_TERMINAL_PROMPT: "0",
+  // No /etc/gitconfig or system gitattributes (filters, helpers) on the host's git.
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_ATTR_NOSYSTEM: "1",
   // Harness commits (passing runs, merges) never depend on the user's git identity.
   GIT_AUTHOR_NAME: "polaris",
   GIT_AUTHOR_EMAIL: "polaris@localhost",
@@ -37,11 +41,30 @@ export async function git(cwd: string, args: string[], extraEnv?: Record<string,
   }
 }
 
+const under = (p: string, root: string) => p === root || p.startsWith(root + sep);
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+
 // What is at a folder, as a state the form can act on (POL-29): not_found, not_a_repo, inside_repo (`root` is the repository's
-// root), no_commits, or ok. `error` is the message project create/update fail with.
-export type RepoState = { state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok"; root?: string; error?: string };
+// root), no_commits, ok, or refused. `error` is the message project create/update fail with. Host git runs in a project's
+// repo (worktree add, merge), and repo-local config such as a smudge filter would run there, so before any git command
+// (POL-2): not under the data dir (worktrees and wikis are agent-writable), under POLARIS_REPO_ROOTS when the operator set
+// it (colon-separated), and owned by the server's user.
+// ponytail: repo-local filters and attributes of an allowed repo still run on the host; the allowlist is what keeps members off foreign repos.
+export type RepoState = { state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok" | "refused"; root?: string; error?: string };
 export async function repoState(repoPath: string): Promise<RepoState> {
   if (!isAbsolute(repoPath)) return { state: "not_found", error: "Repository path must be an absolute path" };
+  const at = real(repoPath);
+  if (under(at, real(dataDir()))) return { state: "refused", error: "Repository path is inside Polaris's data directory" };
+  const roots = (process.env.POLARIS_REPO_ROOTS ?? "").split(":").filter(Boolean);
+  if (roots.length && !roots.some((r) => under(at, real(r)))) return { state: "refused", error: "Repository path is outside POLARIS_REPO_ROOTS" };
+  const owner = existsSync(at) ? statSync(at).uid : undefined;
+  if (owner !== undefined && process.getuid && owner !== process.getuid()) return { state: "refused", error: "Repository must be owned by the user Polaris runs as" };
   if (!existsSync(repoPath)) return { state: "not_found", error: `${repoPath} is not a git repository (or does not exist)` };
   const top = await git(repoPath, ["rev-parse", "--show-toplevel"]).catch(() => "");
   if (!top) return { state: "not_a_repo", error: `${repoPath} is not a git repository (or does not exist)` };

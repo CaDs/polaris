@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { capture, hostExec, truncate, type Exec } from "./agent/tools.ts";
@@ -88,20 +88,30 @@ export const dockerRunArgs = (name: string, worktree: string, mounts: string[], 
   "-e", "HOME=/home/polaris", ...(r.network === "none" ? ["--network", "none"] : []), image, "sleep", "infinity",
 ];
 
+// The -v flags that mount the read-only paths (tools.ts readOnlyPaths; .git has its own mounts below). A protected path that doesn't exist yet (evals/ in most repos)
+// is created empty first: otherwise it would be writable and only the diff check would stand between the agent and it.
+export function protectedMounts(worktree: string, protectedPaths: string[]) {
+  for (const p of protectedPaths) {
+    const dir = resolve(worktree, p);
+    if (!dir.startsWith(resolve(worktree) + sep)) continue;
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {} // a file in the way, or a parent that is a file: it exists, so it gets mounted (or the diff check holds)
+  }
+  return protectedPaths.filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+}
+
 // One npm cache per repository: a cache an agent poisoned reaches only later runs of the same repository. A new volume
 // starts as the image's (sandbox-user-owned) /home/polaris/.npm.
 const cacheVolume = (repo: string) => `polaris-npm-cache-${createHash("sha256").update(repo).digest("hex").slice(0, 12)}`;
 
-// readOnly: the paths to mount read-only (tools.ts readOnlyPaths). One missing from the worktree is made an empty directory
-// first, so it is read-only too instead of something the agent can create.
 export async function openSandbox(runId: string, worktree: string, readOnly: string[], image: string, resources: Resources = SANDBOX_RESOURCES, repo = ""): Promise<Sandbox> {
   if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, endSetup: async () => {}, close: async () => {} };
   if (!IMAGE_REF.test(image)) throw new Error(`not a docker image reference: ${image}`); // rows saved before the settings check
   if (SANDBOX_USER.startsWith("0:") && !process.env.POLARIS_ALLOW_ROOT_SANDBOX) throw new Error("refusing to run sandboxes as root (uid 0 owns the worktree files); run Polaris as a normal user, or set POLARIS_ALLOW_ROOT_SANDBOX=1");
   await ensureImage(image);
   const name = `polaris-${runId}`;
-  for (const p of readOnly) if (!existsSync(join(worktree, p)) && resolve(worktree, p).startsWith(worktree + "/")) mkdirSync(join(worktree, p), { recursive: true });
-  const ro = readOnly.filter((p) => existsSync(join(worktree, p))).flatMap((p) => ["-v", `${join(worktree, p)}:/work/${p}:ro`]);
+  const ro = protectedMounts(worktree, readOnly);
   // Git inside: a throwaway git dir at /git (this run's HEAD and index, the repo's objects and branches, no config, remotes
   // or credentials) behind a .git file over the worktree's, both read-only: git status/diff/log work, a commit fails (the
   // harness commits on the host). Neither the repo's real git dir nor its host path is visible.

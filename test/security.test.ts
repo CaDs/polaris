@@ -9,7 +9,8 @@ import { writeWorkspaceSkills } from "../server/skills.ts";
 import { hostExec, isProtected, readAt, refuseSymlinks, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
 import { runAgent } from "../server/agent/loop.ts";
 import { fakeProvider } from "../server/agent/providers/fake.ts";
-import { addWorktree, changedLines, changedPaths, commitAll, git, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
+import { protectedMounts } from "../server/sandbox.ts";
+import { addWorktree, changedLines, changedPaths, commitAll, git, inspectRepo, nestedRepos, protectedChanges, restore, snapshot } from "../server/git.ts";
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const sh = (cwd: string, cmd: string) => execFileSync("sh", ["-c", cmd], { cwd, encoding: "utf8" }).trim();
@@ -214,4 +215,45 @@ test("skills that are symlinks leaving the checkout are skipped (POL-20)", () =>
   rmSync(join(root, ".polaris/skills"), { recursive: true });
   symlinkSync(outside, join(root, ".polaris/skills"));
   assert.deepEqual(listSkills(root, "worker"), []);
+});
+
+test("POL-2: a project repo_path under the data dir is refused before any git command runs; POLARIS_REPO_ROOTS limits the rest", async () => {
+  const base = tmp("sec-roots-");
+  const data = join(base, "data");
+  process.env.POLARIS_DATA_DIR = data;
+  try {
+    // A repo a sandbox built under the worktrees dir, with a smudge filter that would run on `git worktree add`.
+    const evil = repoWith(join(data, "worktrees", "run1", "evil"));
+    const marker = join(base, "SMUDGE");
+    writeFileSync(join(evil, ".gitattributes"), "* filter=evil\n");
+    sh(evil, `git config filter.evil.smudge 'touch ${marker}; cat'`);
+    assert.match(((await inspectRepo(evil, "")) as { error: string }).error, /data directory/);
+    assert.match(((await inspectRepo(join(data, "wikis", "../worktrees/run1/evil"), "")) as { error: string }).error, /data directory/);
+    const link = join(base, "link");
+    symlinkSync(evil, link);
+    assert.match(((await inspectRepo(link, "")) as { error: string }).error, /data directory/); // by realpath
+    assert.equal(existsSync(marker), false);
+
+    const mine = repoWith(join(base, "mine"));
+    const other = repoWith(join(base, "other"));
+    assert.equal("error" in (await inspectRepo(other, "")), false); // unset: any repo
+    process.env.POLARIS_REPO_ROOTS = `/nonexistent:${mine}`;
+    assert.equal("error" in (await inspectRepo(mine, "")), false);
+    assert.match(((await inspectRepo(other, "")) as { error: string }).error, /POLARIS_REPO_ROOTS/);
+    process.env.POLARIS_REPO_ROOTS = base;
+    assert.equal("error" in (await inspectRepo(other, "")), false);
+  } finally {
+    delete process.env.POLARIS_REPO_ROOTS;
+    delete process.env.POLARIS_DATA_DIR;
+  }
+});
+
+test("POL-4: a protected path that does not exist yet is created and mounted read-only; paths outside the worktree are skipped (.git has its own mounts)", () => {
+  const wt = tmp("sec-ro-");
+  mkdirSync(join(wt, ".git"));
+  mkdirSync(join(wt, "tests"));
+  const args = protectedMounts(wt, ["tests", "evals", "deep/er", "../escape"]);
+  assert.equal(existsSync(join(wt, "evals")), true);
+  assert.equal(existsSync(join(wt, "../escape")), false);
+  assert.deepEqual(args.filter((a) => a !== "-v").map((a) => a.split(":/work/")[1]), ["tests:ro", "evals:ro", "deep/er:ro"]);
 });

@@ -74,7 +74,7 @@ type Branch = { name: string; current: boolean; committed_at: number; subject: s
 type Candidate = { path: string; files: number; pattern: string | null; suggested: boolean };
 type Suggestion = { value: string; why: string } | null;
 type Inspect = {
-  state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok"; root?: string; branches?: Branch[]; base_branch?: string; base_exists?: boolean;
+  state: "not_found" | "not_a_repo" | "inside_repo" | "no_commits" | "ok" | "refused"; error?: string; root?: string; branches?: Branch[]; base_branch?: string; base_exists?: boolean;
   missing?: string[]; protected?: Candidate[]; setup_command?: Suggestion; test_command?: Suggestion;
 };
 async function inspect(repo_path: string, base_branch: string, check_paths: string[]): Promise<Inspect> {
@@ -166,7 +166,7 @@ function RepoFields({ r }: { r?: Repo }) {
       </label>
       <div role="status" className="hint repo-state">
         {ok && <><Icon name="check" size={13} /> git repository · {info.branches!.length} branch{info.branches!.length === 1 ? "" : "es"}{info.branches!.find((b) => b.current) ? ` · on ${info.branches!.find((b) => b.current)!.name}` : " · HEAD is detached"}</>}
-        {info && info.state !== "ok" && info.state !== "inside_repo" && NOT_OK[info.state]}
+        {info && info.state !== "ok" && info.state !== "inside_repo" && (info.state === "refused" ? info.error : NOT_OK[info.state])}
         {info?.state === "inside_repo" && <>This folder is inside the repository at <code>{info.root}</code>. <button type="button" className="btn" onClick={() => setPath(info.root!)}>Use the root</button></>}
         {failed && `Could not check this folder: ${failed}`}
       </div>

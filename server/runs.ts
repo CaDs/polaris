@@ -5,7 +5,7 @@ import { db } from "./db.ts";
 import { capText, checkUsageCaps, metered, monthSpend, normalized, recordUsage, treeSpend, usageCaps, usagePurpose, withUsage } from "./usage.ts";
 export { monthSpend, treeSpend } from "./usage.ts";
 import { createRun, eventLog, liveStream, touch } from "./agent/events.ts";
-import { listSkills, skillsText, type Skill } from "./agent/context.ts";
+import { listSkills, referenceNotes, skillsText, type Skill } from "./agent/context.ts";
 import { addMetrics, runAgent, type RunResult } from "./agent/loop.ts";
 import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
@@ -176,9 +176,8 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
       `- Budget: ${info.budget.turns} turns and ${info.budget.minutes} minutes for this attempt (fix rounds after failed tests or a review use what is left); a [harness] note tells you when 2 turns or little time are left`,
     ].join("\n"),
   ];
-  if (info.skills.length) parts.push(skillsText(info.skills));
-  if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
-  if (info.wiki) parts.push(info.wiki);
+  const notes = referenceNotes([info.skills.length ? skillsText(info.skills) : "", info.lessons && `# Lessons from earlier runs\n\n${info.lessons}`, info.wiki]);
+  if (notes) parts.push(notes);
   const body = [t.header, t.spec].filter(Boolean).join("\n\n"); // header: the tracker's priority, labels, milestone, due date (M11)
   parts.push(...feedback, `# Task\n\n${body ? `# ${t.title}\n\n${body}` : t.title}`);
   return parts.join("\n\n");
@@ -801,7 +800,45 @@ async function execute(runId: string) {
       const message = `# Model review\n\nA reviewer found problems in your change:\n${findingsText(review.findings)}\n\nFix them, then finish with a short reply. The tests and the review run again.`;
       if (!(await fixRound("model review requested changes", message)) || !(await gate())) return;
     }
-    if (!ev) log({ type: "commit", payload: { sha: await commitAll(worktree, `${t.key}: ${t.title}`), branch: branch! } });
+    if (ev) return;
+    // The recorded gate runs on what is committed, not in the agent's container (POL-4): the container is stopped first (a
+    // background process it left can't write any more), protected paths are checked again before and against the commit, and
+    // the tests then run in a fresh container on a clean checkout of that commit, so git-ignored files the agent planted
+    // (node_modules/.bin, conftest.py) can't make them pass. Costs a second setup + test run.
+    // ponytail: one clean run, no fix round; a failure here is a gate failure of the attempt (retried like any other).
+    await sandbox.close();
+    const touchedNow = async () => [...(await protectedChanges(worktree, base_sha, protectedPaths)), ...(wikiTree ? wikiTampered(worktree, wikiTree) : [])];
+    let sha = "";
+    let failed = await touchedNow();
+    if (!failed.length) failed = (sha = await commitAll(worktree, `${t.key}: ${t.title}`), await touchedNow());
+    const final = { passed: false, command: testCommand, code: null as number | null, timed_out: false, output: "", protected: failed, clean: true as const };
+    if (!failed.length && testCommand.trim()) {
+      const clean = join(dataDir(), "worktrees", `${runId}-gate`);
+      let box: Sandbox | undefined;
+      try {
+        await addDetached(cfg.repo_path, sha, clean);
+        box = await openSandbox(`${runId}-gate`, clean, readOnlyPaths(parseProtected(cfg.protected_paths), mode), cfg.image, resourcesOf(s), cfg.repo_path);
+        const inClean = (command: string) => box!.exec(command, { cwd: clean, timeoutMs: COMMAND_TIMEOUT, signal });
+        const setup = cfg.setup_command.trim() ? await inClean(cfg.setup_command) : undefined;
+        await box.endSetup(); // the project's network setting holds for the clean test run too
+        abortCheck();
+        const { r, ...flake } = setup && setup.code !== 0 ? { r: setup } : await rerunFlaky(await inClean(testCommand), () => inClean(testCommand));
+        abortCheck();
+        Object.assign(final, { passed: r.code === 0, code: r.code, timed_out: r.timedOut, output: tail(r), ...flake });
+      } finally {
+        await box?.close();
+        await removeWorktree(cfg.repo_path, clean, null, dataDir());
+      }
+    } else if (!failed.length) final.passed = true; // no test command: nothing to run
+    if (failed.length || testCommand.trim()) log({ type: "test_result", payload: final });
+    if (!final.passed) {
+      res.status = "failed";
+      res.reason = gateFailure(final);
+      gateOutput = final.output;
+      retry = run.attempt < MAX_ATTEMPTS;
+      return;
+    }
+    log({ type: "commit", payload: { sha, branch: branch! } });
   }, async (res, { signal, log }) => {
     const { status, reason, turns } = res;
     // The attempt's budget use (not the last call's) and the change's size, before the worktree goes.
@@ -835,11 +872,19 @@ async function execute(runId: string) {
     else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck|SpendingCap):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
     else {
       setTicket(t.id, TICKET_STATUS[status]);
-      if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
+      if (status === "passed" && t.parent_id && s?.auto_approve_children && ownGate(t, s)) await autoApprove(t.id, runId);
       else if (status === "passed") notify(t.workspace_id, t.id, "review", `${t.key} is ready for review`);
       else if (status === "failed") notify(t.workspace_id, t.id, "failed", `${t.key} failed: ${reason ?? "unknown reason"}`);
     }
   });
+}
+
+// Auto-approve only a child whose gate is the project's or its (top-level, human-made) epic's: any other gate came from a
+// planner (POL-9), and a human approves that diff.
+function ownGate(t: TicketRow, s: ProjectSettings) {
+  if (t.test_command === null || t.test_command === s.test_command) return true;
+  const epic = t.parent_id ? ticketRow(t.parent_id) : undefined;
+  return !!epic && !epic.parent_id && t.test_command === epic.test_command;
 }
 
 // Auto-approve (M7 workspace setting): the Approve button's merge path. A failed merge leaves the child in review.
@@ -922,7 +967,7 @@ async function afterRound(t: TicketRow, runId: string, status: RunStatus, reason
   if (summary === undefined) return wake(t.id);
   db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(summary, t.id);
   setTicket(t.id, "review");
-  if (t.parent_id && settingsFor(t.workspace_id).auto_approve_children) await approve(t.id);
+  if (t.parent_id && settingsFor(t.workspace_id).auto_approve_children && ownGate(t, projectSettings(t.project_id)!)) await approve(t.id);
 }
 
 // The reason is the epic's handoff: its own view shows it, and a parent planner reads it.

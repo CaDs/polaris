@@ -8,7 +8,7 @@ import { join } from "node:path";
 // human edits, the wiki setting. POLARIS_SANDBOX=host (no docker), demo provider as the maintainer.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "3";
-const { configure, fileTicket, projectOf, call, db, events, idle, sh, task, tempRepo, until, user, waitFor, workspace: base, wsOf } = await import("./helpers.ts");
+const { configure, fileTicket, projectOf, call, db, events, idle, sh, task, tempRepo, until, user, waitFor, workspace: base, wsOf, worktreeOf } = await import("./helpers.ts");
 const { runTool, wikiTools } = await import("../server/agent/tools.ts");
 const { ensureWiki, finishCopy, frontmatter, lintDir, openCopy, wikiDir, wikiSerial, WIKI_PROTECTED } = await import("../server/wiki.ts");
 
@@ -172,7 +172,7 @@ test("approve → one ingest run: demo page, index, log line and commit message 
   assert.match(first, /# Current wiki\/index\.md\n\n# Index$/);
   // Nothing was left behind.
   assert.equal(sh(w.repo, "git worktree list").split("\n").length, 1);
-  assert.equal(existsSync(d.runs[1].worktree), false);
+  assert.equal(existsSync(worktreeOf(d.runs[1].id)), false);
   assert.equal(sh(wikiDir(w.pid), "git status --porcelain"), "");
   assert.equal(run.role, "worker");
 
@@ -183,10 +183,10 @@ test("approve → one ingest run: demo page, index, log line and commit message 
 test("the next run sees the wiki: snapshot in .polaris/wiki, index in the first message, read-only, git-excluded", async () => {
   const { t, run } = await w.ticket("Second change");
   const first = task(run.id);
-  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer\n\n# Task/);
+  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer\n\n\(end of reference notes\)\n\n# Task/);
   assert.doesNotMatch(first, /may be stale/);
   assert.match(first, /Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki/);
-  const wt = (await w.get(t.id)).runs[0].worktree;
+  const wt = worktreeOf((await w.get(t.id)).runs[0].id);
   assert.match(readFileSync(join(wt, ".polaris/wiki/modules/demo.md"), "utf8"), /^---\ntitle: Demo module/);
   assert.equal(sh(wt, "git status --porcelain"), ""); // the snapshot is invisible to git (the run's change is committed)
   assert.equal(sh(wt, "git ls-files"), "README.md\nnotes.txt");
@@ -359,7 +359,7 @@ test("wiki off: no snapshot, no section, no ingest, no bootstrap", async () => {
   const { t, run } = await x.ticket("Without wiki");
   const first = task(run.id);
   assert.doesNotMatch(first, /Project wiki|\.polaris\/wiki/);
-  const wt = (await x.get(t.id)).runs[0].worktree;
+  const wt = worktreeOf((await x.get(t.id)).runs[0].id);
   assert.equal(existsSync(join(wt, ".polaris/wiki")), false);
   await x.approve(t.id);
   await x.idle();
