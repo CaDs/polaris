@@ -20,7 +20,7 @@ test("M0: sign up, create workspace, create its first project, see board, sign o
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill("password-123");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.locator("header strong")).toHaveText("Home Lab");
+  await expect(page.getByRole("button", { name: "Switch project" })).toContainText("Home Lab");
   await expect(page).toHaveURL(/\/p\/APP$/); // back on the first project's board
 });
 

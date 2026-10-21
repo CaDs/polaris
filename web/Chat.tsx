@@ -1,21 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { matchTickets } from "./Palette.tsx";
 import { Markdown } from "./Wiki.tsx";
-import { PRIORITIES, useTracker, type ProjectRef } from "./tracker.tsx";
+import { PRIORITIES, type ProjectRef } from "./tracker.tsx";
 import { Popover } from "./Filters.tsx";
 import { SkillDialog } from "./Skills.tsx";
 import { Alert, Confirm, Icon, Mark, StatusIcon, api, when, type IconName, type Ticket } from "./ui.tsx";
 
 // M13: the chat (Cmd/Ctrl+J panel, or the full-width Agent page: variant "page"). Talks with a project's agent about the
-// page you're on; the agent proposes tickets as cards and you file them into that project. A new chat starts in the page's
-// project (or the one picked). Skills (M17) can be attached to a message: their full text goes with it. One chat at a time is open; its stored events replay over SSE, then live ones and the
+// page you're on; the agent proposes tickets as cards and you file them into that project. A chat belongs to one project:
+// a new one starts in the current project (the sidebar's switcher), and the lists show the current project's chats. Skills (M17) can be attached to a message: their full text goes with it. One chat at a time is open; its stored events replay over SSE, then live ones and the
 // reply's text as it streams. Which chat is open is the caller's: the page's URL (/agent/<id>), or the panel's remembered one.
 // Past chats are listed in the sidebar (recent ones) and on the Chats page (all of them).
 export type ChatContext = { ticket?: string; project?: string; cycle?: string };
 type Ev = { seq: number; type: string; payload: any };
 type Draft = { title: string; spec: string; kind: string; test_command: string | null; priority: number; estimate: number | null };
 type Proposal = { id: string; number: number; status: "open" | "filed" | "dismissed" | "superseded"; payload: Draft; ticket_key: string | null };
-export type ChatInfo = { id: string; title: string; project_key?: string; updated_at?: number };
+export type ChatInfo = { id: string; title: string; updated_at?: number };
 type SkillRef = { id: string; name: string };
 // The Agent page's starting points: they fill the composer, the member finishes the sentence.
 const EXAMPLES: { icon: IconName; title: string; text: string; prompt: string }[] = [
@@ -32,14 +32,12 @@ const SOURCE: Record<string, (i: any) => string> = {
   list_tickets: (i) => `tickets${i.status ? ` (${i.status})` : ""}${i.query ? ` “${i.query}”` : ""}`,
 };
 
-export function Chat({ id, pick, chats, listed, context, label, project, tickets, go, filed, close, variant = "panel" }: {
-  id: string | null; pick: (id: string | null) => void; chats: ChatInfo[]; listed: () => void;
+export function Chat({ id, pick, opened, chats, listed, context, label, project, tickets, go, filed, close, variant = "panel" }: {
+  id: string | null; pick: (id: string | null) => void; opened: (id: string, projectId: string) => void; chats: ChatInfo[]; listed: () => void;
   context: ChatContext; label: string | null; project: ProjectRef | undefined; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close?: () => void;
   variant?: "panel" | "page";
 }) {
-  const { tracker } = useTracker();
-  const [picked, setPicked] = useState<string | null>(null); // a project chosen for the next new chat
-  const projectId = picked ?? project?.id;
+  const projectId = project?.id; // a new chat's: the current project
   const [events, setEvents] = useState<Ev[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [busy, setBusy] = useState(false);
@@ -53,7 +51,7 @@ export function Chat({ id, pick, chats, listed, context, label, project, tickets
 
   const load = (chat = id) =>
     chat
-      ? api<{ busy: boolean; proposals: Proposal[]; project_id: string }>(`/api/chats/${chat}`).then((c) => (setProposals(c.proposals), setBusy(c.busy), setChatProject(c.project_id)), () => pick(null))
+      ? api<{ busy: boolean; proposals: Proposal[]; project_id: string }>(`/api/chats/${chat}`).then((c) => (setProposals(c.proposals), setBusy(c.busy), setChatProject(c.project_id), opened(chat, c.project_id)), () => pick(null))
       : Promise.resolve();
   useEffect(() => setUseContext(true), [label]); // a new page is new context
   useEffect(() => {
@@ -104,7 +102,7 @@ export function Chat({ id, pick, chats, listed, context, label, project, tickets
         <header className="chat-head">
           <select aria-label="Conversation" value={id ?? ""} onChange={(e) => pick(e.target.value || null)}>
             <option value="">New chat</option>
-            {chats.map((c) => <option key={c.id} value={c.id}>{c.project_key} · {c.title}</option>)}
+            {chats.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
           </select>
           <button className="icon-btn" aria-label="New chat" title="New chat" onClick={() => pick(null)}><Icon name="plus" /></button>
           {close && <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>}
@@ -113,7 +111,7 @@ export function Chat({ id, pick, chats, listed, context, label, project, tickets
       <div className="chat-log" role="log" aria-label="Messages">
         {!id && (
           <div className="chat-empty muted">
-            {variant === "page" && <h2 className="chat-hello">Ask Polaris</h2>}
+            {variant === "page" && <h2 className="chat-hello">Ask Polaris{project && ` about ${project.name}`}</h2>}
             <p>Ask about the project, or describe a change. Polaris reads the code and the wiki, asks what's unclear and proposes tickets for you to file.</p>
             <p>{variant === "panel" && "It knows the page you're on; "}Type <kbd>@</kbd> to mention a ticket; attach a skill to say how to go about it.</p>
             {variant === "page" && (
@@ -135,11 +133,6 @@ export function Chat({ id, pick, chats, listed, context, label, project, tickets
       <Composer draft={draft} setDraft={setDraft} send={send} tickets={tickets} busy={busy} stop={stop}
         chip={label && useContext ? <span className="chip">On {label}<button aria-label={`Leave out ${label}`} onClick={() => setUseContext(false)}><Icon name="x" size={12} /></button></span> : null}
         tools={<>
-          {!id && tracker && tracker.projects.length > 1 && (
-            <select aria-label="Project" title="The project a new chat is about" value={projectId ?? ""} onChange={(e) => setPicked(e.target.value)}>
-              {tracker.projects.map((p) => <option key={p.id} value={p.id}>{p.key}</option>)}
-            </select>
-          )}
           {(id ? chatProject : projectId) && <SkillPicker projectId={(id ? chatProject : projectId)!} selected={skills} setSelected={setSkills} />}
         </>} />
     </section>
@@ -341,7 +334,7 @@ function ProposalCard({ p, go, changed }: { p: Proposal; go: (to: string) => voi
   );
 }
 
-// The Chats page: every past chat (newest first), searchable by title; open one on the Agent page, or delete it.
+// The Chats page: every past chat in the current project (newest first), searchable by title; open one on the Agent page, or delete it.
 export function ChatsPage({ chats, listed, go }: { chats: ChatInfo[]; listed: () => void; go: (to: string) => void }) {
   const [q, setQ] = useState("");
   const [deleting, setDeleting] = useState<ChatInfo | null>(null);
@@ -358,7 +351,6 @@ export function ChatsPage({ chats, listed, go }: { chats: ChatInfo[]; listed: ()
         {shown.map((c) => (
           <li key={c.id} className="row">
             <a href={`/agent/${c.id}`} className="grow" onClick={(e) => (e.preventDefault(), go(`/agent/${c.id}`))}>{c.title}</a>
-            <span className="mono muted">{c.project_key}</span>
             {c.updated_at && <span className="muted">{when(c.updated_at)}</span>}
             <button className="icon-btn" aria-label={`Delete ${c.title}`} title="Delete" onClick={() => setDeleting(c)}><Icon name="trash" size={14} /></button>
           </li>

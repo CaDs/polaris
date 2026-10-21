@@ -238,8 +238,15 @@ aside {
   top: 0;
   height: 100vh;
 }
-.ws { display: flex; align-items: center; gap: 8px; padding: 4px 8px; }
-.ws strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.switcher { display: flex; }
+.ws { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--text); text-align: left; cursor: pointer; }
+.ws:hover, .ws[aria-expanded="true"] { background: var(--hover); }
+.ws > .grow { display: grid; min-width: 0; line-height: 1.25; }
+.ws strong, .ws .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws .muted { font-size: 11px; }
+.ws > .glyph { color: var(--muted); }
+.switcher .popover { right: 0; }
+.switcher .popover .key { min-width: 36px; }
 .avatar { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; flex: none; }
 nav a { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
 nav a .glyph { color: var(--muted); }

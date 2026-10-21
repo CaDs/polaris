@@ -11,7 +11,7 @@ type Project = Repo & {
 const keyFor = (name: string) => name.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^[0-9]+/, "").slice(0, 3);
 const STATUSES = ["planned", "started", "paused", "completed", "canceled"];
 
-export function Projects({ go }: { go: (to: string) => void }) {
+export function Projects({ go, creating = false }: { go: (to: string) => void; creating?: boolean }) {
   const { data, error, setError, reload } = useApi<Project[]>("/api/projects");
   const { reload: reloadTracker } = useTracker();
   const [key, setKey] = useState<string | null>(null); // null: follows the name
@@ -31,7 +31,7 @@ export function Projects({ go }: { go: (to: string) => void }) {
     <div className="page">
       {data?.length === 0 && <p className="muted">No projects yet. A project is one git repository: its board, cycles and wiki, and the tickets agents work on in it.</p>}
       {/* Rendered once the list is in, so "open" is settled before anyone can click it. */}
-      {data && <details className="new-project" open={data.length === 0 || undefined}>
+      {data && <details className="new-project" open={data.length === 0 || creating || undefined}>
         <summary className="btn primary">New project</summary>
         <form onSubmit={create}>
           <div className="row">

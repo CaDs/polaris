@@ -8,7 +8,7 @@ export type Member = { id: string; name: string; email: string };
 export type Milestone = { id: string; name: string; project_id: string; target_date: string | null };
 export type CycleRef = { id: string; project_id: string; number: number; name: string; starts_at: string; ends_at: string; state: "current" | "upcoming" | "past" };
 export type ProjectRef = { id: string; key: string; name: string; status: string; milestones: Milestone[] };
-export type Tracker = { me: string; members: Member[]; labels: Label[]; projects: ProjectRef[]; cycles: CycleRef[] };
+export type Tracker = { me: string; current: string | null; members: Member[]; labels: Label[]; projects: ProjectRef[]; cycles: CycleRef[] };
 export type Progress = { total: number; done: number; points: number; points_done: number; by_status: Record<string, number> };
 
 export const PRIORITIES = ["No priority", "Urgent", "High", "Medium", "Low"];

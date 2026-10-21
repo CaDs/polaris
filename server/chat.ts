@@ -308,7 +308,8 @@ const proposalsOf = (chatId: string) =>
 // ponytail: the whole history in one list; page it when members keep more than 500 chats.
 chatRoutes.get("/", (c) =>
   c.json(db.prepare(`SELECT c.id, c.title, c.project_id, p.key AS project_key, p.name AS project_name, c.created_at, c.updated_at FROM chats c JOIN projects p ON p.id = c.project_id
-    WHERE c.workspace_id = ? AND c.user_id = ? ORDER BY c.updated_at DESC LIMIT 500`).all(c.get("workspaceId"), c.get("userId"))));
+    WHERE c.workspace_id = ? AND c.user_id = ? AND c.project_id = coalesce(?, c.project_id) ORDER BY c.updated_at DESC LIMIT 500`)
+    .all(c.get("workspaceId"), c.get("userId"), c.req.query("project_id") ?? null)));
 
 // {message, context?, project_id}: the project the chat talks about, for good.
 chatRoutes.post("/", async (c) => {
