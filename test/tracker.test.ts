@@ -406,6 +406,22 @@ test("planner create_ticket: labels by name (created when unknown), priority, es
   assert.equal(queued.length, 2);
 });
 
+test("sandbox size: a project setting with defaults and limits, and the docker run flags it gives", async () => {
+  const { dockerRunArgs } = await import("../server/sandbox.ts");
+  const p = await project(alice, "Roomy");
+  const get = async () => (await call("GET", `/api/projects/${p.id}`, alice)).body;
+  assert.deepEqual([(await get()).sandbox_cpus, (await get()).sandbox_memory_gb], [4, 4]);
+  assert.equal((await call("PATCH", `/api/projects/${p.id}`, alice, { sandbox_cpus: "6", sandbox_memory_gb: 6 })).status, 200); // form posts send strings
+  assert.deepEqual([(await get()).sandbox_cpus, (await get()).sandbox_memory_gb], [6, 6]);
+  for (const bad of [{ sandbox_cpus: 0 }, { sandbox_cpus: 33 }, { sandbox_memory_gb: 1.5 }, { sandbox_memory_gb: "lots" }])
+    assert.match((await call("PATCH", `/api/projects/${p.id}`, alice, bad)).body.error, /must be a whole number/);
+  assert.equal((await call("PATCH", `/api/projects/${p.id}`, alice, { sandbox_cpus: null })).status, 200);
+  assert.equal((await get()).sandbox_cpus, 4);
+  const args = dockerRunArgs("polaris-x", "/wt", ["-v", "/wt/test:/work/test:ro"], "img:1", { cpus: 6, memory_gb: 6 });
+  assert.deepEqual(args.slice(args.indexOf("--cpus"), args.indexOf("--cpus") + 4), ["--cpus", "6", "--memory", "6g"]);
+  assert.ok(args.includes("/wt/test:/work/test:ro") && args.at(-3) === "img:1");
+});
+
 test("projects that build the server's own checkout are found (the --watch startup warning)", async () => {
   const { ownCheckoutProjects } = await import("../server/tracker.ts");
   const p = await project(alice, "Selfie");

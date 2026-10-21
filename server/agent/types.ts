@@ -113,7 +113,7 @@ export type EventPayloads = {
   commit: { sha: string; branch: string };
   review: { decision: "approved" | "rejected"; note?: string; merge_sha?: string };
   // M6: the series this run ended was reflected on (server/improve.ts). unchanged: the model returned the same lessons.
-  reflection: { lessons_id: string; version: number; chars: number; unchanged: boolean; usage: Usage; accounted?: boolean } | { error: string };
+  reflection: { lessons_id: string; version: number; chars: number; unchanged: boolean; usage: Usage; accounted?: boolean } | { error: string } | { skipped: "provider_error" | "environment" };
   // M7: a child ticket's run series ended; text is what its planner reads (server/planner.ts).
   handoff: { text: string };
   // M7: a planner round ended: finish_round notes, or the complete_epic summary (completed).

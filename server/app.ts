@@ -308,7 +308,7 @@ app.post("/api/tickets/:id/reject", async (c) => {
 });
 
 const TOGGLES = new Set(["auto_approve_children", "model_review", "auto_split", "wiki"]);
-const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1000, 100_000_000, "Compact at (tokens)"], max_turns: [10, 500, "Max turns per attempt"], max_minutes: [5, 600, "Max minutes per attempt"] };
+const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1000, 100_000_000, "Compact at (tokens)"], max_turns: [10, 500, "Max turns per attempt"], max_minutes: [5, 600, "Max minutes per attempt"], max_tokens: [100_000, 20_000_000, "Max tokens per attempt"] };
 
 // The workspace's settings; a project's repository settings are on the project (tracker.ts).
 app.get("/api/settings", (c) => c.json(settingsFor(c.get("workspaceId"))));

@@ -64,7 +64,19 @@ function dockerExec(name: string): Exec {
   };
 }
 
-export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string): Promise<Sandbox> {
+// A project's sandbox size (its sandbox_cpus / sandbox_memory_gb; the DB defaults repeat these).
+export type Resources = { cpus: number; memory_gb: number };
+export const SANDBOX_RESOURCES: Resources = { cpus: 4, memory_gb: 4 };
+
+// Not root, no capabilities, no privilege gain through setuid binaries, bounded process count. `mounts`: the extra -v flags.
+export const dockerRunArgs = (name: string, worktree: string, mounts: string[], image: string, r: Resources) => [
+  "run", "-d", "--name", name, "--label", "polaris=1", "--label", `polaris.data=${dataDir()}`,
+  "-v", `${worktree}:/work`, ...mounts, "-v", `polaris-npm-cache:${NPM_CACHE}`, "-w", "/work",
+  "--user", SANDBOX_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
+  "--cpus", String(r.cpus), "--memory", `${r.memory_gb}g`, image, "sleep", "infinity",
+];
+
+export async function openSandbox(runId: string, worktree: string, protectedPaths: string[], image: string, resources = SANDBOX_RESOURCES): Promise<Sandbox> {
   if (process.env.POLARIS_SANDBOX === "host") return { name: "host", exec: hostExec, close: async () => {} };
   if (!IMAGE_REF.test(image)) throw new Error(`not a docker image reference: ${image}`); // rows saved before the settings check
   await ensureImage(image);
@@ -75,13 +87,7 @@ export async function openSandbox(runId: string, worktree: string, protectedPath
   // git status/diff/log work inside (writes such as commit fail; the harness commits on the host).
   const gitDir = await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => "");
   if (gitDir) ro.push("-v", `${gitDir}:${gitDir}:ro`);
-  // Not root, no capabilities, no privilege gain through setuid binaries, bounded process count.
-  await execFileP("docker", [
-    "run", "-d", "--name", name, "--label", "polaris=1", "--label", `polaris.data=${dataDir()}`,
-    "-v", `${worktree}:/work`, ...ro, "-v", `polaris-npm-cache:${NPM_CACHE}`, "-w", "/work",
-    "--user", SANDBOX_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
-    "--cpus", "2", "--memory", "2g", image, "sleep", "infinity",
-  ]);
+  await execFileP("docker", dockerRunArgs(name, worktree, ro, image, resources));
   return { name, exec: dockerExec(name), close: () => removeContainer(name) };
 }
 

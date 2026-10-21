@@ -3,7 +3,7 @@ import { Alert, Confirm, DateField, DateInput, Icon, Loading, api, useApi } from
 import { Bar, ByStatus, useTracker, type Member, type Progress } from "./tracker.tsx";
 
 type Milestone = { id: string; name: string; target_date: string | null; position: number; progress: Progress };
-type Repo = { repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string };
+type Repo = { repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string; sandbox_cpus: number; sandbox_memory_gb: number };
 type Project = Repo & {
   updated_at: number; id: string; key: string; name: string; description: string; status: string; lead: Member | null; target_date: string | null; progress: Progress; milestones: Milestone[];
 };
@@ -104,6 +104,17 @@ function RepoFields({ r }: { r?: Repo }) {
           <input name="image" className="mono" defaultValue={r?.image} placeholder="polaris-sandbox:1" spellCheck={false} />
           <span className="hint">The default image is built automatically on first use.</span>
         </label>
+        <div className="row">
+          <label>
+            Sandbox CPUs
+            <input name="sandbox_cpus" type="number" min={1} max={32} defaultValue={r?.sandbox_cpus ?? 4} />
+          </label>
+          <label>
+            Sandbox memory (GB)
+            <input name="sandbox_memory_gb" type="number" min={1} max={64} defaultValue={r?.sandbox_memory_gb ?? 4} />
+          </label>
+        </div>
+        <span className="hint">Per run. Test runners use the CPU count: <span className="mono">node --test</span> runs one test file per CPU at a time. Docker Desktop's own memory limit caps the total.</span>
       </details>
     </>
   );

@@ -7,7 +7,7 @@ import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
 import { inspectRepo } from "./git.ts";
-import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
+import { IMAGE_REF, SANDBOX_IMAGE, SANDBOX_RESOURCES } from "./sandbox.ts";
 import { wikiDir } from "./wiki.ts";
 
 // Projects whose repository is the checkout this server runs from. A server started with --watch there restarts on every
@@ -41,6 +41,11 @@ const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled
 const KEY = /^[A-Z][A-Z0-9]{1,4}$/;
 // A project's repository settings when not given (a new project, PATCH with null). The DB columns repeat them.
 export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE };
+// The sandbox's size, a whole number in range (form posts send strings; empty or null = the default).
+const PROJECT_RESOURCES: Record<string, [number, number, number, string]> = {
+  sandbox_cpus: [1, 32, SANDBOX_RESOURCES.cpus, "Sandbox CPUs"],
+  sandbox_memory_gb: [1, 64, SANDBOX_RESOURCES.memory_gb, "Sandbox memory (GB)"],
+};
 // Query params a filter (and a saved view) may hold. group only matters to the list layout.
 const FILTER_KEYS = ["status", "label", "label_mode", "priority", "assignee", "project", "milestone", "cycle", "kind", "parent", "due_before", "due_after", "q", "group"];
 
@@ -379,6 +384,11 @@ async function projectBody(ws: string, b: Record<string, any>, cur?: Record<stri
   for (const k of Object.keys(PROJECT_DEFAULTS))
     if (b[k] !== undefined) v[k] = b[k] === null ? PROJECT_DEFAULTS[k] : typeof b[k] === "string" && b[k].length <= 2000 ? b[k].trim() : fail(`${k} must be a string of at most 2000 chars`);
   if (v.image === "") v.image = PROJECT_DEFAULTS.image;
+  for (const [k, [lo, hi, def, label]] of Object.entries(PROJECT_RESOURCES)) {
+    if (b[k] === undefined) continue;
+    const n = b[k] === null || b[k] === "" ? def : typeof b[k] === "number" || typeof b[k] === "string" ? Number(b[k]) : NaN;
+    v[k] = Number.isInteger(n) && n >= lo && n <= hi ? n : fail(`${label} must be a whole number from ${lo} to ${hi}`);
+  }
   if (v.image !== undefined && !IMAGE_REF.test(v.image as string)) fail("Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag");
   if (typeof v.protected_paths === "string" && v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
     fail("Protected paths must be relative to the repository root, without ..");
