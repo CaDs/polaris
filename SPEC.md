@@ -736,7 +736,8 @@ A workspace holds projects; a **project is one git repository** with its own boa
   file is mounted read-only in the sandbox.
 - Sandbox containers run as a non-root user (`--user`: the host user's uid:gid on Linux, so worktree files stay theirs;
   the image's `polaris` 1000:1000 under Docker Desktop, which maps bind-mount ownership), with `--cap-drop ALL`,
-  `--security-opt no-new-privileges`, `--pids-limit 512`, 2 CPUs and 2 GB. The built-in image is built with that uid:gid,
+  `--security-opt no-new-privileges`, `--pids-limit 512`, and the project's `sandbox_cpus` / `sandbox_memory_gb` (default 4 and
+  4 GB, 1–32 and 1–64; `node --test` runs one test file per CPU, so two CPUs ran a large suite serially). The built-in image is built with that uid:gid,
   labelled `polaris.image.version`, and rebuilt when the label is missing or older than `IMAGE_VERSION` (bump it with the
   Dockerfile); the shared npm cache volume is chowned to the sandbox user once per harness start if it isn't theirs.
 - Host git never trusts the worktree: hooks and fsmonitor are off, and worktrees the harness created are addressed by the git

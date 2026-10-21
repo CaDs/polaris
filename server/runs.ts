@@ -62,9 +62,13 @@ const MODEL_DEFAULTS = Object.fromEntries(["default", "review", ...MODEL_PHASES]
 export const settingsFor = (ws: string) =>
   ({ ...SETTINGS_DEFAULTS, ...MODEL_DEFAULTS, workspace_id: ws, ...(db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as object | undefined) }) as Settings;
 // What a run of a project's ticket uses: the workspace's settings plus the project's repository.
-export type ProjectSettings = Settings & { project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string };
+export type ProjectSettings = Settings & {
+  project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
+  sandbox_cpus: number; sandbox_memory_gb: number;
+};
+export const resourcesOf = (s: ProjectSettings | undefined) => (s ? { cpus: s.sandbox_cpus, memory_gb: s.sandbox_memory_gb } : undefined);
 export function projectSettings(projectId: string) {
-  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image FROM projects WHERE id = ?").get(projectId) as
+  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, sandbox_cpus, sandbox_memory_gb FROM projects WHERE id = ?").get(projectId) as
     | { workspace_id: string }
     | undefined;
   return p && ({ ...settingsFor(p.workspace_id), ...p } as ProjectSettings);
@@ -379,7 +383,7 @@ async function epicGate(s: ProjectSettings, command: string, log: ReturnType<typ
   try {
     const sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, sha, wt);
-    sandbox = await openSandbox(id, wt, parseProtected(s.protected_paths), s.image);
+    sandbox = await openSandbox(id, wt, parseProtected(s.protected_paths), s.image, resourcesOf(s));
     const sh = (c: string) => sandbox!.exec(c, { cwd: wt, timeoutMs: COMMAND_TIMEOUT, signal });
     const setup = s.setup_command.trim() ? await sh(s.setup_command) : undefined;
     const broken = setup && setup.code !== 0; // a failing setup command fails the gate
@@ -567,7 +571,7 @@ async function execute(runId: string) {
       }
     // M17: workspace skills next to the repo's (not for frozen eval cases: a score must not move when someone edits them).
     if (!ev && writeWorkspaceSkills(t.workspace_id, worktree)) protectedPaths = [...protectedPaths, WORKSPACE_SKILLS];
-    sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image);
+    sandbox = await openSandbox(runId, worktree, protectedPaths, cfg.image, resourcesOf(s)); // eval runs too: the size doesn't change results
     log({ type: "setup", payload: { step: "sandbox", sandbox: sandbox.name } });
     const sh = (command: string) => sandbox!.exec(command, { cwd: worktree, timeoutMs: COMMAND_TIMEOUT, signal });
     const abortCheck = () => {

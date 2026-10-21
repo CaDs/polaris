@@ -326,7 +326,7 @@ tasks.md          milestone checklist
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.
-- **Agents.** Workers and reviewers run in Docker containers limited to 2 CPUs, 2 GB and 512 processes, with network
+- **Agents.** Workers and reviewers run in Docker containers limited to the project's CPUs and memory (default 4 and 4 GB) and 512 processes, with network
   access, as a non-root user with every capability dropped and `no-new-privileges`. On Linux that user has your uid and
   gid, so files agents create in the worktree are yours; under Docker Desktop it is the image's `polaris` (1000:1000),
   and Docker Desktop maps the files to you. A custom sandbox image runs as the same uid, so it needs a writable `HOME`.
