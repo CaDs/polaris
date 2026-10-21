@@ -225,7 +225,7 @@ async function listModels(p: ProviderRow): Promise<string[]> {
 
 async function planModels(p: ProviderRow) {
   const t = await freshTokens(p);
-  const res = await fetch(`${openaiPlanBase()}/models`, { headers: { authorization: `Bearer ${t.access}` }, signal: AbortSignal.timeout(15_000) });
+  const res = await fetch(`${openaiPlanBase()}/models`, { headers: { authorization: `Bearer ${t.access}` }, redirect: "error", signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new AgentError("ProviderError", `ChatGPT model discovery failed (HTTP ${res.status}). Check your connection and plan permission.`);
   const j = await res.json() as { models?: { slug: string; display_name: string; visibility: string }[] };
   if (!Array.isArray(j.models)) throw new Error("ChatGPT returned no model catalog");

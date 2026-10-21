@@ -51,10 +51,12 @@ export function authorizeUrl(o: { state: string; nonce: string; challenge: strin
   for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
   return u.toString();
 }
+// Every call to the identity provider: no redirects (they would carry the request on), 10 s.
+const TIMEOUT = 10_000;
 const jwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 async function discovery() {
   const base = authBase();
-  const res = await fetch(`${base}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(15_000) });
+  const res = await fetch(`${base}/.well-known/openid-configuration`, { redirect: "error", signal: AbortSignal.timeout(TIMEOUT) });
   if (!res.ok) throw new Error(`OpenAI discovery failed (HTTP ${res.status})`);
   const d = await res.json() as { issuer: string; jwks_uri: string; revocation_endpoint?: string };
   if (d.issuer !== base || new URL(d.jwks_uri).origin !== new URL(base).origin) throw new Error("invalid OpenAI identity configuration");
@@ -75,10 +77,11 @@ export class OAuthError extends Error {
 }
 async function tokenRequest(body: Record<string, string>) {
   const res = await fetch(`${authBase()}/api/accounts/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(body), signal: AbortSignal.timeout(30_000) });
+    body: new URLSearchParams(body), redirect: "error", signal: AbortSignal.timeout(TIMEOUT) }); // a 307 would replay the code or refresh token
   const j = await res.json().catch(() => null) as Record<string, any> | null;
-  if (!res.ok || !j?.access_token) throw new OAuthError(typeof j?.error === "string" ? j.error : "token_error", `OpenAI token request failed (HTTP ${res.status}; ${typeof j?.error === "string" ? j.error : "invalid response"})`);
+  if (!res.ok || typeof j?.access_token !== "string" || !j.access_token) throw new OAuthError(typeof j?.error === "string" ? j.error : "token_error", `OpenAI token request failed (HTTP ${res.status}; ${typeof j?.error === "string" ? j.error : "invalid response"})`);
   if (j.token_type?.toLowerCase() !== "bearer" || typeof j.expires_in !== "number" || !Number.isFinite(j.expires_in) || j.expires_in <= 0) throw new Error("invalid OpenAI token response");
+  if (j.refresh_token !== undefined && typeof j.refresh_token !== "string") throw new Error("invalid OpenAI token response");
   return j;
 }
 export async function exchangeCode(code: string, verifier: string, redirectUri: string, current: Tokens, nonce: string): Promise<Tokens> {
@@ -108,7 +111,7 @@ export async function revoke(t: Tokens) {
   for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(d.revocation_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token: t.refresh, token_type_hint: "refresh_token", client_id: t.client_id }), signal: AbortSignal.timeout(10_000) });
+        body: new URLSearchParams({ token: t.refresh, token_type_hint: "refresh_token", client_id: t.client_id }), redirect: "error", signal: AbortSignal.timeout(TIMEOUT) });
       if (res.ok) return true;
       if (res.status < 500 || attempt === 2) throw new Error(`OpenAI revocation failed (HTTP ${res.status})`);
     } catch (e) { if (attempt === 2) throw e; }

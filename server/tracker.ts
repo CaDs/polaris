@@ -608,7 +608,8 @@ function slack(ticketId: string, text: string) {
   const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t WHERE t.id = ?`).get(ticketId) as { key: string };
   const url = `${process.env.WEB_ORIGIN ?? "http://localhost:5173"}/t/${key}`;
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }) })
+  // No redirects, and a deadline: a webhook that hangs must not hold a socket open forever (POLARIS_SLACK_TIMEOUT_MS: tests).
+  fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }), redirect: "error", signal: AbortSignal.timeout(Number(process.env.POLARIS_SLACK_TIMEOUT_MS ?? 10_000)) })
     .then((r) => r.ok || console.error(`slack webhook: HTTP ${r.status}`))
     .catch((e) => console.error(`slack webhook: ${e.message}`));
 }
