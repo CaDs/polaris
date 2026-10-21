@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Popover } from "./Filters.tsx";
+import { Markdown } from "./Wiki.tsx";
+import { diffScope, scopeLine, testCounts } from "./verdict.ts";
 import { Alert, COLUMNS, Confirm, Dialog, Icon, ModelPicker, StatusIcon, api, cost, duration, fmt, hitRate, useProviders, useWorkspaceEvents, waiting, type Child, type Run, type RunMetrics, type Status, type Ticket, type TokenSummary } from "./ui.tsx";
 
 // spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
@@ -14,6 +16,9 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const [spec, setSpec] = useState(ticket.spec);
   const [testCommand, setTestCommand] = useState(ticket.test_command ?? "");
   const [projectTest, setProjectTest] = useState("");
+  const [protectedPaths, setProtectedPaths] = useState<string[]>([]);
+  const [diff, setDiff] = useState<DiffInfo | null>(null);
+  const [diffError, setDiffError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -29,7 +34,24 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
     setTestCommand(ticket.test_command ?? "");
     setSelected(null);
   }, [ticket.id]);
-  useEffect(() => void api<{ test_command: string }>(`/api/projects/${ticket.project_id}`).then((p) => setProjectTest(p.test_command), () => {}), [ticket.project_id]);
+  useEffect(() => {
+    setProjectTest("");
+    setProtectedPaths([]);
+    let active = true;
+    api<{ test_command: string; protected_paths: string }>(`/api/projects/${ticket.project_id}`).then((p) => {
+      if (active) { setProjectTest(p.test_command); setProtectedPaths((p.protected_paths ?? "").split(",").map((s) => s.trim()).filter(Boolean)); }
+    }, () => {});
+    return () => { active = false; };
+  }, [ticket.project_id]);
+  useEffect(() => {
+    setDiff(null);
+    setDiffError("");
+    let active = true;
+    if (ticket.status === "review" && ticket.kind !== "epic") {
+      api<DiffInfo>(`/api/tickets/${ticket.id}/diff`).then((d) => active && setDiff(d), (e) => active && setDiffError(e.message));
+    }
+    return () => { active = false; };
+  }, [ticket.id, ticket.status, ticket.kind, ticket.run_count]);
   useEffect(() => void load(), [ticket.id, ticket.status, ticket.run_count, ticket.tokens_out, ticket.run_status]);
   // What changes while the ticket itself does not (an epic's children, a wiki run after approval) pings the workspace stream.
   useWorkspaceEvents("ticket", useCallback(() => void load(), [ticket.id]));
@@ -89,19 +111,10 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   const current = runs.find((r) => r.id === selected) ?? runs.findLast((r) => r.role !== "wiki") ?? runs.at(-1); // M10: a wiki ingest after approval is listed, not the default
   const running = ticket.status === "running";
   const epic = ticket.kind === "epic";
+  const reviewing = ticket.status === "review";
   const link = (key: string) => <button className="link mono" onClick={() => open(key)}>{key}</button>;
 
-  return (
-    <div className="ticket-view">
-      <div className="crumbs muted">
-        <button className="link" onClick={close}>Board</button> /{" "}
-        {ticket.parent_key && <>{link(ticket.parent_key)} /{" "}</>}
-        <span className="mono">{ticket.key}</span>
-        {epic && <span className="badge epic">Epic</span>}
-      </div>
-      {/* A textarea so a long title wraps instead of clipping; it stays one line of text (Enter saves). */}
-      <textarea className="h-input" aria-label="Title" rows={1} value={title} onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))} onBlur={save} maxLength={200}
-        onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), e.currentTarget.blur())} />
+  const actions = (
       <div className="row">
         {waiting(ticket) && <span className="muted" role="status">waiting for children</span>}
         {ticket.escalated_key && <span className="muted">Escalated to {link(ticket.escalated_key)}</span>}
@@ -124,10 +137,30 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
           )}
         </span>
       </div>
+  );
+
+  return (
+    <div className="ticket-view">
+      <div className="crumbs muted">
+        <button className="link" onClick={close}>Board</button> /{" "}
+        {ticket.parent_key && <>{link(ticket.parent_key)} /{" "}</>}
+        <span className="mono">{ticket.key}</span>
+        {epic && <span className="badge epic">Epic</span>}
+      </div>
+      {/* A textarea so a long title wraps instead of clipping; it stays one line of text (Enter saves). */}
+      <textarea className="h-input" aria-label="Title" rows={1} value={title} onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))} onBlur={save} maxLength={200}
+        onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), e.currentTarget.blur())} />
+      {!reviewing && actions}
       <Alert error={error} />
-      {/* Wide screens: the ticket on the left, its work (review, runs, the live transcript) beside it, not below. */}
-      <div className="ticket-body">
+      {/* Wide screens outside review: the ticket on the left, its runs and live transcript beside it. */}
+      <div className={reviewing ? "ticket-review" : "ticket-body"}>
+      {reviewing && <>
+        <Review key={`${ticket.id}-${diff?.run_id ?? ""}`} ticket={ticket} reload={reload} d={diff} diffError={diffError} runs={runs} protectedPaths={protectedPaths} />
+        <Comments ticketId={ticket.id} />
+      </>}
       <div className="ticket-about">
+      <Disclosure key={`${ticket.id}-ticket`} enabled={reviewing} title="Ticket">
+      {reviewing && actions}
       <textarea className="spec" aria-label="Spec" placeholder="Describe what the agent should do…" rows={5} value={spec} onChange={(e) => setSpec(e.target.value)} onBlur={save} />
       <label>
         Test command <input aria-label="Test command" className="mono" value={testCommand} placeholder={projectTest} spellCheck={false} onChange={(e) => setTestCommand(e.target.value)} onBlur={save} />
@@ -136,12 +169,16 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       <div className="row">
         <button className="btn" onClick={save} disabled={title.trim() === ticket.title && spec === ticket.spec && !dirty}>Save</button>
       </div>
-      <Comments ticketId={ticket.id} />
+      </Disclosure>
+      {!reviewing && <Comments ticketId={ticket.id} />}
       {epic && detail?.children && <Epic ticket={ticket} detail={detail} items={detail.children} open={open} patch={(b) => patch(b).then(load)} />}
       </div>
+      {reviewing && <details className="review-details" key={`${ticket.id}-changes`}>
+        <summary>Changes {diff && <span className="muted">{scopeLine(diff.diff)}</span>}</summary>
+        {diff ? <Diff text={diff.diff} /> : <p className="muted">{epic ? "Children were merged one by one; this epic has no diff." : diffError || "Loading diff…"}</p>}
+      </details>}
       <div className="ticket-work">
-      {ticket.status === "review" && <Review ticket={ticket} reload={reload} />}
-
+      <Disclosure key={`${ticket.id}-history`} enabled={reviewing} title="How it got here">
       {detail?.usage && <p className="muted" aria-label="Ticket token usage">{fmt(detail.usage.tokens_total)} total processed tokens · {fmt(detail.background_usage?.tokens_total ?? 0)} background{epic && " · includes descendants"}. Input {fmt(detail.usage.input_uncached)} · output {fmt(detail.usage.tokens_out)} · cache read {fmt(detail.usage.tokens_cached)} · cache write {fmt(detail.usage.tokens_cache_write)}{(detail.usage.partial > 0 || detail.usage.unavailable > 0) && " · some request usage is incomplete"}</p>}
       <h3>{epic ? "Planner rounds" : "Runs"}</h3>
       {runs.length === 0 ? (
@@ -175,7 +212,8 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
         </div>
       )}
       {/* Keyed on the status too: an approve or reject lands on a finished run's log, so the transcript replays it. */}
-      {current && <Transcript key={`${current.id}-${ticket.status}`} run={current} onFinish={() => (reload(), load())} />}
+      {current && <Transcript key={`${current.id}-${ticket.status}`} run={current} onFinish={() => (reload(), load())} autoFollow={!reviewing} />}
+      </Disclosure>
       </div>
       </div>
 
@@ -189,6 +227,10 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
       )}
     </div>
   );
+}
+
+function Disclosure({ enabled, title, children }: { enabled: boolean; title: string; children: ReactNode }) {
+  return enabled ? <details className="review-details"><summary>{title}</summary>{children}</details> : <>{children}</>;
 }
 
 function RetryDialog({ run, providers, close, go }: {
@@ -326,7 +368,7 @@ function LiveBar({ run, events, live, unseen, atEnd, jump }: { run: Run; events:
   );
 }
 
-export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }) {
+export function Transcript({ run, onFinish, autoFollow = true }: { run: Run; onFinish: () => void; autoFollow?: boolean }) {
   const [events, setEvents] = useState<Ev[]>([]);
   const [live, setLive] = useState<LivePart[]>([]);
   const [error, setError] = useState("");
@@ -343,13 +385,13 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
   const inView = () => (end.current?.getBoundingClientRect().top ?? Infinity) <= innerHeight;
   useEffect(() => {
     const scrolled = () => {
-      following.current = inView();
+      following.current = autoFollow && inView();
       setAtEnd(following.current);
       if (following.current) setUnseen(0);
     };
     addEventListener("scroll", scrolled, { passive: true });
     return () => removeEventListener("scroll", scrolled);
-  }, []);
+  }, [autoFollow]);
   useEffect(() => {
     if (following.current) end.current?.scrollIntoView({ block: "end" });
     else setAtEnd(inView());
@@ -561,7 +603,7 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
   );
 }
 
-type DiffInfo = { branch: string; base_branch: string; diff: string };
+type DiffInfo = { run_id: string; branch: string; base_branch: string; diff: string };
 
 // Review queue: diff of the latest passed run; approve merges it into the base branch, reject sends the ticket back to todo
 // (a child of an epic: counts as failed for its planner). An epic has no diff: its children were merged one by one.
@@ -601,13 +643,51 @@ function Comments({ ticketId }: { ticketId: string }) {
   );
 }
 
-function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
-  const [d, setD] = useState<DiffInfo | null>(null);
+function Review({ ticket, reload, d, diffError, runs, protectedPaths }: {
+  ticket: Ticket; reload: () => void; d: DiffInfo | null; diffError: string; runs: Run[]; protectedPaths: string[];
+}) {
+  const [events, setEvents] = useState<Ev[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [evidenceError, setEvidenceError] = useState("");
   const [rejecting, setRejecting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const epic = ticket.kind === "epic";
-  useEffect(() => void (!epic && api<DiffInfo>(`/api/tickets/${ticket.id}/diff`).then(setD, (e) => setError(e.message))), [ticket.id, ticket.run_count]);
+  useEffect(() => {
+    setEvents([]);
+    setLoaded(false);
+    setEvidenceError("");
+    if (!d) return;
+    const es = new EventSource(`/api/runs/${d.run_id}/events`);
+    es.onmessage = (m) => {
+      const e = JSON.parse(m.data) as Ev;
+      if (e.type === "live") return;
+      setEvents((all) => all.some((x) => x.seq === e.seq) ? all : [...all, e]);
+      if (e.type === "run_finished") { setLoaded(true); es.close(); }
+    };
+    es.onerror = () => { setEvidenceError("Could not load run evidence. Open How it got here to inspect the run."); es.close(); };
+    return () => es.close();
+  }, [d?.run_id]);
+
+  const testEvent = events.findLast((e) => e.type === "test_result");
+  const test = testEvent?.payload;
+  const fixed = events.some((e) => e.type === "gate_fix");
+  const reviewEvent = events.findLast((e) => e.type === "model_review");
+  const review = reviewEvent?.payload;
+  const reviewer = reviewEvent && events.findLast((e) => e.type === "model_review_started" && e.payload.round === review.round && e.seq < reviewEvent.seq)?.payload.model;
+  const findings = review?.findings ?? [];
+  const attempts = runs.filter((r) => r.role === "worker").length;
+  const metrics = events.findLast((e) => e.type === "run_metrics")?.payload;
+  const summary = testEvent && events.findLast((e) => e.type === "assistant_message" && e.seq < testEvent.seq)?.payload.message.content
+    .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n\n");
+  const testClean = !!test?.passed && !!test.command?.trim() && !fixed && !test.flaky;
+  const reviewClean = review?.verdict === "approve" && review.round === 1 && !findings.length;
+  const clean = loaded && testClean && reviewClean && attempts === 1;
+  const scope = d && diffScope(d.diff);
+  const testsText = !test ? "No test result recorded" : !test.command?.trim() ? "No test command: nothing was tested"
+    : !test.passed ? "Tests failed" : `${testCounts(test.output ?? "") ?? "passed (exit 0)"} · ${test.flaky ? "flaky: passed on a re-run" : fixed ? "after a fix round" : "1st try"}${test.flaky && fixed ? " · after a fix round" : ""}`;
+  const reviewText = !review ? "No model review" : review.verdict === "error" ? `Model review failed: ${review.message ?? "unknown error"}`
+    : review.verdict === "approve" ? `approved by ${reviewer ?? "unknown model"}, round ${review.round}` : `Changes requested, round ${review.round}`;
 
   async function decide(action: "approve" | "reject", body?: object) {
     setBusy(true);
@@ -625,16 +705,36 @@ function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
   }
 
   return (
-    <section className="review" aria-label="Review">
-      <div className="row">
-        <h3 className="grow">Review {d && <span className="muted mono">{d.branch} → {d.base_branch}</span>}</h3>
-        <button className="btn" onClick={() => setRejecting(true)} disabled={busy}>Reject</button>
-        <button className="btn primary" onClick={() => decide("approve")} disabled={busy || (!epic && !d)}>Approve</button>
-      </div>
-      <Alert error={error} />
+    <section className="review verdict" aria-label="Review">
+      <h3>{!epic && !loaded && !evidenceError && !diffError ? "Loading review evidence…" : clean ? "Ready to merge" : "Ready, with notes"}</h3>
+      {d && <p className="muted mono">{d.branch} → {d.base_branch}</p>}
+      <Alert error={error || diffError || evidenceError} />
       {epic ? (
         <p className="muted">The planner completed this epic. Its children were merged one by one; approving marks the epic done.</p>
-      ) : d ? <Diff text={d.diff} /> : !error && <p className="muted">Loading diff…</p>}
+      ) : loaded && <>
+        <dl className="verdict-rows">
+          <EvidenceRow label="Tests" check={testClean}>{testsText}</EvidenceRow>
+          <EvidenceRow label="Review" check={reviewClean}>
+            {reviewText}
+            {findings.length > 0 && <ul>{findings.map((f: any, i: number) => <li key={i}><span className="mono">{f.file}{f.line ? `:${f.line}` : ""}</span> — {f.problem} → {f.fix}</li>)}</ul>}
+          </EvidenceRow>
+          <EvidenceRow label="Scope" check={!!scope}>
+            {d ? scopeLine(d.diff) : "Diff unavailable"}
+            {scope?.files.length === 0 && <div>No changes.</div>}
+            {scope && <div className="mono">{scope.files.slice(0, 5).map((f) => <div key={f.name}>{f.name} +{f.added} −{f.removed}</div>)}{scope.files.length > 5 && <div>+ {scope.files.length - 5} more</div>}</div>}
+            {protectedPaths.length > 0 && test?.passed && test.protected?.length === 0 && <div>protected paths untouched</div>}
+          </EvidenceRow>
+          <EvidenceRow label="Effort" check={false}>
+            {plural(attempts, "attempt")}{metrics ? ` · ${plural(metrics.turns, "turn")} · ${metrics.minutes ?? "unknown"} min` : " · Run metrics unavailable"}
+          </EvidenceRow>
+        </dl>
+        <h4>What the agent did</h4>
+        {summary ? <Markdown text={summary} /> : <p className="muted">No agent summary recorded.</p>}
+      </>}
+      <div className="row end">
+        <button className="btn" onClick={() => setRejecting(true)} disabled={busy}>Reject</button>
+        <button className="btn primary" onClick={() => decide("approve")} disabled={busy || (!epic && !d)}>{epic ? "Approve" : "Approve & merge"}</button>
+      </div>
       {rejecting && (
         <Dialog title="Reject changes?" onClose={() => setRejecting(false)}>
           <form onSubmit={(e) => (e.preventDefault(), decide("reject", { note: new FormData(e.currentTarget).get("note") }))}>
@@ -659,6 +759,13 @@ function Review({ ticket, reload }: { ticket: Ticket; reload: () => void }) {
   );
 }
 
+function EvidenceRow({ label, check, children }: { label: string; check: boolean; children: ReactNode }) {
+  return <div className="verdict-row">
+    <dt><span className={check ? "verdict-check" : "muted"} aria-label={check ? "Check" : "Note"}>{check ? <Icon name="check" /> : <span aria-hidden="true">·</span>}</span>{label}</dt>
+    <dd>{children}</dd>
+  </div>;
+}
+
 // Unified diff split per file: header with the path, then hunks with +/- coloring.
 function Diff({ text }: { text: string }) {
   const files: { name: string; lines: string[]; hunks: boolean }[] = [];
@@ -670,7 +777,7 @@ function Diff({ text }: { text: string }) {
       if (f.hunks || l.startsWith("Binary files")) f.lines.push(l); // skip index/---/+++ headers
     }
   }
-  if (!files.length) return <p className="muted">No changes.</p>;
+  if (!files.length) return <div className="diff" aria-label="Diff"><p className="muted">No changes.</p></div>;
   return (
     <div className="diff" aria-label="Diff">
       {files.map((f) => (
