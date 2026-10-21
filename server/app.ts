@@ -6,13 +6,12 @@ import { streamSSE } from "hono/streaming";
 import { auth } from "./auth.ts";
 import { db, migrate } from "./db.ts";
 import { subscribe, subscribeWorkspace, touch, type Change, type StoredEvent } from "./agent/events.ts";
-import { git, inspectRepo, MergeError, scratchPathspec } from "./git.ts";
+import { git, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
-import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
+import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, projectSettings, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, TREE, withStates } from "./planner.ts";
-import { IMAGE_REF } from "./sandbox.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
 import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
@@ -62,10 +61,10 @@ app.use("/api/*", async (c, next) => {
 });
 
 app.route("/api/providers", providerRoutes);
-app.route("/api", trackerRoutes); // M11: labels, projects, milestones, cycles, views, members
+app.route("/api", trackerRoutes); // M11: labels, projects (each a repository), milestones, cycles, views, members
 app.route("/api/chats", chatRoutes); // M13: chat (filing a proposal is below, next to POST /api/tickets)
 
-// Ticket + Linear-style key (first 3 letters of the workspace slug + number) + summary of its runs.
+// Ticket + Linear-style key (its project's key + number) + summary of its runs.
 // Eval case runs (M6) belong to their case's ticket but are not part of it: left out here and in the ticket's run list.
 const OWN = `ticket_id = t.id AND ${OWN_RUNS}`; // wiki runs (M10) are listed in the ticket but never change its state or totals
 const TICKETS = `
@@ -86,7 +85,7 @@ const TICKETS = `
     (SELECT ${ticketKey("s")} FROM tickets s WHERE s.escalated_to = t.id) AS split_from_key,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id) AS child_count,
     (SELECT COUNT(*) FROM tickets c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done,${TRACKER_COLS}
-  FROM tickets t JOIN organization o ON o.id = t.workspace_id`;
+  FROM tickets t`;
 
 const ticketIn = (c: Context<Env>, id = c.req.param("id") as string) =>
   hydrate(db.prepare(`${TICKETS} WHERE t.workspace_id = ? AND t.id = ?`).get(c.get("workspaceId"), id) as Record<string, any> | undefined);
@@ -118,7 +117,7 @@ function pick(c: Context<Env>, b: Record<string, any>): { error: string } | { v:
 }
 
 // Validated fields of a JSON body, or an error message.
-// cur: the ticket being patched (its tracker fields are validated against it).
+// cur: the ticket being patched (its tracker fields are validated against it). force: fields that override the body's.
 type Fields = {
   title?: string; spec?: string; status?: string; provider_id?: string | null; model?: string | null; kind?: string; test_command?: string | null; cap_usd?: number | null; cap_tokens?: number | null;
   tracker: TrackerFields;
@@ -131,9 +130,10 @@ function capOf(x: unknown, whole: boolean) {
   return Number.isFinite(n) && n >= 0 && (!whole || Number.isInteger(n)) ? n : undefined;
 }
 const capError = (k: string) => `${CAPS[k][1]} must be a non-negative ${CAPS[k][0] ? "whole number" : "number"}, or empty for no cap`;
-async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any>): Promise<{ error: string } | { v: Fields }> {
-  const b = await c.req.json().catch(() => null);
-  if (!b || typeof b !== "object" || Array.isArray(b)) return { error: "body must be a JSON object" };
+async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any>, force?: Record<string, unknown>): Promise<{ error: string } | { v: Fields }> {
+  const raw = await c.req.json().catch(() => null);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "body must be a JSON object" };
+  const b = { ...raw, ...force };
   const m = pick(c, b);
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };
@@ -177,8 +177,8 @@ app.get("/api/tickets", (c) => {
 // A new ticket from validated fields (parse); returns its id.
 function insertTicket(c: Context<Env>, v: Fields) {
   const id = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, kind, title, spec, provider_id, model, test_command, cap_usd, cap_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-    id, c.get("workspaceId"), v.kind ?? "task", v.title!, v.spec ?? "", v.provider_id ?? null, v.model ?? null, v.test_command ?? null, v.cap_usd ?? null, v.cap_tokens ?? null,
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, kind, title, spec, provider_id, model, test_command, cap_usd, cap_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    id, c.get("workspaceId"), v.tracker.project_id!, v.kind ?? "task", v.title!, v.spec ?? "", v.provider_id ?? null, v.model ?? null, v.test_command ?? null, v.cap_usd ?? null, v.cap_tokens ?? null,
   );
   applyTracker(id, v.tracker);
   touch(c.get("workspaceId"), { type: "ticket", id });
@@ -191,13 +191,13 @@ app.post("/api/tickets", async (c) => {
   return c.json(ticketIn(c, insertTicket(c, p.v)), 201);
 });
 
-// M13: files a chat proposal as a ticket. The body is the ticket (the card may have been edited), validated like
-// POST /api/tickets; run: true also queues its first run. A proposal is filed once (409 after that).
+// M13: files a chat proposal as a ticket in the chat's project. The body is the ticket (the card may have been edited),
+// validated like POST /api/tickets; run: true also queues its first run. A proposal is filed once (409 after that).
 app.post("/api/chats/proposals/:id/file", async (c) => {
   const prop = proposalIn(c);
   if (!prop) return c.json({ error: "not_found" }, 404);
   if (prop.status !== "open") return c.json({ error: `this proposal is already ${prop.status}` }, 409);
-  const p = await parse(c, false);
+  const p = await parse(c, false, undefined, { project_id: prop.project_id });
   if ("error" in p) return c.json(p, 400);
   const run = (await c.req.json())?.run === true; // Hono caches the parsed body
   // No await from the status check to the claim, so a double click cannot file twice.
@@ -255,7 +255,7 @@ app.delete("/api/tickets/:id", async (c) => {
   if (active) return c.json({ error: ids.length > 1 ? "cancel the running runs of this epic and its children first" : "cancel the running run first" }, 409);
   if (db.prepare("SELECT 1 FROM eval_cases WHERE ticket_id IN (SELECT value FROM json_each(?))").get(JSON.stringify(ids)))
     return c.json({ error: `${ids.length > 1 ? "This epic or one of its children" : "This ticket"} is an eval case. Remove it from the evals (Improvement page) first.` }, 409);
-  for (const id of ids) await cleanupTicket(id, c.get("workspaceId"));
+  for (const id of ids) await cleanupTicket(id);
   db.prepare("DELETE FROM tickets WHERE id = ?").run(t.id);
   touch(c.get("workspaceId"), { type: "ticket", id: t.id });
   if (t.parent_id) wake(t.parent_id, true); // its planner replans (its dependents are blocked now) or completes
@@ -263,7 +263,7 @@ app.delete("/api/tickets/:id", async (c) => {
 });
 
 // Queues a run (attempt 1). Optional body {provider_id, model} overrides the ticket/workspace choice (Retry with…).
-// 400 with a user-facing message when the workspace has no valid repository.
+// 400 with a user-facing message when the project's repository is not valid.
 app.post("/api/tickets/:id/runs", async (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
@@ -280,7 +280,7 @@ app.post("/api/tickets/:id/runs", async (c) => {
 app.get("/api/tickets/:id/diff", async (c) => {
   const t = ticketIn(c);
   const r = t?.status === "review" && reviewRun(t.id); // after approve/reject the branch is gone
-  const s = settingsFor(c.get("workspaceId"));
+  const s = r && projectSettings(t.project_id);
   if (!r || !s) return c.json({ error: "not_found" }, 404);
   const diff = await git(s.repo_path, ["diff", "--no-color", `${r.base_sha}..${r.branch}`, "--", ".", ...scratchPathspec]).catch((e) => `(diff unavailable: ${e.message})`);
   return c.json({ run_id: r.id, branch: r.branch, base_sha: r.base_sha, base_branch: s.base_branch, diff });
@@ -308,32 +308,31 @@ app.post("/api/tickets/:id/reject", async (c) => {
 const TOGGLES = new Set(["auto_approve_children", "model_review", "auto_split", "wiki"]);
 const LIMITS: Record<string, [number, number, string]> = { compact_at_tokens: [1000, 100_000_000, "Compact at (tokens)"], max_turns: [10, 500, "Max turns per attempt"], max_minutes: [5, 600, "Max minutes per attempt"] };
 
-app.get("/api/settings", (c) => {
-  const s = settingsFor(c.get("workspaceId"));
-  const models = Object.fromEntries(["default", "review", ...MODEL_PHASES].flatMap((p) => [[`${p}_provider_id`, null], [`${p}_model`, null]]));
-  return c.json({ ...SETTINGS_DEFAULTS, ...models, ...s, configured: !!s });
-});
+// The workspace's settings; a project's repository settings are on the project (tracker.ts).
+app.get("/api/settings", (c) => c.json(settingsFor(c.get("workspaceId"))));
+
+const ensureSettings = (ws: string) => db.prepare("INSERT INTO workspace_settings (workspace_id) VALUES (?) ON CONFLICT DO NOTHING").run(ws);
 
 // Workspace default provider/model (null = env fallback), the reviewer's (null = the run's own) and each phase's (M14;
-// null = its fallback). All live on the settings row, so the repository must be saved first.
+// null = its fallback).
 app.on("PUT", ["default", "review", ...MODEL_PHASES].map((p) => `/api/settings/${p}-provider`), async (c) => {
   const b = await c.req.json().catch(() => null);
   const m = b && typeof b === "object" ? pick(c, b) : { error: "body must be a JSON object" };
   if ("error" in m) return c.json(m, 400);
-  if (!settingsFor(c.get("workspaceId"))) return c.json({ error: "Save the repository settings first." }, 400);
+  ensureSettings(c.get("workspaceId"));
   const col = c.req.path.split("/").pop()!.replace(/-provider$/, ""); // one of the listed names: safe in the SQL below
   db.prepare(`UPDATE workspace_settings SET ${col}_provider_id = ?, ${col}_model = ?, updated_at = ? WHERE workspace_id = ?`).run(
     m.v.provider_id ?? null, m.v.model ?? null, Date.now(), c.get("workspaceId"),
   );
-  return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
+  return c.json(settingsFor(c.get("workspaceId")));
 });
 
 // Upsert that merges: an omitted field keeps its value (the default for a new workspace), null resets it to the default.
-// Toggles take true/1/"on" (form posts) as on; the repo is checked (root of a repo with commits, base branch exists).
+// Toggles take true/1/"on" (form posts) as on.
 app.put("/api/settings", async (c) => {
   const b = await c.req.json().catch(() => null);
   if (!b || typeof b !== "object" || Array.isArray(b)) return c.json({ error: "body must be a JSON object" }, 400);
-  const v: Record<string, any> = { ...SETTINGS_DEFAULTS, ...settingsFor(c.get("workspaceId")) };
+  const v: Record<string, any> = settingsFor(c.get("workspaceId"));
   for (const k of Object.keys(SETTINGS_DEFAULTS) as (keyof typeof SETTINGS_DEFAULTS)[]) {
     const x = b[k];
     if (x === undefined) continue;
@@ -349,26 +348,33 @@ app.put("/api/settings", async (c) => {
     } else if (typeof x !== "string" || x.length > 2000) return c.json({ error: `${k} must be a string of at most 2000 chars` }, 400);
     else v[k] = x.trim();
   }
-  if (!v.image) v.image = SETTINGS_DEFAULTS.image;
-  if (!IMAGE_REF.test(v.image)) return c.json({ error: "Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag" }, 400);
-  if (v.protected_paths.split(",").some((p: string) => p.trim().startsWith("/") || p.split("/").includes("..")))
-    return c.json({ error: "Protected paths must be relative to the repository root, without .." }, 400);
-  const repo = await inspectRepo(v.repo_path, v.base_branch);
-  if ("error" in repo) return c.json(repo, 400);
-  db.prepare(
-    `INSERT INTO workspace_settings (workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image, compact_at_tokens, auto_approve_children, model_review,
-       auto_split, child_size_hint, triage_model, wiki, max_turns, max_minutes, monthly_cap_usd, monthly_cap_tokens, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (workspace_id) DO UPDATE SET repo_path = excluded.repo_path, base_branch = excluded.base_branch, setup_command = excluded.setup_command,
-       test_command = excluded.test_command, protected_paths = excluded.protected_paths, image = excluded.image, compact_at_tokens = excluded.compact_at_tokens,
-       auto_approve_children = excluded.auto_approve_children, model_review = excluded.model_review, auto_split = excluded.auto_split,
-       child_size_hint = excluded.child_size_hint, triage_model = excluded.triage_model, wiki = excluded.wiki, max_turns = excluded.max_turns, max_minutes = excluded.max_minutes,
-       monthly_cap_usd = excluded.monthly_cap_usd, monthly_cap_tokens = excluded.monthly_cap_tokens, updated_at = excluded.updated_at`,
-  ).run(
-    c.get("workspaceId"), repo.repo_path, repo.base_branch, v.setup_command, v.test_command, v.protected_paths, v.image, v.compact_at_tokens, v.auto_approve_children,
-    v.model_review, v.auto_split, v.child_size_hint, v.triage_model, v.wiki, v.max_turns, v.max_minutes, v.monthly_cap_usd, v.monthly_cap_tokens, Date.now(),
-  );
-  return c.json({ ...settingsFor(c.get("workspaceId")), configured: true });
+  ensureSettings(c.get("workspaceId"));
+  const keys = Object.keys(SETTINGS_DEFAULTS); // ours, safe in the SQL below
+  db.prepare(`UPDATE workspace_settings SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE workspace_id = ?`).run(...keys.map((k) => v[k]), Date.now(), c.get("workspaceId"));
+  return c.json(settingsFor(c.get("workspaceId")));
+});
+
+// The caller's own appearance, the same in every workspace (Settings → Appearance). Palette ids match web/style.css.
+const PALETTES = ["black", "graphite", "stone", "polar", "ember", "teal"];
+const MODES = ["system", "light", "dark"];
+const preferences = (userId: string) =>
+  ({ palette: "black", mode: "system", ...(db.prepare("SELECT palette, mode FROM user_preferences WHERE user_id = ?").get(userId) as object | undefined) });
+app.get("/api/me/preferences", (c) => c.json(preferences(c.get("userId"))));
+// Merges: an omitted field keeps its value.
+app.put("/api/me/preferences", async (c) => {
+  const b = await c.req.json().catch(() => null);
+  const v = { ...preferences(c.get("userId")) };
+  if (b?.palette !== undefined) {
+    if (!PALETTES.includes(b.palette)) return c.json({ error: `palette must be one of ${PALETTES.join(", ")}` }, 400);
+    v.palette = b.palette;
+  }
+  if (b?.mode !== undefined) {
+    if (!MODES.includes(b.mode)) return c.json({ error: `mode must be one of ${MODES.join(", ")}` }, 400);
+    v.mode = b.mode;
+  }
+  db.prepare(`INSERT INTO user_preferences (user_id, palette, mode, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT (user_id) DO UPDATE SET palette = excluded.palette, mode = excluded.mode, updated_at = excluded.updated_at`).run(c.get("userId"), v.palette, v.mode, Date.now());
+  return c.json(v);
 });
 
 // One accounting source for execution, background calls and caps.
@@ -376,7 +382,7 @@ app.get("/api/usage", (c) => {
   const ws = c.get("workspaceId");
   const s = settingsFor(ws);
   const m = monthSpend(ws);
-  return c.json({ ...usageSummary(ws), cap: { usd: s?.monthly_cap_usd ?? null, tokens: s?.monthly_cap_tokens ?? null, used_usd: m.usd, used_tokens: m.tokens, month: m.month } });
+  return c.json({ ...usageSummary(ws), cap: { usd: s.monthly_cap_usd, tokens: s.monthly_cap_tokens, used_usd: m.usd, used_tokens: m.tokens, month: m.month } });
 });
 
 // M12 failure mining: per UTC day (run start, the last `days` incl. today, default 14, max 90) and model, newest first. Run
@@ -427,7 +433,7 @@ app.get("/api/lessons", (c) =>
   c.json({
     max: LESSONS_MAX,
     versions: db.prepare(`SELECT l.*, r.attempt AS run_attempt, ${ticketKey()} AS ticket_key, t.number AS ticket_number
-      FROM lessons l LEFT JOIN runs r ON r.id = l.run_id LEFT JOIN tickets t ON t.id = r.ticket_id LEFT JOIN organization o ON o.id = t.workspace_id
+      FROM lessons l LEFT JOIN runs r ON r.id = l.run_id LEFT JOIN tickets t ON t.id = r.ticket_id
       WHERE l.workspace_id = ? ORDER BY l.version DESC`).all(c.get("workspaceId")),
   }),
 );
@@ -512,13 +518,13 @@ app.get("/api/evals", (c) => {
     LEFT JOIN eval_results res ON res.run_id = r.id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE er.workspace_id = ? ORDER BY r.rowid`).all(ws) as Record<string, any>[];
   return c.json({
     cases: db.prepare(`SELECT c.*, ${ticketKey()} AS key FROM eval_cases c JOIN tickets t ON t.id = c.ticket_id
-      JOIN organization o ON o.id = c.workspace_id WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
+      WHERE c.workspace_id = ? ORDER BY c.created_at, c.rowid`).all(ws),
     runs: runs.map((e) => ({ ...e, case_ids: JSON.parse(e.case_ids), results: caseRuns.filter((r) => r.eval_run_id === e.id) })),
   });
 });
 
 // "Add to evals": an approved ticket becomes a frozen case, but only if its test command FAILS at the approved run's base
-// commit in a clean worktree + sandbox (validateCase). Settings (commands, protected paths, image) are taken as they are now.
+// commit in a clean worktree + sandbox (validateCase). Its project's settings (commands, protected paths, image) are taken as they are now.
 app.post("/api/evals/cases", async (c) => {
   const b = await c.req.json().catch(() => null);
   const t = typeof b?.ticket_id === "string" ? ticketIn(c, b.ticket_id) : undefined;
@@ -528,8 +534,7 @@ app.post("/api/evals/cases", async (c) => {
   const run = db.prepare(`SELECT r.base_sha FROM runs r JOIN events e ON e.run_id = r.id WHERE r.ticket_id = ? AND e.type = 'review'
     AND json_extract(e.payload, '$.decision') = 'approved' ORDER BY r.rowid DESC LIMIT 1`).get(t.id) as { base_sha: string } | undefined;
   if (!run) return c.json({ error: "This ticket was not approved through review, so there is no base commit to replay it from." }, 409);
-  const s = settingsFor(c.get("workspaceId"));
-  if (!s) return c.json({ error: "No repository configured." }, 400);
+  const s = projectSettings(t.project_id)!;
   if (t.eval_case_id) return c.json({ error: "This ticket is already an eval case." }, 409);
   const frozen = { repo_path: s.repo_path, base_sha: run.base_sha, setup_command: s.setup_command, test_command: t.test_command ?? s.test_command, protected_paths: s.protected_paths, image: s.image };
   const invalid = await validateCase(frozen).catch((e) => `Validation failed: ${(e as Error).message}`);
@@ -547,43 +552,52 @@ app.delete("/api/evals/cases/:id", (c) => {
   return r.changes ? c.body(null, 204) : c.json({ error: "not_found" }, 404);
 });
 
-// --- M10 project wiki (see SPEC "Project wiki (M10)", server/wiki.ts). Workspace-scoped like everything else; page paths are
-// checked against root .md / modules/ / howto/ and resolved with resolveIn.
+// --- M10 project wiki (see SPEC "Project wiki (M10)", server/wiki.ts): one per project, under /api/projects/:pid/wiki. Page
+// paths are checked against root .md / modules/ / howto/ and resolved with resolveIn.
 
-app.get("/api/wiki", async (c) => {
-  const ws = c.get("workspaceId");
-  const s = settingsFor(ws);
-  const base = s && (await headOf(s));
+// The route's project, in the caller's workspace.
+const projectOf = (c: Context<Env>) => {
+  const s = projectSettings(c.req.param("pid") as string);
+  if (!s || s.workspace_id !== c.get("workspaceId")) throw new HTTPException(404, { message: "not_found" });
+  return s;
+};
+const WIKI = "/api/projects/:pid/wiki";
+
+app.get(WIKI, async (c) => {
+  const s = projectOf(c);
+  const base = await headOf(s);
   const runs = db.prepare(`SELECT r.id, r.wiki_op, r.status, r.model, r.started_at, r.ended_at, r.tokens_in, r.tokens_out, r.tokens_cached, t.hidden,
       CASE WHEN t.hidden THEN NULL ELSE ${ticketKey()} END AS ticket_key, t.number AS ticket_number,
       (SELECT payload FROM events e WHERE e.run_id = r.id AND e.type = 'wiki' ORDER BY e.seq DESC LIMIT 1) AS result
-    FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id WHERE t.workspace_id = ? AND r.role = 'wiki' ORDER BY r.rowid DESC LIMIT 20`).all(ws) as Record<string, any>[];
+    FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.project_id = ? AND r.role = 'wiki' ORDER BY r.rowid DESC LIMIT 20`).all(s.project_id) as Record<string, any>[];
   return c.json({
-    enabled: s ? !!s.wiki : true, configured: !!s, ...(await wikiView(ws, s && base ? { repo: s.repo_path, base } : undefined)),
+    enabled: !!s.wiki, ...(await wikiView(s.project_id, base ? { repo: s.repo_path, base } : undefined)),
     runs: runs.map((r) => ({ ...r, result: r.result ? JSON.parse(r.result) : null })),
   });
 });
 
-app.get("/api/wiki/page", async (c) => {
+app.get(`${WIKI}/page`, async (c) => {
   const path = c.req.query("path") ?? "";
-  const body = await readPage(c.get("workspaceId"), path);
+  const body = await readPage(projectOf(c).project_id, path);
   return body === undefined ? c.json({ error: "not_found" }, 404) : c.json({ path, body });
 });
 
 // A human edit of an existing page: validated like the maintainer's output; one commit "edit <path> by <email>". base: the
 // page as it was opened (refused if it changed since).
-app.put("/api/wiki/page", async (c) => {
+app.put(`${WIKI}/page`, async (c) => {
+  const s = projectOf(c);
   const b = await c.req.json().catch(() => null);
   if (typeof b?.path !== "string" || typeof b?.body !== "string" || b.body.length > 20_000) return c.json({ error: "path and body (at most 20000 chars) are required" }, 400);
-  const r = await editPage(c.get("workspaceId"), b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: settingsFor(c.get("workspaceId"))?.repo_path });
+  const r = await editPage(s.project_id, b.path, b.body, email(c), { base: typeof b.base === "string" ? b.base : undefined, repo: s.repo_path });
   return "problems" in r ? c.json({ error: r.problems.join("\n"), problems: r.problems }, 400) : c.json(r);
 });
 
-app.get("/api/wiki/history", async (c) => c.json(await history(c.get("workspaceId"))));
+app.get(`${WIKI}/history`, async (c) => c.json(await history(projectOf(c).project_id)));
 
-app.get("/api/wiki/diff", async (c) => {
+app.get(`${WIKI}/diff`, async (c) => {
+  const s = projectOf(c);
   try {
-    return c.json({ diff: await wikiDiff(c.get("workspaceId"), c.req.query("sha") ?? "") });
+    return c.json({ diff: await wikiDiff(s.project_id, c.req.query("sha") ?? "") });
   } catch (e) {
     if (e instanceof AgentError) throw e;
     return c.json({ error: "not_found" }, 404); // no such commit
@@ -592,8 +606,8 @@ app.get("/api/wiki/diff", async (c) => {
 
 // "Build wiki" / "Refresh stale pages": queue a maintainer run (same flow as an ingest); the run row tells where to watch it.
 for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const)
-  app.post(`/api/wiki/${path}`, async (c) => {
-    const r = await enqueueWiki(c.get("workspaceId"), op);
+  app.post(`${WIKI}/${path}`, async (c) => {
+    const r = await enqueueWiki(projectOf(c).project_id, op);
     return "error" in r ? c.json({ error: r.error }, r.status) : c.json(db.prepare("SELECT * FROM runs WHERE id = ?").get(r.runId), 201);
   });
 

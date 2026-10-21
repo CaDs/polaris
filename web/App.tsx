@@ -3,6 +3,7 @@ import { authClient } from "./auth-client.ts";
 import { Chat, type ChatContext } from "./Chat.tsx";
 import { CyclePage, Cycles } from "./Cycles.tsx";
 import { Issues, Popover } from "./Filters.tsx";
+import { List } from "./List.tsx";
 import { Improvement } from "./Improvement.tsx";
 import { Palette } from "./Palette.tsx";
 import { ProjectPage, Projects } from "./Projects.tsx";
@@ -12,7 +13,7 @@ import { TicketView } from "./TicketView.tsx";
 import { UsagePage } from "./Usage.tsx";
 import { Views } from "./Views.tsx";
 import { Wiki } from "./Wiki.tsx";
-import { Alert, DateInput, Dialog, Icon, Loading, api, errorText, useApi, useTheme, useWorkspaceEvents, type Ticket } from "./ui.tsx";
+import { Alert, AppearanceProvider, DateInput, Dialog, Icon, Loading, api, errorText, useAppearance, useWorkspaceEvents, type Ticket } from "./ui.tsx";
 import { cycleName, ESTIMATES, PRIORITIES, PRIORITY_ORDER, TrackerProvider, useTracker } from "./tracker.tsx";
 
 export function App() {
@@ -21,9 +22,11 @@ export function App() {
   if (!session) return <AuthForm />;
   if (!session.session.activeOrganizationId) return <CreateWorkspace />;
   return (
-    <TrackerProvider>
-      <Dashboard email={session.user.email} />
-    </TrackerProvider>
+    <AppearanceProvider>
+      <TrackerProvider>
+        <Dashboard email={session.user.email} />
+      </TrackerProvider>
+    </AppearanceProvider>
   );
 }
 
@@ -32,20 +35,13 @@ function fields(e: FormEvent<HTMLFormElement>) {
   return Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
 }
 
-// The north-star mark: long cardinal rays, short diagonals, on a north-blue tile. Inline so it needs no asset.
+// The north-star mark: long cardinal rays, short diagonals, on a tile in the palette's accent. Inline so it needs no asset.
 function Mark() {
   return (
     <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
-      <defs>
-        {/* ponytail: fixed id, only one Mark is ever on screen (landing or sidebar) */}
-        <linearGradient id="polaris-mark" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#5b86ff" />
-          <stop offset="1" stopColor="#2f5bea" />
-        </linearGradient>
-      </defs>
-      <rect width="32" height="32" rx="8" fill="url(#polaris-mark)" />
-      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--star)" opacity=".55" transform="rotate(45 16 16)" />
-      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--star)" />
+      <rect width="32" height="32" rx="8" fill="var(--accent)" />
+      <path d="M16 10.4 17.3 14.7 21.6 16 17.3 17.3 16 21.6 14.7 17.3 10.4 16 14.7 14.7Z" fill="var(--on-accent)" opacity=".55" transform="rotate(45 16 16)" />
+      <path d="M16 4 17.6 14.4 28 16 17.6 17.6 16 28 14.4 17.6 4 16 14.4 14.4Z" fill="var(--on-accent)" />
     </svg>
   );
 }
@@ -133,7 +129,7 @@ function CreateWorkspace() {
     <Landing>
       <form className="card" onSubmit={submit}>
         <h1>Create a workspace</h1>
-        <p className="muted">Tickets, runs and provider keys live in a workspace.</p>
+        <p className="muted">Projects, their tickets, and provider keys live in a workspace.</p>
         <label>
           Name <input name="name" required autoFocus />
         </label>
@@ -176,7 +172,7 @@ function useTickets() {
 
 // Unread notifications (runs that need review or failed, others' comments); a click opens the ticket and reads that one.
 type Notification = { id: string; kind: "review" | "failed" | "comment"; text: string; created_at: number; number: number; key: string };
-function Bell({ open }: { open: (n: number) => void }) {
+function Bell({ open }: { open: (key: string) => void }) {
   const [list, setList] = useState<Notification[]>([]);
   const [shown, setShown] = useState(false);
   const reload = useCallback(() => api<Notification[]>("/api/notifications").then(setList, () => {}), []);
@@ -192,7 +188,7 @@ function Bell({ open }: { open: (n: number) => void }) {
         <Popover close={() => setShown(false)}>
           {list.length === 0 && <p className="muted item">Nothing new.</p>}
           {list.map((n) => (
-            <button key={n.id} className={`item notif ${n.kind}`} onClick={() => (setShown(false), read([n.id]), open(n.number))}>
+            <button key={n.id} className={`item notif ${n.kind}`} onClick={() => (setShown(false), read([n.id]), open(n.key))}>
               <span className={`dot ${n.kind}`} aria-hidden="true" /> <span>{n.text}</span>
             </button>
           ))}
@@ -205,7 +201,7 @@ function Bell({ open }: { open: (n: number) => void }) {
 
 // Personal preferences and sign-out: one menu at the foot of the sidebar instead of always-on controls.
 function Account({ email }: { email: string }) {
-  const [theme, setTheme] = useTheme();
+  const { appearance, set } = useAppearance();
   const [shown, setShown] = useState(false);
   return (
     <span className="menu-anchor account">
@@ -220,7 +216,7 @@ function Account({ email }: { email: string }) {
             Theme <span className="grow" />
             <span className="seg" role="group" aria-label="Theme">
               {(["system", "light", "dark"] as const).map((t) => (
-                <button key={t} aria-pressed={theme === t} onClick={() => (setTheme(t), setShown(false))}>{t[0].toUpperCase() + t.slice(1)}</button>
+                <button key={t} aria-pressed={appearance.mode === t} onClick={() => (set({ mode: t }), setShown(false))}>{t[0].toUpperCase() + t.slice(1)}</button>
               ))}
             </span>
           </div>
@@ -231,24 +227,12 @@ function Account({ email }: { email: string }) {
   );
 }
 
-// Until the repository is saved no agent can run: say so on the board, with the way there.
-function SetupBanner({ go }: { go: (to: string) => void }) {
-  const { data } = useApi<{ configured: boolean }>("/api/settings");
-  if (!data || data.configured) return null;
-  const link = (to: string, label: string) => <a href={to} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>;
-  return (
-    <p className="setup-banner">
-      <strong>Finish setup</strong> to let agents run: 1. {link("/settings/general", "Repository and test command")} 2. {link("/settings/models", "Model")}
-    </p>
-  );
-}
-
-// Daily work first, then what the agents do; Settings sits apart at the bottom. The route stays /improvement.
-const NAV: { label?: string; pages: [string, string][] }[] = [
-  { pages: [["", "Board"], ["projects", "Projects"], ["cycles", "Cycles"], ["views", "Views"], ["wiki", "Wiki"]] },
-  { label: "Agents", pages: [["usage", "Usage"], ["improvement", "Learning"]] },
-];
-const PAGES = [...NAV.flatMap((g) => g.pages), ["settings", "Settings"]];
+// Workspace-wide pages; Settings sits apart at the bottom. The route stays /improvement.
+const PAGES: Record<string, string> = {
+  "my-issues": "My issues", reviews: "Reviews", issues: "All issues", projects: "Projects", views: "Views", usage: "Usage", improvement: "Learning", settings: "Settings",
+};
+// A project's pages: /p/KEY (the board), /p/KEY/cycles[/id|current], /p/KEY/wiki, /p/KEY/overview.
+const PROJECT_PAGES: [string, string][] = [["", "Board"], ["cycles", "Cycles"], ["wiki", "Wiki"], ["overview", "Overview"]];
 
 function Dashboard({ email }: { email: string }) {
   const { data: workspace } = authClient.useActiveOrganization();
@@ -288,25 +272,33 @@ function Dashboard({ email }: { email: string }) {
   const q = loc.indexOf("?");
   const path = q < 0 ? loc : loc.slice(0, q);
   const search = q < 0 ? "" : loc.slice(q + 1);
-  const [, section = "", sub] = path.split("/");
+  const [, section = "", sub, rest] = path.split("/");
   useEffect(reloadTracker, [path]); // pickers pick up labels/projects/cycles made elsewhere (e.g. by a planner)
   useEffect(() => void (tracker && reload()), [tracker]); // a renamed or deleted label, project or cycle shows on the cards
-  const number = section === "t" ? sub : undefined;
-  const ticket = number ? tickets?.find((t) => t.number === Number(number)) : undefined;
-  const page = PAGES.find(([p]) => p === section)?.[1];
+  const ticket = section === "t" && sub ? tickets?.find((t) => t.key === sub.toUpperCase()) : undefined;
+  // The project the page is about: the route's, or the open ticket's.
+  const project = section === "p" ? tracker?.projects.find((p) => p.key === sub?.toUpperCase()) : ticket ? tracker?.projects.find((p) => p.id === ticket.project_id) : undefined;
+  const page = section === "p" ? (rest ?? "") : undefined;
+  // "/": the first project's board, or Projects to create one.
+  useEffect(() => {
+    if (path === "/" && tracker) go(tracker.projects.length ? `/p/${tracker.projects[0].key}` : "/projects", true);
+  }, [path, tracker]);
   const name = workspace?.name ?? "…";
-  const open = (n: number) => go(`/t/${n}`);
-  const current = tracker?.cycles.find((c) => c.state === "current");
-  // New tickets made on a project or cycle page start in it.
-  const defaults = { project_id: section === "projects" ? sub : undefined, cycle_id: section === "cycles" ? (sub === "current" ? current?.id : sub) : undefined };
-  // What the chat knows you're looking at: the ticket, project or cycle page.
-  const cycleId = section === "cycles" ? (sub === "current" ? current?.id : sub) : undefined;
-  const project = section === "projects" && sub ? tracker?.projects.find((p) => p.id === sub) : undefined;
+  const open = (key: string) => go(`/t/${key}`);
+  const current = project && tracker?.cycles.find((c) => c.project_id === project.id && c.state === "current");
+  const cycleId = page === "cycles" ? (path.split("/")[4] === "current" ? current?.id : path.split("/")[4]) : undefined;
   const cycle = cycleId ? tracker?.cycles.find((c) => c.id === cycleId) : undefined;
-  const chatContext: ChatContext = ticket ? { ticket: ticket.key } : project ? { project: project.id } : cycle ? { cycle: cycle.id } : {};
-  const chatLabel = ticket ? ticket.key : project ? project.name : cycle ? cycleName(cycle) : null;
-  const link = (to: string, label: string, active: boolean, cls = "") => (
-    <a key={to} href={to} className={`${cls}${active ? " active" : ""}`.trim()} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>
+  // New tickets start in the page's project (and cycle).
+  const defaults = { project_id: project?.id, cycle_id: cycle?.id };
+  // What the chat knows you're looking at: the ticket, cycle or project page.
+  const chatContext: ChatContext = ticket ? { ticket: ticket.key } : cycle ? { cycle: cycle.id } : project ? { project: project.id } : {};
+  const chatLabel = ticket ? ticket.key : cycle ? cycleName(cycle) : project ? project.name : null;
+  const reviews = tickets?.filter((t) => t.status === "review") ?? [];
+  const title = ticket ? ticket.key : section === "t" ? "Ticket" : project && page !== undefined
+    ? `${project.name} · ${page === "cycles" && path.split("/")[4] ? (cycle ? cycleName(cycle) : "Cycle") : PROJECT_PAGES.find(([p]) => p === page)?.[1] ?? ""}`
+    : (PAGES[section] ?? "");
+  const link = (to: string, label: ReactNode, active: boolean, cls = "") => (
+    <a key={to} href={to} className={`${cls}${active ? " active" : ""}`.trim()} aria-current={active ? "page" : undefined} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>
   );
 
   return (
@@ -318,26 +310,40 @@ function Dashboard({ email }: { email: string }) {
         </header>
         <button className="btn palette-btn" onClick={() => setPalette(true)}>Search or jump… <kbd>⌘K</kbd></button>
         <nav aria-label="Main">
-          {NAV.map((g, i) => [
-            g.label && <div key={`g${i}`} className="nav-group">{g.label}</div>,
-            g.pages.map(([p, label]) => [
-              link(`/${p}`, label, section === p && !(p === "cycles" && sub === "current")),
-              p === "cycles" && current && link("/cycles/current", "Current cycle", section === "cycles" && sub === "current", "sub"),
-            ]),
-          ])}
+          {link("/my-issues", "My issues", section === "my-issues")}
+          {link("/reviews", <>Reviews{reviews.length > 0 && <span className="count">{reviews.length}</span>}</>, section === "reviews")}
+          <div className="nav-group">Workspace</div>
+          {(["projects", "issues", "views"] as const).map((p) => link(`/${p}`, PAGES[p], section === p))}
+          <details className="nav-more" open={section === "usage" || section === "improvement" || undefined}>
+            <summary>More</summary>
+            {(["usage", "improvement"] as const).map((p) => link(`/${p}`, PAGES[p], section === p, "sub"))}
+          </details>
+          <div className="nav-group">Your projects</div>
+          {tracker?.projects.map((p) => (
+            <details key={p.id} className="nav-project" open={p.id === project?.id || tracker.projects.length === 1 || undefined}>
+              <summary><span className="key mono">{p.key}</span> {p.name}</summary>
+              {PROJECT_PAGES.map(([pg, label]) => [
+                link(`/p/${p.key}${pg && `/${pg}`}`, label, section === "p" && p.id === project?.id && page === pg && !(pg === "cycles" && path.split("/")[4] === "current"), "sub"),
+                pg === "cycles" && tracker.cycles.some((c) => c.project_id === p.id && c.state === "current") &&
+                  link(`/p/${p.key}/cycles/current`, "Current cycle", section === "p" && p.id === project?.id && path.split("/")[4] === "current", "sub sub2"),
+              ])}
+            </details>
+          ))}
+          {tracker && !tracker.projects.length && link("/projects", "Create a project", false, "sub muted")}
         </nav>
         <div className="side-bottom">
-          <nav aria-label="Workspace">{link("/settings", "Settings", section === "settings")}</nav>
           <Account email={email} />
+          <a href="/settings" className={`settings-link${section === "settings" ? " active" : ""}`} aria-label="Settings" title="Settings" aria-current={section === "settings" ? "page" : undefined}
+            onClick={(e) => (e.preventDefault(), go("/settings"))}><Icon name="gear" /></a>
         </div>
       </aside>
       <div className="main">
         <div className="topbar">
-          <h1>{number ? (ticket?.key ?? "Ticket") : sub && section === "projects" ? "Project" : sub && section === "cycles" ? (sub === "current" ? "Current cycle" : "Cycle") : (page ?? "Board")}</h1>
+          <h1>{title}</h1>
           <span className="grow" />
           <Bell open={open} />
           {!chat && <button className="btn" onClick={() => setChat(true)} title="⌘J">Ask Polaris</button>}
-          <button className="btn primary" onClick={() => setCreating(true)}>New ticket</button>
+          <button className="btn primary" onClick={() => setCreating(true)} disabled={!tracker?.projects.length} title={tracker?.projects.length ? undefined : "Create a project first"}>New ticket</button>
         </div>
         <main>
           {section === "settings" ? (
@@ -346,48 +352,57 @@ function Dashboard({ email }: { email: string }) {
             <UsagePage />
           ) : section === "improvement" ? (
             <Improvement open={open} changed={reload} />
-          ) : section === "wiki" ? (
-            <Wiki />
           ) : section === "projects" ? (
-            sub ? <ProjectPage id={sub} go={go} open={open} tick={tickets} /> : <Projects go={go} />
-          ) : section === "cycles" ? (
-            sub ? <CyclePage id={sub} go={go} open={open} tick={tickets} /> : <Cycles go={go} />
+            <Projects go={go} />
           ) : section === "views" ? (
             <Views go={go} />
-          ) : number ? (
+          ) : section === "my-issues" ? (
+            <Issues base="/my-issues" scope="assignee=me" search={search} go={go} all={tickets && tracker && tickets.filter((t) => t.assignee?.id === tracker.me)} open={open} />
+          ) : section === "issues" ? (
+            <Issues base="/issues" scope="" search={search} go={go} all={tickets} open={open} />
+          ) : section === "reviews" ? (
+            <>
+              {tickets && !reviews.length && <p className="center muted">Nothing waits for review.</p>}
+              {reviews.length > 0 && <List tickets={reviews} group="project" open={(t) => open(t.key)} />}
+            </>
+          ) : section === "p" ? (
+            !tracker ? <Loading /> : !project ? <p className="muted pad">Project not found.</p>
+            : page === "" ? <Issues key={project.id} base={`/p/${project.key}`} scope={`project=${project.id}`} search={search} go={go} all={tickets && tickets.filter((t) => t.project_id === project.id)} open={open} />
+            : page === "cycles" ? (path.split("/")[4]
+              ? <CyclePage id={path.split("/")[4] === "current" ? (current?.id ?? "") : path.split("/")[4]} project={project} go={go} open={open} tick={tickets} />
+              : <Cycles key={project.id} project={project} go={go} />)
+            : page === "wiki" ? <Wiki key={project.id} project={project} />
+            : page === "overview" ? <ProjectPage key={project.id} id={project.id} go={go} />
+            : <p className="muted pad">Page not found.</p>
+          ) : section === "t" ? (
             ticket ? (
               <div className="ticket-page">
-                <TicketView ticket={ticket} reload={reload} close={() => go("/")} open={open} />
+                <TicketView ticket={ticket} reload={reload} close={() => go(`/p/${ticket.project.key}`)} open={open} />
                 <Properties ticket={ticket} tickets={tickets ?? []} reload={reload} />
               </div>
             ) : tickets ? <p className="muted pad">Ticket not found.</p> : <Loading />
-          ) : (
-            <>
-              <SetupBanner go={go} />
-              <Issues search={search} go={go} all={tickets} open={open} />
-            </>
-          )}
+          ) : null}
         </main>
       </div>
-      {chat && <Chat context={chatContext} label={chatLabel} tickets={tickets ?? []} go={go} filed={reload} close={() => setChat(false)} />}
-      {creating && <NewTicket tickets={tickets ?? []} defaults={defaults} close={() => setCreating(false)} created={() => (reload(), setCreating(false))} />}
+      {chat && <Chat context={chatContext} label={chatLabel} project={project ?? tracker?.projects[0]} tickets={tickets ?? []} go={go} filed={reload} close={() => setChat(false)} />}
+      {creating && !!tracker?.projects.length && <NewTicket tickets={tickets ?? []} defaults={{ ...defaults, project_id: defaults.project_id ?? tracker.projects[0].id }} close={() => setCreating(false)} created={() => (reload(), setCreating(false))} />}
       {palette && <Palette tickets={tickets ?? []} go={go} create={() => setCreating(true)} close={() => setPalette(false)} />}
     </div>
   );
 }
 
-// M11: the tracker fields are optional; empty selects mean "none".
-function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; defaults: { project_id?: string; cycle_id?: string }; close: () => void; created: () => void }) {
+// M11: the tracker fields are optional (empty selects mean "none"); the project is not: it is the repository the agents work in.
+function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; defaults: { project_id: string; cycle_id?: string }; close: () => void; created: () => void }) {
   const { tracker } = useTracker();
   const [error, setError] = useState("");
-  const [project, setProject] = useState(defaults.project_id ?? "");
+  const [project, setProject] = useState(defaults.project_id);
   async function submit(e: FormEvent<HTMLFormElement>) {
     const labels = new FormData(e.currentTarget).getAll("label_ids");
     const f = fields(e);
     try {
       await api("/api/tickets", "POST", {
         title: f.title, spec: f.spec, kind: f.kind, test_command: f.test_command?.trim() || null, priority: Number(f.priority ?? 0), estimate: f.estimate ? Number(f.estimate) : null, due_date: f.due_date || null,
-        assignee_id: f.assignee_id || null, project_id: f.project_id || null, milestone_id: f.milestone_id || null, cycle_id: f.cycle_id || null, label_ids: labels,
+        assignee_id: f.assignee_id || null, project_id: f.project_id, milestone_id: f.milestone_id || null, cycle_id: f.cycle_id || null, label_ids: labels,
         ...(f.parent_id && { parent_id: f.parent_id }),
       });
       created();
@@ -413,7 +428,7 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
         </label>
         <label>
           Test command (optional) <input name="test_command" className="mono" spellCheck={false} maxLength={2000} />
-          <span className="hint">Overrides the workspace's for this ticket; empty = workspace default.</span>
+          <span className="hint">Overrides the project's for this ticket; empty = project default.</span>
         </label>
         <div className="fields">
           <select name="priority" aria-label="Priority" defaultValue="0">
@@ -424,8 +439,7 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
             {t?.members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>
           <select name="project_id" aria-label="Project" value={project} onChange={(e) => setProject(e.target.value)}>
-            <option value="">No project</option>
-            {t?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            {t?.projects.map((p) => <option key={p.id} value={p.id}>{p.key} {p.name}</option>)}
           </select>
           {milestones.length > 0 && (
             <select name="milestone_id" aria-label="Milestone" defaultValue="">
@@ -433,18 +447,18 @@ function NewTicket({ tickets, defaults, close, created }: { tickets: Ticket[]; d
               {milestones.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           )}
-          <select name="cycle_id" aria-label="Cycle" defaultValue={defaults.cycle_id ?? ""}>
+          <select key={project} name="cycle_id" aria-label="Cycle" defaultValue={defaults.cycle_id ?? ""}>
             <option value="">No cycle</option>
-            {t?.cycles.filter((c) => c.state !== "past").map((c) => <option key={c.id} value={c.id}>{cycleName(c)} ({c.state})</option>)}
+            {t?.cycles.filter((c) => c.project_id === project && c.state !== "past").map((c) => <option key={c.id} value={c.id}>{cycleName(c)} ({c.state})</option>)}
           </select>
           <select name="estimate" aria-label="Estimate" defaultValue="">
             <option value="">No estimate</option>
             {ESTIMATES.map((n) => <option key={n} value={n}>{n} {n === 1 ? "point" : "points"}</option>)}
           </select>
           <DateInput name="due_date" aria-label="Due date" title="Due date" placeholder="Due date" />
-          <select name="parent_id" aria-label="Parent epic" defaultValue="">
+          <select key={`e${project}`} name="parent_id" aria-label="Parent epic" defaultValue="">
             <option value="">No parent epic</option>
-            {tickets.filter((x) => x.kind === "epic" && (x.status === "todo" || x.status === "running")).map((x) => <option key={x.id} value={x.id}>{x.key} {x.title}</option>)}
+            {tickets.filter((x) => x.project_id === project && x.kind === "epic" && (x.status === "todo" || x.status === "running")).map((x) => <option key={x.id} value={x.id}>{x.key} {x.title}</option>)}
           </select>
         </div>
         {!!t?.labels.length && (

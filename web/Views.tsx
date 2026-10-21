@@ -10,7 +10,7 @@ const query = (v: View) => {
   if (v.layout === "list") p.set("layout", "list");
   return p;
 };
-const viewUrl = (v: View) => `/?${query(v)}&view=${v.id}`;
+const viewUrl = (v: View) => `/issues?${query(v)}&view=${v.id}`;
 
 export function Views({ go }: { go: (to: string) => void }) {
   const { data: views, error, setError, reload } = useApi<View[]>("/api/views");

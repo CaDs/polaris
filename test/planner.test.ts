@@ -6,7 +6,7 @@ import { join } from "node:path";
 // M7: epics, planner rounds, dependency scheduling, handoffs, auto-approve. POLARIS_SANDBOX=host (no docker), demo provider.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, idle, sh, task, until, user, workspace: base } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events, idle, sh, task, until, user, workspace: base } = await import("./helpers.ts");
 const { createRun, subscribe } = await import("../server/agent/events.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { extractHandoff, handoffText, plannerTools, MAX_CHILDREN } = await import("../server/planner.ts");
@@ -19,7 +19,7 @@ async function workspace(name: string, auto = false, extra = {}) {
   const w = await base(name, { test_command: "test -f a.txt || test -f b.txt", auto_approve_children: auto, ...extra });
   repos.push(w.repo);
   const epic = async (title: string, spec = "") => {
-    const e = (await call("POST", "/api/tickets", w.cookie, { title, spec, kind: "epic" })).body;
+    const e = (await fileTicket(w.cookie, { title, spec, kind: "epic" })).body;
     assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, w.cookie)).status, 201);
     return e;
   };
@@ -108,8 +108,8 @@ test("epic: read-only planner round, B waits for A, approve A → B from the upd
 
 test("create_ticket validation, child limit, sub-epic depth; finish_round/complete_epic refused with the reason", async () => {
   const w = await workspace("val");
-  const [e, other] = [(await call("POST", "/api/tickets", w.cookie, { title: "E", kind: "epic" })).body, (await call("POST", "/api/tickets", w.cookie, { title: "Other", kind: "epic" })).body];
-  assert.equal((await call("POST", "/api/tickets", w.cookie, { title: "x", kind: "story" })).status, 400);
+  const [e, other] = [(await fileTicket(w.cookie, { title: "E", kind: "epic" })).body, (await fileTicket(w.cookie, { title: "Other", kind: "epic" })).body];
+  assert.equal((await fileTicket(w.cookie, { title: "x", kind: "story" })).status, 400);
   const queued: string[] = [];
   const outcome: { notes?: string; summary?: string } = {};
   const use = (epic: any, name: string, input: Record<string, unknown>) =>
@@ -154,7 +154,7 @@ test("create_ticket validation, child limit, sub-epic depth; finish_round/comple
   assert.equal((await call("GET", `/api/tickets/${e.id}`, w.cookie)).body.child_count, MAX_CHILDREN);
   assert.match((await use(e, "create_ticket", { title: "one too many", spec: "s" })).content, /already has 12 child tickets, the limit/);
   // No open child: finish_round would wait forever.
-  const empty = (await call("POST", "/api/tickets", w.cookie, { title: "Empty", kind: "epic" })).body;
+  const empty = (await fileTicket(w.cookie, { title: "Empty", kind: "epic" })).body;
   assert.match((await use(empty, "finish_round", { notes: "?" })).content, /no child ticket is open .*nothing would start another round/);
   db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id); // nothing of this workspace may ever run
 });
@@ -184,12 +184,12 @@ test("rounds are batched: children that settle while a round is queued are seen 
 
 test("round limit: the epic fails with the reason; Run planner refuses after the limit", async () => {
   const w = await workspace("lim");
-  const e = (await call("POST", "/api/tickets", w.cookie, { title: "Endless", kind: "epic" })).body;
+  const e = (await fileTicket(w.cookie, { title: "Endless", kind: "epic" })).body;
   for (let n = 1; n <= 8; n++) {
     const id = createRun({ ticketId: e.id, model: "demo", attempt: n, role: "planner" });
     db.prepare("UPDATE runs SET status = 'passed', started_at = ? WHERE id = ?").run(n, id);
   }
-  db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, title, status, settled_at) VALUES ('lim-child', ?, ?, 'c', 'done', ?)").run(e.workspace_id, e.id, Date.now());
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, parent_id, title, status, settled_at) VALUES ('lim-child', ?, ?, ?, 'c', 'done', ?)").run(e.workspace_id, e.project_id, e.id, Date.now());
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(e.id);
   wake(e.id);
   const d = await w.get(e.id);
@@ -250,11 +250,11 @@ test("a rejected child counts as failed: its dependents are blocked and the plan
 
 test("rounds start when the planner has something to do: 10 children settling one by one stay within the round limit", async () => {
   const w = await workspace("ten");
-  const e = (await call("POST", "/api/tickets", w.cookie, { title: "Ten", kind: "epic" })).body;
+  const e = (await fileTicket(w.cookie, { title: "Ten", kind: "epic" })).body;
   let clock = 1000;
   db.prepare("UPDATE runs SET status = 'passed', started_at = ? WHERE id = ?").run(++clock, createRun({ ticketId: e.id, model: "demo", attempt: 1, role: "planner" }));
   db.prepare("UPDATE tickets SET status = 'running' WHERE id = ?").run(e.id);
-  for (let i = 0; i < 10; i++) db.prepare("INSERT INTO tickets (id, workspace_id, parent_id, title, status) VALUES (?, ?, ?, ?, 'running')").run(`ten-${i}`, e.workspace_id, e.id, `c${i}`);
+  for (let i = 0; i < 10; i++) db.prepare("INSERT INTO tickets (id, workspace_id, project_id, parent_id, title, status) VALUES (?, ?, ?, ?, ?, 'running')").run(`ten-${i}`, e.workspace_id, e.project_id, e.id, `c${i}`);
   process.env.POLARIS_CONCURRENCY = "0"; // hold the queue: a queued round is finished by hand, as if it called finish_round
   try {
     for (let i = 0; i < 10; i++) {
@@ -293,11 +293,11 @@ test("a task moved into a running epic is queued at once; into a todo epic, when
   const e = await w.epic("Two files");
   await w.childIs(e.id, "Create a.txt", "review");
   await until("round 1 finished", async () => (await w.get(e.id)).runs[0].status === "passed");
-  const task = async (title: string) => (await call("POST", "/api/tickets", w.cookie, { title, spec: `${title}.` })).body;
+  const task = async (title: string) => (await fileTicket(w.cookie, { title, spec: `${title}.` })).body;
   const c = await task("Create c.txt");
   assert.equal((await call("PATCH", `/api/tickets/${c.id}`, w.cookie, { parent_id: e.id })).status, 200);
   assert.equal((await w.is(c.id, "review")).runs.length, 1);
-  const later = (await call("POST", "/api/tickets", w.cookie, { title: "Later", kind: "epic" })).body;
+  const later = (await fileTicket(w.cookie, { title: "Later", kind: "epic" })).body;
   const x = await task("Create x.txt");
   assert.equal((await call("PATCH", `/api/tickets/${x.id}`, w.cookie, { parent_id: later.id })).status, 200);
   const before = await w.get(x.id);
@@ -310,7 +310,7 @@ test("a task moved into a running epic is queued at once; into a todo epic, when
 
 test("create_ticket: children inherit the epic's test command, nothing is created after the round ended, wiki runs are not a child's runs", async () => {
   const w = await workspace("inh");
-  const e = (await call("POST", "/api/tickets", w.cookie, { title: "E", kind: "epic", test_command: "test -f e.txt" })).body;
+  const e = (await fileTicket(w.cookie, { title: "E", kind: "epic", test_command: "test -f e.txt" })).body;
   const outcome: { notes?: string; summary?: string } = {};
   const use = (name: string, input: Record<string, unknown>) =>
     runTool(plannerTools(e, outcome, 0, async () => undefined), { type: "tool_use", id: "x", name, input }, { root: w.repo, exec: hostExec });
@@ -336,7 +336,7 @@ test("a crashed planner round is retried once with a fresh round; a second crash
   const w = await workspace("cra", true, { wiki: false, test_command: "true" });
   const ws = w.ws;
   db.prepare("INSERT INTO providers (id, workspace_id, name, kind, auth_type) VALUES ('cra-broken', ?, 'Broken', 'anthropic', 'api_key')").run(ws); // no key: every round throws
-  const epic = async (title: string) => (await call("POST", "/api/tickets", w.cookie, { title, spec: "PARALLEL", kind: "epic", provider_id: "cra-broken", model: "m" })).body;
+  const epic = async (title: string) => (await fileTicket(w.cookie, { title, spec: "PARALLEL", kind: "epic", provider_id: "cra-broken", model: "m" })).body;
 
   const e = await epic("Crashes");
   assert.equal((await call("POST", `/api/tickets/${e.id}/runs`, w.cookie)).status, 201);

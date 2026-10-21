@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export type TokenSummary = { tokens_total: number; tokens_in: number; input_uncached: number; tokens_out: number; tokens_cached: number; tokens_cache_write: number; partial: number; unavailable: number; cost_usd: number; unknown_price: number; subscription_calls: number; local_calls: number };
 
@@ -17,7 +17,7 @@ export type Ticket = {
   escalated_key: string | null; split_from_key: string | null;
   // M11 tracker. priority: 0 none, 1 urgent … 4 low.
   priority: number; estimate: number | null; due_date: string | null; created_at: number; updated_at: number;
-  labels: { id: string; name: string; color: string }[]; project: { id: string; name: string } | null; milestone: { id: string; name: string } | null;
+  labels: { id: string; name: string; color: string }[]; project_id: string; project: { id: string; name: string; key: string }; milestone: { id: string; name: string } | null;
   cycle: { id: string; number: number; name: string } | null; assignee: { id: string; name: string; email: string } | null;
 };
 // GET /api/tickets/:id of an epic: every descendant with its state label (as the planner sees it) and dependency keys.
@@ -94,6 +94,7 @@ const GLYPHS = {
   down: "M12 5v14M19 12l-7 7-7-7",
   more: "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
   calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+  gear: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
 };
 export const Icon = ({ name, size = 16 }: { name: keyof typeof GLYPHS; size?: number }) => (
   <svg className="glyph" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -123,25 +124,49 @@ export function StatusIcon({ status, label = false }: { status: string; label?: 
 }
 
 export type Theme = "system" | "light" | "dark";
-export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(() => {
-    try {
-      const t = localStorage.getItem("theme");
-      return t === "light" || t === "dark" ? t : "system";
-    } catch {
-      return "system";
-    }
-  });
-  useEffect(() => {
-    if (theme === "system") document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.dataset.theme = theme;
-    try {
-      if (theme === "system") localStorage.removeItem("theme");
-      else localStorage.setItem("theme", theme);
-    } catch {}
-  }, [theme]);
-  return [theme, setTheme] as const;
+// The palettes in web/style.css, default first; GET/PUT /api/me/preferences validates the same ids.
+export const PALETTES = [
+  { id: "black", name: "Black + Blue", hint: "True black, neutral greys, one steel blue. The default." },
+  { id: "graphite", name: "Graphite", hint: "Linear-style monochrome: color only for status." },
+  { id: "stone", name: "Stone & Ink", hint: "Warm monochrome, paper and ink." },
+  { id: "polar", name: "Polar Night", hint: "Navy ink with a north-blue accent." },
+  { id: "ember", name: "Ember", hint: "Warm charcoal with an orange accent." },
+  { id: "teal", name: "Deep Teal", hint: "Black pearl and Boston blue." },
+] as const;
+type Appearance = { mode: Theme; palette: string };
+
+// Applies an appearance to the page and keeps a copy for the next load (index.html applies it before first paint).
+function apply(a: Appearance) {
+  const root = document.documentElement;
+  if (a.mode === "system") root.removeAttribute("data-theme");
+  else root.dataset.theme = a.mode;
+  if (a.palette === PALETTES[0].id) root.removeAttribute("data-palette");
+  else root.dataset.palette = a.palette;
+  try {
+    if (a.mode === "system") localStorage.removeItem("theme");
+    else localStorage.setItem("theme", a.mode);
+    localStorage.setItem("palette", a.palette);
+  } catch {}
 }
+
+// The signed-in user's appearance, saved on the server (the same in every browser); the page shows the local copy until
+// it loads. set() applies at once and saves.
+const AppearanceCtx = createContext<{ appearance: Appearance; set: (a: Partial<Appearance>) => void } | null>(null);
+export function AppearanceProvider({ children }: { children: React.ReactNode }) {
+  const [appearance, setAppearance] = useState<Appearance>(() => {
+    const root = document.documentElement;
+    return { mode: (root.dataset.theme as Theme | undefined) ?? "system", palette: root.dataset.palette ?? PALETTES[0].id };
+  });
+  useEffect(() => void api<Appearance>("/api/me/preferences").then((a) => (apply(a), setAppearance(a)), () => {}), []);
+  const set = (change: Partial<Appearance>) => {
+    const next = { ...appearance, ...change };
+    apply(next);
+    setAppearance(next);
+    api("/api/me/preferences", "PUT", change).catch(() => {}); // ponytail: a failed save keeps the local choice; the next load shows the saved one
+  };
+  return <AppearanceCtx.Provider value={{ appearance, set }}>{children}</AppearanceCtx.Provider>;
+}
+export const useAppearance = () => useContext(AppearanceCtx)!;
 
 // The one modal: Esc or a click on the backdrop closes it; focus goes back to where it was. heading=false: the title is only its label.
 export function Dialog({ title, onClose, children, className = "", heading = true }: { title: string; onClose: () => void; children: React.ReactNode; className?: string; heading?: boolean }) {

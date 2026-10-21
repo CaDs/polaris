@@ -37,22 +37,22 @@ test("M7: epic → planner round → children with a dependency → approvals dr
   await expect(transcript).toContainText("Read-only checkout at", { timeout: 60_000 });
   await expect(transcript.locator(".call", { hasText: "create_ticket" })).toHaveCount(2, { timeout: 30_000 });
   await expect(transcript).toContainText("Round 1 finished");
-  await expect(kid("PLA-2")).toContainText("Create a.txt");
-  await expect(kid("PLA-3")).toContainText("Create b.txt");
-  await expect(kid("PLA-3")).toContainText("← PLA-2");
-  await expect(kid("PLA-3")).toContainText("waiting on PLA-2");
+  await expect(kid("APP-2")).toContainText("Create a.txt");
+  await expect(kid("APP-3")).toContainText("Create b.txt");
+  await expect(kid("APP-3")).toContainText("← APP-2");
+  await expect(kid("APP-3")).toContainText("waiting on APP-2");
   await expect(page.getByText("waiting for children")).toBeVisible();
 
   // A runs (B waits) and passes; its handoff shows in the epic view.
-  await expect(kid("PLA-2")).toContainText("in review", { timeout: 90_000 });
-  await expect(kid("PLA-3")).toContainText("waiting on PLA-2");
-  await kid("PLA-2").getByText("Handoff").click();
-  await expect(kid("PLA-2").locator("pre")).toContainText("Results: created a.txt");
+  await expect(kid("APP-2")).toContainText("in review", { timeout: 90_000 });
+  await expect(kid("APP-3")).toContainText("waiting on APP-2");
+  await kid("APP-2").getByText("Handoff").click();
+  await expect(kid("APP-2").locator("pre")).toContainText("Results: created a.txt");
 
   // The board shows the children with their parent key, and the epic's progress.
   await page.getByRole("link", { name: "Board" }).click();
-  await expect(page.getByRole("region", { name: "review", exact: true }).getByRole("button", { name: /Create a\.txt/ })).toContainText("PLA-1");
-  await expect(page.getByRole("region", { name: "todo", exact: true }).getByRole("button", { name: /Create b\.txt/ })).toContainText("PLA-1");
+  await expect(page.getByRole("region", { name: "review", exact: true }).getByRole("button", { name: /Create a\.txt/ })).toContainText("APP-1");
+  await expect(page.getByRole("region", { name: "todo", exact: true }).getByRole("button", { name: /Create b\.txt/ })).toContainText("APP-1");
   const epicCard = page.getByRole("region", { name: "running", exact: true }).getByRole("button", { name: /Two files/ });
   await expect(epicCard).toContainText("0/2 done");
   await expect(epicCard).toContainText("waiting for children");
@@ -62,20 +62,20 @@ test("M7: epic → planner round → children with a dependency → approvals dr
   await expect(transcript).toContainText("Handoff to the planner");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(status).toHaveValue("done");
-  await page.getByRole("button", { name: "PLA-1", exact: true }).click();
-  await expect(kid("PLA-3")).toContainText("in review", { timeout: 90_000 });
-  await kid("PLA-3").getByRole("button", { name: "PLA-3" }).click();
+  await page.getByRole("button", { name: "APP-1", exact: true }).click();
+  await expect(kid("APP-3")).toContainText("in review", { timeout: 90_000 });
+  await kid("APP-3").getByRole("button", { name: "APP-3" }).click();
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(status).toHaveValue("done");
 
   // The settled children woke the planner: a later round sees both handoffs and completes the epic → review.
-  await page.getByRole("button", { name: "PLA-1", exact: true }).click();
+  await page.getByRole("button", { name: "APP-1", exact: true }).click();
   await expect(status).toHaveValue("review", { timeout: 90_000 });
-  await expect(page.getByLabel("Summary")).toContainText("Done: PLA-2 Create a.txt; PLA-3 Create b.txt.");
+  await expect(page.getByLabel("Summary")).toContainText("Done: APP-2 Create a.txt; APP-3 Create b.txt.");
   await expect(transcript).toContainText("Epic completed");
   await expect(page.getByRole("button", { name: "Show run #2" })).toBeVisible();
-  await kid("PLA-3").getByText("Handoff").click();
-  await expect(kid("PLA-3").locator("pre")).toContainText("Results: created b.txt");
+  await kid("APP-3").getByText("Handoff").click();
+  await expect(kid("APP-3").locator("pre")).toContainText("Results: created b.txt");
   await expect(page.getByLabel("Epic usage")).toContainText("planner + children");
 
   await page.getByRole("region", { name: "Review" }).getByRole("button", { name: "Approve" }).click();
@@ -96,9 +96,9 @@ test("M7: with auto-approve on, an epic runs to review without child approvals",
   await expect(status).toHaveValue("review", { timeout: 180_000 });
   const kids = page.getByRole("list", { name: "Children" });
   await expect(kids.getByRole("listitem")).toHaveCount(2);
-  for (const key of ["AUT-2", "AUT-3"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
-  await expect(kids.getByRole("listitem", { name: "AUT-2", exact: true }).getByTitle("Test command")).toHaveText("test -f a.txt || test -f b.txt"); // inherited from the epic
-  await expect(page.getByLabel("Summary")).toContainText("Done: AUT-2 Create a.txt; AUT-3 Create b.txt.");
+  for (const key of ["APP-2", "APP-3"]) await expect(kids.getByRole("listitem", { name: key, exact: true })).toContainText("done");
+  await expect(kids.getByRole("listitem", { name: "APP-2", exact: true }).getByTitle("Test command")).toHaveText("test -f a.txt || test -f b.txt"); // inherited from the epic
+  await expect(page.getByLabel("Summary")).toContainText("Done: APP-2 Create a.txt; APP-3 Create b.txt.");
   await page.getByRole("region", { name: "Review" }).getByRole("button", { name: "Approve" }).click();
   await expect(status).toHaveValue("done");
   expect(git(repo, "ls-tree", "-r", "--name-only", "main").split("\n")).toEqual(["README.md", "a.txt", "b.txt"]);

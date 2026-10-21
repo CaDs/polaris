@@ -13,7 +13,8 @@ import type { ToolUseBlock } from "../server/agent/types.ts";
 
 migrate();
 db.prepare("INSERT INTO organization (id, name, slug, createdAt) VALUES ('w', 'w', 'w', '2026-01-01')").run();
-db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES ('t', 'w', 'test')").run();
+db.prepare("INSERT INTO projects (id, workspace_id, key, name, repo_path, base_branch) VALUES ('p', 'w', 'W', 'w', '/', 'main')").run();
+db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title) VALUES ('t', 'w', 'p', 'test')").run();
 
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
 

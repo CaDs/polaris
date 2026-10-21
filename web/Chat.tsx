@@ -1,17 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { matchTickets } from "./Palette.tsx";
 import { Markdown } from "./Wiki.tsx";
-import { PRIORITIES } from "./tracker.tsx";
+import { PRIORITIES, useTracker, type ProjectRef } from "./tracker.tsx";
 import { Alert, Icon, StatusIcon, api, type Ticket } from "./ui.tsx";
 
-// M13: the chat panel (Cmd/Ctrl+J). Talks with the project's agent about the page you're on; the agent proposes tickets
-// as cards and you file them. One chat at a time is open; its stored events replay over SSE, then live ones and the
+// M13: the chat panel (Cmd/Ctrl+J). Talks with a project's agent about the page you're on; the agent proposes tickets
+// as cards and you file them into that project. A new chat starts in the page's project (or the one picked). One chat at a time is open; its stored events replay over SSE, then live ones and the
 // reply's text as it streams.
 export type ChatContext = { ticket?: string; project?: string; cycle?: string };
 type Ev = { seq: number; type: string; payload: any };
 type Draft = { title: string; spec: string; kind: string; test_command: string | null; priority: number; estimate: number | null };
-type Proposal = { id: string; number: number; status: "open" | "filed" | "dismissed" | "superseded"; payload: Draft; ticket_key: string | null; ticket_number: number | null };
-type ChatInfo = { id: string; title: string };
+type Proposal = { id: string; number: number; status: "open" | "filed" | "dismissed" | "superseded"; payload: Draft; ticket_key: string | null };
+type ChatInfo = { id: string; title: string; project_key?: string };
 
 const remembered = () => {
   try {
@@ -35,9 +35,12 @@ const SOURCE: Record<string, (i: any) => string> = {
   list_tickets: (i) => `tickets${i.status ? ` (${i.status})` : ""}${i.query ? ` “${i.query}”` : ""}`,
 };
 
-export function Chat({ context, label, tickets, go, filed, close }: {
-  context: ChatContext; label: string | null; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close: () => void;
+export function Chat({ context, label, project, tickets, go, filed, close }: {
+  context: ChatContext; label: string | null; project: ProjectRef | undefined; tickets: Ticket[]; go: (to: string) => void; filed: () => void; close: () => void;
 }) {
+  const { tracker } = useTracker();
+  const [picked, setPicked] = useState<string | null>(null); // a project chosen for the next new chat
+  const projectId = picked ?? project?.id;
   const [chats, setChats] = useState<ChatInfo[]>([]);
   const [id, setId] = useState<string | null>(remembered);
   const [events, setEvents] = useState<Ev[]>([]);
@@ -83,7 +86,7 @@ export function Chat({ context, label, tickets, go, filed, close }: {
     const message = draft.trim();
     if (!message || busy) return;
     setError("");
-    const body = { message, context: useContext ? context : undefined };
+    const body = { message, context: useContext ? context : undefined, project_id: projectId };
     try {
       if (id) await api(`/api/chats/${id}/messages`, "POST", body);
       else {
@@ -104,8 +107,13 @@ export function Chat({ context, label, tickets, go, filed, close }: {
       <header className="chat-head">
         <select aria-label="Conversation" value={id ?? ""} onChange={(e) => pick(e.target.value || null)}>
           <option value="">New chat</option>
-          {chats.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+          {chats.map((c) => <option key={c.id} value={c.id}>{c.project_key} · {c.title}</option>)}
         </select>
+        {!id && (
+          <select aria-label="Project" value={projectId ?? ""} onChange={(e) => setPicked(e.target.value)}>
+            {tracker?.projects.map((p) => <option key={p.id} value={p.id}>{p.key}</option>)}
+          </select>
+        )}
         <button className="icon-btn" aria-label="New chat" title="New chat" onClick={() => pick(null)}><Icon name="plus" /></button>
         <button className="icon-btn" aria-label="Close chat" title="Close (⌘J)" onClick={close}><Icon name="x" /></button>
       </header>
@@ -270,8 +278,8 @@ function ProposalCard({ p, go, changed }: { p: Proposal; go: (to: string) => voi
           <button className="btn" disabled={working} onClick={() => file(true)}>File and run</button>
           <button className="btn primary" disabled={working} onClick={() => file(false)}>File</button>
         </div>
-      ) : p.status === "filed" && p.ticket_number !== null ? (
-        <p className="muted">Filed as <a href={`/t/${p.ticket_number}`} onClick={(e) => (e.preventDefault(), go(`/t/${p.ticket_number}`))}>{p.ticket_key}</a></p>
+      ) : p.status === "filed" && p.ticket_key !== null ? (
+        <p className="muted">Filed as <a href={`/t/${p.ticket_key}`} onClick={(e) => (e.preventDefault(), go(`/t/${p.ticket_key}`))}>{p.ticket_key}</a></p>
       ) : null}
     </article>
   );

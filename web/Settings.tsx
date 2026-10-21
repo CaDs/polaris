@@ -2,11 +2,10 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Providers } from "./Providers.tsx";
 import { LabelSettings } from "./tracker.tsx";
 import { Caps, type Usage } from "./Usage.tsx";
-import { Alert, Loading, ModelPicker, api, useApi, useProviders } from "./ui.tsx";
+import { Alert, Loading, ModelPicker, PALETTES, api, useApi, useAppearance, useProviders } from "./ui.tsx";
 
 type WorkspaceSettings = {
-  repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
-  compact_at_tokens: number; configured: boolean; updated_at?: number; default_provider_id: string | null; default_model: string | null;
+  compact_at_tokens: number; updated_at?: number; default_provider_id: string | null; default_model: string | null;
   auto_approve_children: number; model_review: number; auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 } & Record<`${Phase}_provider_id` | `${Phase}_model`, string | null>;
@@ -19,10 +18,11 @@ const PHASES = [
 ] as const;
 type Phase = (typeof PHASES)[number][0];
 
-// One page per concern, in setup order: the repository first (every other tab needs it saved), then models.
-const TABS = [["general", "General"], ["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"]] as const;
+// One page per concern, in setup order; Appearance is the caller's own. A project's repository and commands are on its
+// Overview page.
+const TABS = [["models", "Models"], ["automation", "Automation"], ["limits", "Limits"], ["labels", "Labels"], ["appearance", "Appearance"]] as const;
 
-export function Settings({ tab = "general", go }: { tab?: string; go: (to: string) => void }) {
+export function Settings({ tab = "models", go }: { tab?: string; go: (to: string) => void }) {
   const [s, setS] = useState<WorkspaceSettings | null>(null);
   const [error, setError] = useState("");
   useEffect(() => void api<WorkspaceSettings>("/api/settings").then(setS, (e) => setError(e.message)), []);
@@ -30,22 +30,20 @@ export function Settings({ tab = "general", go }: { tab?: string; go: (to: strin
     <a key={to} href={to} className={active ? "active" : undefined} aria-current={active ? "page" : undefined} onClick={(e) => (e.preventDefault(), go(to))}>{label}</a>
   );
   if (!s) return <Loading error={error} />;
-  const needsRepo = !s.configured && tab !== "general" && tab !== "labels";
   return (
     <div className="settings">
       <nav className="tabs" aria-label="Settings sections">{TABS.map(([t, label]) => link(`/settings/${t}`, label, t === tab))}</nav>
       <div key={tab}>
-        {tab === "models" && <ModelsTab s={s} saved={setS} />}
-        {needsRepo ? (
-          <p className="muted">Set up the repository on the {link("/settings/general", "General")} tab first; the settings here are saved with it.</p>
+        {tab === "models" ? (
+          <ModelsTab s={s} saved={setS} />
         ) : tab === "automation" ? (
           <AutomationTab s={s} saved={setS} />
         ) : tab === "limits" ? (
           <LimitsTab s={s} saved={setS} go={go} />
         ) : tab === "labels" ? (
           <LabelSettings />
-        ) : tab === "general" ? (
-          <GeneralTab s={s} saved={setS} />
+        ) : tab === "appearance" ? (
+          <AppearanceTab />
         ) : null}
       </div>
     </div>
@@ -74,62 +72,18 @@ function Form({ s, saved, also, children }: { s: WorkspaceSettings; saved: (s: W
   }
   return (
     <form onSubmit={submit}>
-      {/* key: re-mount after a save so server-filled values (e.g. the default base branch) show up */}
+      {/* key: re-mount after a save so server-normalized values show up */}
       <div key={s.updated_at ?? 0}>{children}</div>
       <Alert error={error} />
       <div className="row">
         <button className="btn primary">Save settings</button>
         {ok && <span className="muted" role="status">Saved</span>}
-        {!s.configured && !ok && <span className="muted">Not configured yet — agents can't run until this is saved.</span>}
       </div>
     </form>
   );
 }
 
 type Tab = { s: WorkspaceSettings; saved: (s: WorkspaceSettings) => void };
-
-function GeneralTab({ s, saved }: Tab) {
-  return (
-    <Form s={s} saved={saved}>
-      <h2>Repository</h2>
-      <p className="muted">Each run gets its own branch and git worktree of this repository, and works in a Docker sandbox.</p>
-      <label>
-        Repository path
-        <input name="repo_path" defaultValue={s.repo_path} placeholder="/Users/me/code/project" required spellCheck={false} />
-        <span className="hint">Absolute path on the server to the root of a git repository.</span>
-      </label>
-      <label>
-        Base branch
-        <input name="base_branch" defaultValue={s.base_branch} placeholder="Current branch" spellCheck={false} />
-        <span className="hint">Runs branch from it; approved changes are merged into it.</span>
-      </label>
-      <h2>Commands</h2>
-      <label>
-        Setup command
-        <input name="setup_command" className="mono" defaultValue={s.setup_command} spellCheck={false} />
-        <span className="hint">Runs in the sandbox before the agent starts. Leave empty to skip.</span>
-      </label>
-      <label>
-        Test command
-        <input name="test_command" className="mono" defaultValue={s.test_command} spellCheck={false} />
-        <span className="hint">The gate: a run passes only if this exits 0. Failures are retried up to 3 attempts.</span>
-      </label>
-      <details className="advanced">
-        <summary>Advanced</summary>
-        <label>
-          Protected paths
-          <input name="protected_paths" className="mono" defaultValue={s.protected_paths} spellCheck={false} />
-          <span className="hint">Comma-separated, read-only to agents. Changes there fail the run.</span>
-        </label>
-        <label>
-          Sandbox image
-          <input name="image" className="mono" defaultValue={s.image} spellCheck={false} />
-          <span className="hint">The default image is built automatically on first use.</span>
-        </label>
-      </details>
-    </Form>
-  );
-}
 
 // Providers save from their own dialogs; the model choices below them save with the tab's form.
 function ModelsTab({ s, saved }: Tab) {
@@ -145,36 +99,34 @@ function ModelsTab({ s, saved }: Tab) {
   return (
     <>
       <Providers providers={providers} reload={reload} />
-      {s.configured && (
-        <Form s={s} saved={saved} also={also}>
-          <h2>Default model</h2>
-          <p className="muted">Used by tickets that don't pick their own. Without one, the server falls back to its environment (ANTHROPIC_API_KEY …).</p>
-          <div className="row">{providers && <ModelPicker providers={providers} prefix="Default " {...pick} onChange={setPick} />}</div>
-          <h2>Review</h2>
-          <label className="check">
-            <input type="checkbox" name="model_review" checked={review} onChange={(e) => setReview(e.target.checked)} /> Model review before human review
-          </label>
-          <span className="hint">
-            After the tests pass, a model reviews the change; its findings go back to the agent to fix (up to 3 rounds) before you see it.
-            Costs extra tokens per run. If the reviewer itself fails, the change goes to you anyway.
-          </span>
-          {review && (
-            <>
-              <h2>Reviewer model</h2>
-              <p className="muted">"Default" means the model the run itself used; a stronger or cheaper model is the usual pick.</p>
-              <div className="row">{providers && <ModelPicker providers={providers} prefix="Reviewer " {...reviewer} onChange={setReviewer} />}</div>
-            </>
-          )}
-          <h2>Models per phase</h2>
-          <p className="muted">Give a phase its own model, e.g. a smaller local model for chat and the wiki and your strongest one for the worker.</p>
-          {PHASES.map(([p, name, hint]) => (
-            <div key={p}>
-              <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
-              <span className="hint">{hint}</span>
-            </div>
-          ))}
-        </Form>
-      )}
+      <Form s={s} saved={saved} also={also}>
+        <h2>Default model</h2>
+        <p className="muted">Used by tickets that don't pick their own. Without one, the server falls back to its environment (ANTHROPIC_API_KEY …).</p>
+        <div className="row">{providers && <ModelPicker providers={providers} prefix="Default " {...pick} onChange={setPick} />}</div>
+        <h2>Review</h2>
+        <label className="check">
+          <input type="checkbox" name="model_review" checked={review} onChange={(e) => setReview(e.target.checked)} /> Model review before human review
+        </label>
+        <span className="hint">
+          After the tests pass, a model reviews the change; its findings go back to the agent to fix (up to 3 rounds) before you see it.
+          Costs extra tokens per run. If the reviewer itself fails, the change goes to you anyway.
+        </span>
+        {review && (
+          <>
+            <h2>Reviewer model</h2>
+            <p className="muted">"Default" means the model the run itself used; a stronger or cheaper model is the usual pick.</p>
+            <div className="row">{providers && <ModelPicker providers={providers} prefix="Reviewer " {...reviewer} onChange={setReviewer} />}</div>
+          </>
+        )}
+        <h2>Models per phase</h2>
+        <p className="muted">Give a phase its own model, e.g. a smaller local model for chat and the wiki and your strongest one for the worker.</p>
+        {PHASES.map(([p, name, hint]) => (
+          <div key={p}>
+            <div className="row"><strong className="phase-name">{name}</strong>{providers && <ModelPicker providers={providers} prefix={`${name} `} {...phases[p]} onChange={(v) => setPhases({ ...phases, [p]: v })} />}</div>
+            <span className="hint">{hint}</span>
+          </div>
+        ))}
+      </Form>
     </>
   );
 }
@@ -268,5 +220,39 @@ function LimitsTab({ s, saved, go }: Tab & { go: (to: string) => void }) {
         <span className="hint">A run summarizes and starts a fresh conversation when its context passes this, or 70% of the provider's context window if that is lower.</span>
       </label>
     </Form>
+  );
+}
+
+// Yours alone, in every workspace and browser: saved on the server the moment you pick. Each card previews its palette
+// (data-palette scopes the tokens to the card) in the current light or dark mode.
+function AppearanceTab() {
+  const { appearance, set } = useAppearance();
+  return (
+    <section aria-label="Appearance">
+      <h2>Mode</h2>
+      <span className="seg" role="group" aria-label="Mode">
+        {(["system", "light", "dark"] as const).map((m) => (
+          <button key={m} aria-pressed={appearance.mode === m} onClick={() => set({ mode: m })}>{m[0].toUpperCase() + m.slice(1)}</button>
+        ))}
+      </span>
+      <h2>Palette</h2>
+      <p className="muted">Only for you; everyone in the workspace picks their own.</p>
+      <div className="palettes" role="radiogroup" aria-label="Palette">
+        {PALETTES.map((p) => (
+          <button key={p.id} role="radio" aria-checked={appearance.palette === p.id} className="palette-card" data-palette={p.id} onClick={() => set({ palette: p.id })}>
+            <span className="pc-preview" aria-hidden="true">
+              <span className="pc-side"><i /><i /><i /></span>
+              <span className="pc-main">
+                <span className="pc-row"><i className="s-running" /><i className="s-review" /><i className="s-done" /><i className="s-failed" /></span>
+                <span className="pc-card" /><span className="pc-card" />
+                <span className="pc-btn" />
+              </span>
+            </span>
+            <span className="pc-name">{p.name}</span>
+            <span className="pc-hint">{p.hint}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }

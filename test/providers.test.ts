@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // M4: encrypted provider secrets, provider API, provider/model choice per ticket and per retry.
 process.env.POLARIS_RETRY_BASE_MS = "1"; // a dead provider is retried 4 times: don't wait seconds
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, listen, reply, tempRepo, until, user } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, listen, reply, tempRepo, until, user } = await import("./helpers.ts");
 const { encrypt, decrypt, SecretKeyError } = await import("../server/secrets.ts");
 
 const alice = await user("alice");
@@ -81,7 +81,7 @@ test("provider API never returns secrets, validates input, and is isolated per w
   for (const [m, p] of [["PATCH", ""], ["DELETE", ""], ["GET", "/models"], ["POST", "/test"], ["POST", "/oauth/start"]])
     assert.equal((await call(m, `/api/providers/${id}${p}`, bob, m === "PATCH" ? { name: "x" } : undefined)).status, 404, `${m} ${p}`);
   // ...and cannot point tickets or defaults at them.
-  assert.equal((await call("POST", "/api/tickets", bob, { title: "t", provider_id: id })).status, 400);
+  assert.equal((await fileTicket(bob, { title: "t", provider_id: id })).status, 400);
   assert.equal((await call("PUT", "/api/settings/default-provider", bob, { provider_id: id })).status, 400);
   assert.equal((await call("DELETE", `/api/providers/${id}`, alice)).status, 204);
   assert.equal((await call("GET", `/api/providers/${id}/models`, alice)).status, 404);
@@ -117,7 +117,7 @@ test("models and the tool-calling smoke test", async () => {
 });
 
 test("runs record the chosen provider/model; retry-with picks another; gate retries keep it", async () => {
-  assert.equal((await call("PUT", "/api/settings", alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f ok.txt" })).status, 200);
+  assert.equal((await configure(alice, { repo_path: tempRepo(), setup_command: "", test_command: "test -f ok.txt" })).status, 200);
   const providers = (await call("GET", "/api/providers", alice)).body;
   const local = providers.find((p: any) => p.name === "Ollama").id;
   const claude = providers.find((p: any) => p.name === "C").id;
@@ -130,7 +130,7 @@ test("runs record the chosen provider/model; retry-with picks another; gate retr
 
   ollama.models_seen.length = 0;
   // Ticket-level choice. Attempt 1 fails the gate (ok.txt missing), the automatic retry keeps provider and model.
-  const t = (await call("POST", "/api/tickets", alice, { title: "pick", spec: "do it", provider_id: local, model: "mock-a" })).body;
+  const t = (await fileTicket(alice, { title: "pick", spec: "do it", provider_id: local, model: "mock-a" })).body;
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, alice)).status, 201);
   const done = await waitRuns(t.id, 2, "review");
   assert.deepEqual(done.runs.map((r: any) => [r.provider_id, r.model, r.status]), [[local, "mock-a", "failed"], [local, "mock-a", "passed"]]);
@@ -146,7 +146,7 @@ test("runs record the chosen provider/model; retry-with picks another; gate retr
   // Workspace default applies to tickets without a choice of their own; the ticket's choice wins over it.
   assert.equal((await call("PUT", "/api/settings/default-provider", alice, { provider_id: local, model: "mock-b" })).body.default_model, "mock-b");
   assert.equal((await call("GET", "/api/settings", alice)).body.default_provider_id, local);
-  const t2 = (await call("POST", "/api/tickets", alice, { title: "default", spec: "x" })).body;
+  const t2 = (await fileTicket(alice, { title: "default", spec: "x" })).body;
   await call("POST", `/api/tickets/${t2.id}/runs`, alice);
   const r2 = await waitRuns(t2.id, 2, "review");
   assert.deepEqual(r2.runs.map((r: any) => [r.provider_id, r.model]), [[local, "mock-b"], [local, "mock-b"]]);
@@ -155,7 +155,7 @@ test("runs record the chosen provider/model; retry-with picks another; gate retr
   assert.equal((await waitRuns(t2.id, 4, "review")).runs[2].model, "mock-a");
 
   // A provider without a model (non-Anthropic) is refused with a clear message; deleting a provider falls back.
-  const t3 = (await call("POST", "/api/tickets", alice, { title: "nomodel", provider_id: claude })).body;
+  const t3 = (await fileTicket(alice, { title: "nomodel", provider_id: claude })).body;
   assert.equal((await call("PATCH", `/api/tickets/${t3.id}`, alice, { provider_id: local, model: null })).body.model, null);
   assert.equal((await call("PUT", "/api/settings/default-provider", alice, { provider_id: null, model: null })).status, 200);
   const none = await call("POST", `/api/tickets/${t3.id}/runs`, alice);

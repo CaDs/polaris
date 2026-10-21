@@ -20,11 +20,11 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
 
   const column = (name: string) => page.getByRole("region", { name, exact: true });
   await expect(column("todo").getByRole("button")).toHaveCount(2);
-  await expect(column("todo")).toContainText("HOM-2");
+  await expect(column("todo")).toContainText("APP-2");
 
   // Edit the first ticket's title, then run the agent and watch the transcript stream.
   await column("todo").getByRole("button", { name: /First ticket/ }).click();
-  await expect(page).toHaveURL(/\/t\/1$/);
+  await expect(page).toHaveURL(/\/t\/APP-1$/);
   await page.getByLabel("Title").fill("First ticket edited");
   await page.getByLabel("Title").blur();
   await page.getByRole("button", { name: "Run agent" }).click();
@@ -42,8 +42,8 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   const bell = page.getByRole("button", { name: /^Notifications/ });
   await expect(bell).toHaveAccessibleName("Notifications (1 unread)");
   await bell.click();
-  await page.getByRole("button", { name: "HOM-1 is ready for review" }).click();
-  await expect(page).toHaveURL(/\/t\/1$/);
+  await page.getByRole("button", { name: "APP-1 is ready for review" }).click();
+  await expect(page).toHaveURL(/\/t\/APP-1$/);
   await expect(bell).toHaveAccessibleName("Notifications");
   await page.getByLabel("New comment").fill("Looks good, merging after lunch.");
   await page.getByRole("button", { name: "Comment", exact: true }).click();
@@ -77,14 +77,31 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
   await page.getByRole("button", { name: "Account" }).click();
   await page.getByRole("button", { name: "Dark", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(0, 0, 0)");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(10, 15, 29)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(0, 0, 0)");
   await page.getByRole("button", { name: "Account" }).click();
   await page.getByRole("button", { name: "Light", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(255, 255, 255)");
+
+  // Palette (Settings → Appearance): saved for the user on the server, so a browser without the local copy gets it back
+  // (the mode too: still light).
+  const ticketPage = page.url();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("link", { name: "Appearance", exact: true }).click();
+  await page.getByRole("radio", { name: /Stone & Ink/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-palette", "stone");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(251, 250, 248)");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-palette", "stone");
+  await expect(page.getByRole("radio", { name: /Stone & Ink/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("radio", { name: /Black \+ Blue/ }).click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-palette", /./);
+  await page.goto(ticketPage);
 
   // Delete through the in-app confirm.
   await page.getByRole("button", { name: "More actions" }).click();

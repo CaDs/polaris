@@ -7,14 +7,14 @@ import { join } from "node:path";
 
 // M8 model review, with the demo provider playing worker and reviewer.
 process.env.POLARIS_PROVIDER = "fake";
-const { call, db, tempRepo, until, user, waitFor } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, tempRepo, until, user, waitFor } = await import("./helpers.ts");
 
 const me = await user("mr");
 const repo = tempRepo();
 const settings = { repo_path: repo, setup_command: "", test_command: "test -f notes.txt" };
 
 async function ticketRun(title: string) {
-  const t = (await call("POST", "/api/tickets", me, { title })).body;
+  const t = (await fileTicket(me, { title })).body;
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, me)).status, 201);
   return until("review or failed", async () => {
     const ticket = (await call("GET", `/api/tickets/${t.id}`, me)).body;
@@ -27,11 +27,11 @@ const reviews = (ticketId: string) =>
 
 test("settings: model_review defaults on, round-trips, and is unchanged when omitted", async () => {
   assert.equal((await call("GET", "/api/settings", me)).body.model_review, 1);
-  assert.equal((await call("PUT", "/api/settings", me, { ...settings, model_review: false })).body.model_review, 0);
+  assert.equal((await configure(me, { ...settings, model_review: false })).body.model_review, 0);
   assert.equal((await call("GET", "/api/settings", me)).body.model_review, 0);
-  assert.equal((await call("PUT", "/api/settings", me, settings)).body.model_review, 0); // omitted = unchanged
-  assert.equal((await call("PUT", "/api/settings", me, { ...settings, model_review: "on" })).body.model_review, 1);
-  assert.equal((await call("PUT", "/api/settings", me, settings)).body.model_review, 1);
+  assert.equal((await configure(me, settings)).body.model_review, 0); // omitted = unchanged
+  assert.equal((await configure(me, { ...settings, model_review: "on" })).body.model_review, 1);
+  assert.equal((await configure(me, settings)).body.model_review, 1);
 });
 
 test("on by default: a normal ticket gets one approving review, its usage counted in the run", async () => {
@@ -69,15 +69,15 @@ test("REVIEW-WRITES: files the reviewer writes are undone and never committed", 
 });
 
 test("model_review off: no review events", async () => {
-  await call("PUT", "/api/settings", me, { ...settings, model_review: false });
+  await configure(me, { ...settings, model_review: false });
   const t = await ticketRun("no review");
   assert.equal(t.status, "review");
   assert.equal(reviews(t.id).length, 0);
 });
 
 test("a retry is told why the previous attempt really failed: a gate failure after a review fix round is not a review failure", async () => {
-  await call("PUT", "/api/settings", me, { ...settings, model_review: true, auto_split: false });
-  const t = (await call("POST", "/api/tickets", me, { title: "REVIEW-ONCE then the gate breaks", test_command: "test ! -f fixed.txt" })).body;
+  await configure(me, { ...settings, model_review: true, auto_split: false });
+  const t = (await fileTicket(me, { title: "REVIEW-ONCE then the gate breaks", test_command: "test ! -f fixed.txt" })).body;
   await call("POST", `/api/tickets/${t.id}/runs`, me);
   const ticket = await waitFor(me, t.id, "failed");
   assert.equal(ticket.runs.length, 3);
@@ -104,7 +104,7 @@ test("snapshot leaves the index alone: the reviewer's git diff shows the change,
 });
 
 test("the reviewer sees the worker's new file as untracked", async () => {
-  await call("PUT", "/api/settings", me, { ...settings, model_review: true });
+  await configure(me, { ...settings, model_review: true });
   const t = await ticketRun("untracked check");
   const id = t.runs[0].id;
   const results = (db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'tool_result' AND seq > (SELECT seq FROM events WHERE run_id = ? AND type = 'model_review_started')").all(id, id) as { payload: string }[]).map((e) => JSON.parse(e.payload).content);
@@ -112,7 +112,7 @@ test("the reviewer sees the worker's new file as untracked", async () => {
 });
 
 test("a workspace reviewer model: the review runs on it, the transcript names it, its tokens are priced at its own rates", async () => {
-  await call("PUT", "/api/settings", me, { ...settings, model_review: true });
+  await configure(me, { ...settings, model_review: true });
   assert.equal((await call("PUT", "/api/settings/review-provider", me, { provider_id: "nope" })).status, 400);
   const saved = await call("PUT", "/api/settings/review-provider", me, { model: "claude-sonnet-5-5" }); // env provider (the demo here) with that model
   assert.equal(saved.status, 200);

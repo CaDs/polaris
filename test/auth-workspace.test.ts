@@ -17,7 +17,8 @@ test("api requires a session", async () => {
 test("tickets are scoped to the active workspace", async () => {
   const a = await userWithWorkspace("alice");
   const b = await userWithWorkspace("bob");
-  db.prepare("INSERT INTO tickets (id, workspace_id, title) VALUES ('t1', ?, 'only alice sees this')").run(a.workspaceId);
+  db.prepare("INSERT INTO projects (id, workspace_id, key, name, repo_path, base_branch) VALUES ('p1', ?, 'ALI', 'alice', '/', 'main')").run(a.workspaceId);
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title) VALUES ('t1', ?, 'p1', 'only alice sees this')").run(a.workspaceId);
 
   const seen = async (u: { cookie: string }) => {
     const r = await call("GET", "/api/tickets", u.cookie);

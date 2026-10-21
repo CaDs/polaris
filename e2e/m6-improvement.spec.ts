@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { git, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { git, more, newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
 
 test("M6: reflection → lessons, eval case from an approved ticket, eval-gated prompt promotion", async ({ page }) => {
   test.setTimeout(240_000);
@@ -26,14 +26,14 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 60_000 });
 
   // Lessons written by the reflection, with history.
-  await page.getByRole("link", { name: "Learning" }).click();
+  await more(page, "Learning");
   const lessons = page.getByRole("textbox", { name: "Lessons" });
-  await expect(lessons).toHaveValue("- IMP-1 Make ok file: passed");
+  await expect(lessons).toHaveValue("- APP-1 Make ok file: passed");
   const history = page.getByRole("list", { name: "Lessons history" });
-  await expect(history.getByRole("listitem", { name: "Lessons v1" })).toContainText("reflection on IMP-1 (run #2)");
+  await expect(history.getByRole("listitem", { name: "Lessons v1" })).toContainText("reflection on APP-1 (run #2)");
 
   // Human edit → v2 (diff shows the added line), then Restore v1 → v3.
-  await lessons.fill("- IMP-1 Make ok file: passed\n- Run the tests before finishing");
+  await lessons.fill("- APP-1 Make ok file: passed\n- Run the tests before finishing");
   await page.getByRole("button", { name: "Save lessons" }).click();
   const v2l = history.getByRole("listitem", { name: "Lessons v2" });
   await expect(v2l).toContainText("edited by");
@@ -41,7 +41,7 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await expect(v2l.locator(".add")).toHaveText("+- Run the tests before finishing");
   await history.getByRole("listitem", { name: "Lessons v1" }).getByRole("button", { name: "Restore" }).click();
   await expect(history.getByRole("listitem", { name: "Lessons v3" })).toContainText("restore of v1");
-  await expect(lessons).toHaveValue("- IMP-1 Make ok file: passed");
+  await expect(lessons).toHaveValue("- APP-1 Make ok file: passed");
 
   // Eval of the active v1: the demo agent does not create ok.txt on a first attempt → 0/1.
   const v1 = page.getByRole("article", { name: "Prompt v1" });
@@ -93,7 +93,7 @@ test("M12: failure classes on the Improvement page; Mine failures drafts a ticke
     await expect(page.getByLabel("Status")).toHaveValue("review", { timeout: 90_000 });
   }
 
-  await page.getByRole("link", { name: "Learning" }).click();
+  await more(page, "Learning");
   const stuck = page.getByRole("table", { name: "Failure classes" }).getByRole("row", { name: "stuck", exact: true });
   await expect(stuck).toContainText("the stuck monitor stopped the attempt");
   await expect(stuck.getByRole("cell").nth(1)).toHaveText("2");
@@ -102,14 +102,14 @@ test("M12: failure classes on the Improvement page; Mine failures drafts a ticke
 
   await page.getByRole("button", { name: "Mine failures" }).click();
   const result = page.getByRole("list", { name: "Mining result" });
-  await expect(result).toContainText("Created MIN-3 Stop stuck failures");
-  await expect(stuck).toContainText("mined: MIN-3");
+  await expect(result).toContainText("Created APP-3 Stop stuck failures");
+  await expect(stuck).toContainText("mined: APP-3");
 
   // A second click skips the class: its mined ticket is still open.
   await page.getByRole("button", { name: "Mine failures" }).click();
-  await expect(result).toContainText("Skipped stuck: MIN-3 is still open");
+  await expect(result).toContainText("Skipped stuck: APP-3 is still open");
 
-  await stuck.getByRole("button", { name: "MIN-3" }).click();
+  await stuck.getByRole("button", { name: "APP-3" }).click();
   await expect(page.getByText("mined from stuck")).toBeVisible();
   await expect(page.getByLabel("Status")).toHaveValue("todo");
   await expect(page.getByLabel("Spec")).toHaveValue(/## Mined from failures\n\nClass `stuck`/);

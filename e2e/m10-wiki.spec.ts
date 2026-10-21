@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { newTicket, openTicket, saveSettings, signUp, tempRepo } from "./helpers.ts";
+import { newTicket, openTicket, saveSettings, settingsTab, signUp, tempRepo } from "./helpers.ts";
 
 test("M10: approving a ticket ingests it into the wiki; the next run's first message carries the index", async ({ page }) => {
   test.setTimeout(240_000);
@@ -7,7 +7,7 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   await signUp(page, "Wikis");
 
   await saveSettings(page, repo, "test -f notes.txt");
-  await page.getByRole("link", { name: "Automation" }).click();
+  await settingsTab(page, "Automation");
   await expect(page.getByLabel("Keep a project wiki")).toBeChecked();
 
   // Creates the ticket from the board and runs it to review.
@@ -34,8 +34,8 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
   const index = page.getByRole("region", { name: "Index" });
   await expect(index.getByRole("button", { name: "Demo module" })).toBeVisible({ timeout: 60_000 });
   await expect(index).not.toContainText("may be stale");
-  await expect(page.getByRole("region", { name: "History" })).toContainText(/ingest WIK-1: Add notes \(merge [0-9a-f]{8}\)/);
-  await page.getByRole("region", { name: "History" }).getByRole("button", { name: /ingest WIK-1/ }).click();
+  await expect(page.getByRole("region", { name: "History" })).toContainText(/ingest APP-1: Add notes \(merge [0-9a-f]{8}\)/);
+  await page.getByRole("region", { name: "History" }).getByRole("button", { name: /ingest APP-1/ }).click();
   await expect(page.getByRole("region", { name: "History" })).toContainText("+title: Demo module");
 
   await index.getByRole("button", { name: "Demo module" }).click();
@@ -58,8 +58,10 @@ test("M10: approving a ticket ingests it into the wiki; the next run's first mes
 
   // A page that changed while it was open (an ingest, another tab) is refused inline, with a reload.
   await view.getByRole("button", { name: "Edit" }).click();
-  const latest = (await (await page.request.get("/api/wiki/page?path=modules/demo.md")).json()).body;
-  expect((await page.request.put("/api/wiki/page", { data: { path: "modules/demo.md", body: `${latest}\nA line from elsewhere.` } })).ok()).toBe(true);
+  const [project] = await (await page.request.get("/api/projects")).json();
+  const wiki = `/api/projects/${project.id}/wiki`;
+  const latest = (await (await page.request.get(`${wiki}/page?path=modules/demo.md`)).json()).body;
+  expect((await page.request.put(`${wiki}/page`, { data: { path: "modules/demo.md", body: `${latest}\nA line from elsewhere.` } })).ok()).toBe(true);
   await view.getByLabel("Page text").fill(`${latest}\nMy stale line.`);
   await view.getByRole("button", { name: "Save" }).click();
   await expect(view.getByRole("alert")).toHaveText("modules/demo.md changed since you opened it: reload it and edit again");

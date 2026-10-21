@@ -47,10 +47,10 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
   // while a run is queued or running. Running and review otherwise belong to Run, Cancel, Approve and Reject.
   const active = ticket.run_status === "queued" || ticket.run_status === "running";
   const moves = active ? [] : ticket.status === "review" ? ["todo"] : MANUAL.includes(ticket.status) ? MANUAL.filter((s) => s !== ticket.status) : [];
-  const milestones = t?.projects.find((p) => p.id === ticket.project?.id)?.milestones ?? [];
+  const milestones = t?.projects.find((p) => p.id === ticket.project_id)?.milestones ?? [];
   // Moving between epics by hand: only a todo task without runs (the server enforces the rest of the planner's rules).
   const movable = ticket.kind === "task" && ticket.status === "todo" && !ticket.run_count;
-  const epics = tickets.filter((x) => x.kind === "epic" && (x.id === ticket.parent_id || ((x.status === "todo" || x.status === "running") && x.id !== ticket.id)));
+  const epics = tickets.filter((x) => x.kind === "epic" && x.project_id === ticket.project_id && (x.id === ticket.parent_id || ((x.status === "todo" || x.status === "running") && x.id !== ticket.id)));
   const prop = (name: string, control: React.ReactNode, hint?: string) => (
     <div className="prop">
       <span className="muted" title={hint}>{name}</span>
@@ -84,13 +84,8 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
           {labels && t && <LabelPicker ticket={ticket} all={t.labels} close={() => setLabels(false)} patch={patch} created={reloadTracker} />}
         </span>
       ))}
-      {prop("Project", (
-        <select aria-label="Project" value={ticket.project?.id ?? ""} onChange={(e) => patch({ project_id: e.target.value || null })}>
-          <option value="">No project</option>
-          {t?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      ))}
-      {ticket.project && prop("Milestone", (
+      {prop("Project", <span title="A ticket stays in the project (repository) it was created in">{ticket.project.name}</span>)}
+      {prop("Milestone", (
         <select aria-label="Milestone" value={ticket.milestone?.id ?? ""} onChange={(e) => patch({ milestone_id: e.target.value || null })}>
           <option value="">No milestone</option>
           {milestones.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -99,7 +94,7 @@ export function Properties({ ticket, tickets, reload }: { ticket: Ticket; ticket
       {prop("Cycle", (
         <select aria-label="Cycle" value={ticket.cycle?.id ?? ""} onChange={(e) => patch({ cycle_id: e.target.value || null })}>
           <option value="">No cycle</option>
-          {t?.cycles.map((c) => <option key={c.id} value={c.id}>{cycleName(c)}{c.state === "past" ? "" : ` (${c.state})`}</option>)}
+          {t?.cycles.filter((c) => c.project_id === ticket.project_id).map((c) => <option key={c.id} value={c.id}>{cycleName(c)}{c.state === "past" ? "" : ` (${c.state})`}</option>)}
         </select>
       ))}
       {prop("Estimate", (

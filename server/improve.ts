@@ -87,7 +87,7 @@ export function addPrompt(ws: string, body: string, from: { source: "human" | "p
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const ticketOf = (runId: string) =>
   db.prepare(`SELECT ${ticketKey()} AS key, t.title FROM runs r JOIN tickets t ON t.id = r.ticket_id
-    JOIN organization o ON o.id = t.workspace_id WHERE r.id = ?`).get(runId) as { key: string; title: string };
+    WHERE r.id = ?`).get(runId) as { key: string; title: string };
 
 // One run from its event log: outcome, counts, tool errors (name + class + first line), setup/gate failures with output tails.
 // final: the outcome when run_finished is not logged yet (reflection runs just before it).

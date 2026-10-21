@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // POLARIS_SANDBOX=host (no docker), demo provider (SPLIT-ME, SPLIT-CHILD, EPIC-GATE-FAIL).
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "2";
-const { call, db, events, idle, listen, sh, task, until, workspace } = await import("./helpers.ts");
+const { configure, fileTicket, call, db, events, idle, listen, sh, task, until, workspace } = await import("./helpers.ts");
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { plannerTools } = await import("../server/planner.ts");
 
@@ -120,7 +120,7 @@ test("no escalation at the depth limit (a child of a sub-epic) or with auto_spli
   const deep = await until("failed", async () => (await w.get(c.id)).status === "failed" && w.get(c.id));
   assert.deepEqual([deep.runs.length, deep.escalated_key], [3, null]);
 
-  await call("PUT", "/api/settings", w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", auto_split: false });
+  await configure(w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", auto_split: false });
   const t = await w.create({ title: "Top", spec: "SPLIT-ME" });
   await call("POST", `/api/tickets/${t.id}/runs`, w.cookie);
   const off = await until("failed", async () => (await w.get(t.id)).status === "failed" && w.get(t.id));
@@ -170,7 +170,7 @@ test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error run
     const w = await workspace("tri", { test_command: "true" });
     const p = (await call("POST", "/api/providers", w.cookie, { name: "Local", kind: "ollama", base_url: `${url}/` })).body;
     assert.equal((await call("PUT", "/api/settings/default-provider", w.cookie, { provider_id: p.id, model: "qwen" })).status, 200);
-    await call("PUT", "/api/settings", w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", triage_model: "d1", model_review: false });
+    await configure(w.cookie, { repo_path: w.repo, setup_command: "", test_command: "true", triage_model: "d1", model_review: false });
     // model "demo" on the ticket: its runs use the demo provider, while triage asks the workspace's default Ollama provider.
     const ticket = (title: string, spec = "") => w.create({ title, spec, model: "demo" });
 
@@ -219,12 +219,11 @@ test("escalation: the Split epic copies the ticket's tracker fields; its childre
   const ws = w.ws;
   const me = (db.prepare("SELECT userId FROM member WHERE organizationId = ?").get(ws) as { userId: string }).userId;
   db.prepare("INSERT INTO labels (id, workspace_id, name, color) VALUES ('l1', ?, 'bug', 'red'), ('l2', ?, 'ui', 'blue')").run(ws, ws);
-  db.prepare("INSERT INTO projects (id, workspace_id, name) VALUES ('p1', ?, 'Proj')").run(ws);
-  db.prepare("INSERT INTO milestones (id, project_id, name, position) VALUES ('m1', 'p1', 'Beta', 0)").run();
-  db.prepare("INSERT INTO cycles (id, workspace_id, number, starts_at, ends_at) VALUES ('c1', ?, 1, '2026-01-01', '2026-12-31')").run(ws);
+  db.prepare("INSERT INTO milestones (id, project_id, name, position) VALUES ('m1', ?, 'Beta', 0)").run(w.project.id);
+  db.prepare("INSERT INTO cycles (id, workspace_id, project_id, number, starts_at, ends_at) VALUES ('c1', ?, ?, 1, '2026-01-01', '2026-12-31')").run(ws, w.project.id);
   const t = await w.create({ title: "Tracked", spec: "SPLIT-ME" });
   db.prepare("INSERT INTO ticket_labels (ticket_id, label_id) VALUES (?, 'l1'), (?, 'l2')").run(t.id, t.id);
-  db.prepare("UPDATE tickets SET priority = 2, assignee_id = ?, estimate = 5, due_date = '2026-06-30', project_id = 'p1', milestone_id = 'm1', cycle_id = 'c1', cycle_added_at = 123 WHERE id = ?").run(me, t.id);
+  db.prepare("UPDATE tickets SET priority = 2, assignee_id = ?, estimate = 5, due_date = '2026-06-30', milestone_id = 'm1', cycle_id = 'c1', cycle_added_at = 123 WHERE id = ?").run(me, t.id);
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, w.cookie)).status, 201);
   const failed = await until("escalated", async () => {
     const x = await w.get(t.id);
@@ -235,9 +234,9 @@ test("escalation: the Split epic copies the ticket's tracker fields; its childre
     ...(db.prepare("SELECT priority, assignee_id, estimate, due_date, project_id, milestone_id, cycle_id, cycle_added_at FROM tickets WHERE id = ?").get(id) as Record<string, unknown>),
     labels: (db.prepare("SELECT label_id FROM ticket_labels WHERE ticket_id = ? ORDER BY label_id").all(id) as { label_id: string }[]).map((l) => l.label_id),
   });
-  assert.deepEqual(fields(epic.id), { priority: 2, assignee_id: me, estimate: 5, due_date: "2026-06-30", project_id: "p1", milestone_id: "m1", cycle_id: "c1", cycle_added_at: 123, labels: ["l1", "l2"] });
+  assert.deepEqual(fields(epic.id), { priority: 2, assignee_id: me, estimate: 5, due_date: "2026-06-30", project_id: w.project.id, milestone_id: "m1", cycle_id: "c1", cycle_added_at: 123, labels: ["l1", "l2"] });
   const done = await w.is(epic.id, "review");
   assert.equal(done.children.length, 2);
-  for (const k of done.children) assert.deepEqual([fields(k.id).project_id, fields(k.id).milestone_id, fields(k.id).cycle_id, fields(k.id).priority], ["p1", "m1", "c1", 2]);
+  for (const k of done.children) assert.deepEqual([fields(k.id).project_id, fields(k.id).milestone_id, fields(k.id).cycle_id, fields(k.id).priority], [w.project.id, "m1", "c1", 2]);
   await idle(ws);
 });

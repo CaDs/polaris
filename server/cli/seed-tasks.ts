@@ -1,4 +1,4 @@
-// npm run seed-tasks -- --workspace <slug> [--file tasks.md]
+// npm run seed-tasks -- --workspace <slug> --project <KEY> [--file tasks.md]
 // One ticket per unchecked "- [ ]" item under a "## Mn ..." milestone heading. Title "Mn: <item>", spec = heading + item.
 // Re-running is safe: items whose title already exists as a ticket in the workspace are skipped.
 import { randomUUID } from "node:crypto";
@@ -23,22 +23,24 @@ export function parseTasks(md: string) {
   return items;
 }
 
-export function seedTasks(ws: string, md: string) {
+export function seedTasks(project: { id: string; workspace_id: string }, md: string) {
   let created = 0;
   for (const it of parseTasks(md)) {
-    if (db.prepare("SELECT 1 FROM tickets WHERE workspace_id = ? AND title = ?").get(ws, it.title)) continue;
-    db.prepare("INSERT INTO tickets (id, workspace_id, title, spec) VALUES (?, ?, ?, ?)").run(randomUUID(), ws, it.title, it.spec);
+    if (db.prepare("SELECT 1 FROM tickets WHERE project_id = ? AND title = ?").get(project.id, it.title)) continue;
+    db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title, spec) VALUES (?, ?, ?, ?, ?)").run(randomUUID(), project.workspace_id, project.id, it.title, it.spec);
     created++;
   }
   return created;
 }
 
 if (import.meta.main) {
-  const { values: opt } = parseArgs({ options: { workspace: { type: "string" }, file: { type: "string", default: "tasks.md" } } });
-  if (!opt.workspace) throw new Error("usage: npm run seed-tasks -- --workspace <slug> [--file tasks.md]");
+  const { values: opt } = parseArgs({ options: { workspace: { type: "string" }, project: { type: "string" }, file: { type: "string", default: "tasks.md" } } });
+  if (!opt.workspace || !opt.project) throw new Error("usage: npm run seed-tasks -- --workspace <slug> --project <KEY> [--file tasks.md]");
   migrate();
-  const ws = db.prepare("SELECT id FROM organization WHERE slug = ?").get(opt.workspace) as { id: string } | undefined;
-  if (!ws) throw new Error(`workspace not found: ${opt.workspace}`);
+  const project = db.prepare("SELECT p.id, p.workspace_id FROM projects p JOIN organization o ON o.id = p.workspace_id WHERE o.slug = ? AND p.key = ?").get(opt.workspace, opt.project.toUpperCase()) as
+    | { id: string; workspace_id: string }
+    | undefined;
+  if (!project) throw new Error(`project ${opt.project} not found in workspace ${opt.workspace}`);
   const md = readFileSync(opt.file, "utf8");
-  console.log(`created ${seedTasks(ws.id, md)} of ${parseTasks(md).length} tickets in ${opt.workspace}`);
+  console.log(`created ${seedTasks(project, md)} of ${parseTasks(md).length} tickets in ${opt.workspace} ${opt.project}`);
 }

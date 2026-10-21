@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { List, useTicketList } from "./List.tsx";
 import { Alert, Confirm, DateField, DateInput, Loading, api, useApi, type Ticket } from "./ui.tsx";
-import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type Progress } from "./tracker.tsx";
+import { Bar, ByStatus, cycleName, useTracker, type CycleRef, type ProjectRef, type Progress } from "./tracker.tsx";
 
 type Cycle = CycleRef & { progress: Progress; added_after_start: number };
 const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -15,8 +15,9 @@ function Scope({ c }: { c: Cycle }) {
   );
 }
 
-export function Cycles({ go }: { go: (to: string) => void }) {
-  const { data: cycles, error, setError, reload } = useApi<Cycle[]>("/api/cycles");
+// A project's cycles.
+export function Cycles({ project, go }: { project: ProjectRef; go: (to: string) => void }) {
+  const { data: cycles, error, setError, reload } = useApi<Cycle[]>(`/api/cycles?project=${project.id}`);
   const { reload: reloadTracker } = useTracker();
   // Defaults: two weeks starting the day after the last cycle ends (or today).
   const last = cycles?.at(-1)?.ends_at;
@@ -27,7 +28,7 @@ export function Cycles({ go }: { go: (to: string) => void }) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     try {
-      await api("/api/cycles", "POST", { name: f.get("name"), starts_at: f.get("starts_at"), ends_at: f.get("ends_at") });
+      await api("/api/cycles", "POST", { project_id: project.id, name: f.get("name"), starts_at: f.get("starts_at"), ends_at: f.get("ends_at") });
       setError("");
       reload();
       reloadTracker();
@@ -42,7 +43,7 @@ export function Cycles({ go }: { go: (to: string) => void }) {
         <ul className="plist">
           {list.map((c) => (
             <li key={c.id} className="row">
-              <button className="link" onClick={() => go(`/cycles/${c.id}`)}>{cycleName(c)}</button>
+              <button className="link" onClick={() => go(`/p/${project.key}/cycles/${c.id}`)}>{cycleName(c)}</button>
               {c.name && <span className="muted">Cycle {c.number}</span>}
               <span className="muted mono">{c.starts_at} → {c.ends_at}</span>
               <span className="grow" />
@@ -71,14 +72,14 @@ export function Cycles({ go }: { go: (to: string) => void }) {
   );
 }
 
-// One cycle ("current" = whichever cycle includes today): progress, scope, its tickets, and moving what is unfinished on.
-export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string) => void; open: (n: number) => void; tick: unknown }) {
+// One cycle (id "": the project has no current one): progress, scope, its tickets, and moving what is unfinished on.
+export function CyclePage({ id, project, go, open, tick }: { id: string; project: ProjectRef; go: (to: string) => void; open: (key: string) => void; tick: unknown }) {
   const [c, setC] = useState<Cycle | null | undefined>(undefined);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState(false);
   const { reload: reloadTracker } = useTracker();
-  const reload = useCallback(() => api<Cycle>(`/api/cycles/${id}`).then(setC, () => setC(null)), [id]);
+  const reload = useCallback(() => (id ? api<Cycle>(`/api/cycles/${id}`).then(setC, () => setC(null)) : Promise.resolve(setC(null))), [id]);
   useEffect(() => void reload(), [reload, tick]);
   const tickets = useTicketList(`cycle=${c?.id ?? "none"}`, `${tick}${msg}`);
 
@@ -99,7 +100,7 @@ export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string)
   }
 
   if (c === undefined) return <Loading />;
-  if (c === null) return <p className="muted pad">{id === "current" ? "No cycle includes today. Create one under Cycles." : "Cycle not found."}</p>;
+  if (c === null) return <p className="muted pad">{id ? "Cycle not found." : "No cycle of this project includes today. Create one under Cycles."}</p>;
   const unfinished = c.progress.total - c.progress.done;
   return (
     <div className="page" key={c.id}>
@@ -121,10 +122,10 @@ export function CyclePage({ id, go, open, tick }: { id: string; go: (to: string)
       {msg && <p className="muted">{msg}</p>}
       <Alert error={error} />
       <h3>Tickets</h3>
-      <List tickets={tickets} group="status" open={(t: Ticket) => open(t.number)} />
+      <List tickets={tickets} group="status" open={(t: Ticket) => open(t.key)} />
       {/* call() gives null for the 204 of a delete, undefined when it failed (the error shows here). */}
       {confirming && (
-        <Confirm title="Delete cycle?" onConfirm={() => (setConfirming(false), call(`/api/cycles/${c.id}`, "DELETE").then((r) => r === null && go("/cycles")))} onClose={() => setConfirming(false)}>
+        <Confirm title="Delete cycle?" onConfirm={() => (setConfirming(false), call(`/api/cycles/${c.id}`, "DELETE").then((r) => r === null && go(`/p/${project.key}/cycles`)))} onClose={() => setConfirming(false)}>
           {cycleName(c)} ({c.starts_at} → {c.ends_at}) is deleted. Its {c.progress.total} {c.progress.total === 1 ? "ticket stays" : "tickets stay"}, without a cycle.
         </Confirm>
       )}

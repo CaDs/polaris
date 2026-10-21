@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import type { SQLInputValue } from "node:sqlite";
 import { db } from "./db.ts";
 import { touch } from "./agent/events.ts";
 import { childrenOf, MAX_CHILDREN, openChildren } from "./planner.ts";
+import { inspectRepo } from "./git.ts";
+import { IMAGE_REF, SANDBOX_IMAGE } from "./sandbox.ts";
+import { wikiDir } from "./wiki.ts";
 
 // M11 tracker (see SPEC "Tracker (M11)"): labels, priority, assignee, estimate, due date, projects + milestones, cycles,
 // filters + ranked search over tickets, saved views. Workspace-scoped like everything else: every id a body or a filter
-// names is looked up in the caller's workspace.
+// names is looked up in the caller's workspace. A project is one repository: its tickets (keyed KEY-12), cycles and wiki.
 
 type Env = { Variables: { userId: string; workspaceId: string } };
 export const trackerRoutes = new Hono<Env>();
@@ -19,6 +23,10 @@ const SORTS = ["manual", "priority", "updated", "created", "due"];
 export const STATUSES = ["todo", "running", "review", "done", "failed"]; // ticket status; runs.ts moveTicket has the transitions
 export const KINDS = ["task", "epic"];
 const PROJECT_STATUSES = ["planned", "started", "paused", "completed", "canceled"];
+// A project's ticket key prefix: 2-5 capitals or digits, a capital first.
+const KEY = /^[A-Z][A-Z0-9]{1,4}$/;
+// A project's repository settings when not given (a new project, PATCH with null). The DB columns repeat them.
+export const PROJECT_DEFAULTS: Record<string, string> = { setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE };
 // Query params a filter (and a saved view) may hold. group only matters to the list layout.
 const FILTER_KEYS = ["status", "label", "label_mode", "priority", "assignee", "project", "milestone", "cycle", "kind", "parent", "due_before", "due_after", "q", "group"];
 
@@ -64,13 +72,13 @@ const update = (table: string, rowId: string, v: Record<string, SQLInputValue>) 
 
 // --- ticket fields ---
 
-// SQL for a ticket's key: the first 3 letters of its workspace's slug + its number (POL-12). Needs organization joined as o.
-export const ticketKey = (t = "t") => `upper(substr(o.slug, 1, 3)) || '-' || ${t}.number`;
+// SQL for a ticket's key: its project's key + its number (POL-12).
+export const ticketKey = (t = "t") => `(SELECT k.key FROM projects k WHERE k.id = ${t}.project_id) || '-' || ${t}.number`;
 
 // The tracker's part of ticket JSON. hydrate parses these columns.
 export const TRACKER_COLS = `
     (SELECT json_group_array(json_object('id', l.id, 'name', l.name, 'color', l.color) ORDER BY l.name COLLATE NOCASE) FROM ticket_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.ticket_id = t.id) AS labels,
-    (SELECT json_object('id', p.id, 'name', p.name) FROM projects p WHERE p.id = t.project_id) AS project,
+    (SELECT json_object('id', p.id, 'name', p.name, 'key', p.key) FROM projects p WHERE p.id = t.project_id) AS project,
     (SELECT json_object('id', m.id, 'name', m.name) FROM milestones m WHERE m.id = t.milestone_id) AS milestone,
     (SELECT json_object('id', y.id, 'number', y.number, 'name', y.name) FROM cycles y WHERE y.id = t.cycle_id) AS cycle,
     (SELECT json_object('id', u.id, 'name', u.name, 'email', u.email) FROM user u WHERE u.id = t.assignee_id) AS assignee`;
@@ -85,7 +93,8 @@ export type TrackerFields = {
 };
 type Current = { id: string; kind: string; status: string; run_count: number; parent_id: string | null; project_id: string | null; milestone_id: string | null };
 
-// Validated tracker fields of a ticket body (cur: the ticket being patched; kind: its kind, or the new ticket's).
+// Validated tracker fields of a ticket body (cur: the ticket being patched; kind: its kind, or the new ticket's). A new
+// ticket names its project; it stays there (its branches live in that repo), and its cycle, milestone and epic are of it.
 export const trackerFields = (ws: string, b: Record<string, any>, kind: string, cur?: Current) => orError(() => fields(ws, b, kind, cur));
 function fields(ws: string, b: Record<string, any>, kind: string, cur?: Current) {
   const v: TrackerFields = {};
@@ -94,27 +103,34 @@ function fields(ws: string, b: Record<string, any>, kind: string, cur?: Current)
   if (b.due_date !== undefined) v.due_date = date(b.due_date, "due_date");
   if (b.assignee_id !== undefined)
     v.assignee_id = b.assignee_id === null || isMember(ws, id(b.assignee_id, "assignee_id")) ? b.assignee_id : fail("assignee_id: not a member of this workspace");
-  if (b.project_id !== undefined) v.project_id = b.project_id === null || owned("projects", ws, id(b.project_id, "project_id")) ? b.project_id : fail("project_id: no such project in this workspace");
-  if (b.cycle_id !== undefined) v.cycle_id = b.cycle_id === null || owned("cycles", ws, id(b.cycle_id, "cycle_id")) ? b.cycle_id : fail("cycle_id: no such cycle in this workspace");
-  const projectId = v.project_id !== undefined ? v.project_id : (cur?.project_id ?? null);
+  if (cur) {
+    if (b.project_id !== undefined && b.project_id !== cur.project_id) fail("project_id: a ticket stays in the project it was created in");
+  } else if (b.project_id === undefined || b.project_id === null) fail("project_id is required");
+  else v.project_id = owned("projects", ws, id(b.project_id, "project_id")) ? b.project_id : fail("project_id: no such project in this workspace");
+  const projectId = cur?.project_id ?? v.project_id!;
+  if (b.cycle_id !== undefined && b.cycle_id !== null) {
+    const y = owned("cycles", ws, id(b.cycle_id, "cycle_id")) ?? fail("cycle_id: no such cycle in this workspace");
+    if (y.project_id !== projectId) fail("cycle_id: the cycle belongs to another project than the ticket's");
+  }
+  if (b.cycle_id !== undefined) v.cycle_id = b.cycle_id;
   if (b.milestone_id !== undefined) {
     if (b.milestone_id !== null) {
       const m = milestoneIn(ws, id(b.milestone_id, "milestone_id")) ?? fail("milestone_id: no such milestone in this workspace");
       if (m.project_id !== projectId) fail("milestone_id: the milestone belongs to another project than the ticket's");
     }
     v.milestone_id = b.milestone_id;
-  } else if (cur?.milestone_id && projectId !== cur.project_id) v.milestone_id = null; // a milestone only makes sense inside its project
+  }
   if (b.label_ids !== undefined) {
     if (!Array.isArray(b.label_ids) || b.label_ids.length > 20) fail("label_ids must be an array of at most 20 label ids");
     v.label_ids = [...new Set(b.label_ids.map((l: unknown) => (owned("labels", ws, id(l, "label_ids")) ? (l as string) : fail(`label_ids: no label ${l} in this workspace`))))] as string[];
   }
-  if (b.parent_id !== undefined && b.parent_id !== (cur?.parent_id ?? null)) v.parent_id = parent(ws, b.parent_id, kind, cur);
+  if (b.parent_id !== undefined && b.parent_id !== (cur?.parent_id ?? null)) v.parent_id = parent(ws, b.parent_id, kind, projectId, cur);
   return v;
 }
 
 // Setting a parent epic by hand keeps planner semantics: only a todo task without runs moves (the planner owns the
 // rest), into an open epic with room, and never out of an epic whose other children depend on it or are waiting on it.
-function parent(ws: string, to: unknown, kind: string, cur?: Current) {
+function parent(ws: string, to: unknown, kind: string, projectId: string, cur?: Current) {
   if (kind !== "task" || (cur && (cur.status !== "todo" || cur.run_count))) fail("parent_id: only a todo task without runs can be attached to an epic or detached from one");
   if (cur?.parent_id) {
     const siblings = childrenOf(cur.parent_id);
@@ -124,8 +140,9 @@ function parent(ws: string, to: unknown, kind: string, cur?: Current) {
       fail("parent_id: this is the last open child of a running epic, whose planner would then wait forever");
   }
   if (to === null) return null;
-  const e = db.prepare("SELECT kind, status, hidden FROM tickets WHERE id = ? AND workspace_id = ?").get(id(to, "parent_id"), ws) as { kind: string; status: string; hidden: number } | undefined;
+  const e = db.prepare("SELECT kind, status, hidden, project_id FROM tickets WHERE id = ? AND workspace_id = ?").get(id(to, "parent_id"), ws) as { kind: string; status: string; hidden: number; project_id: string } | undefined;
   if (!e || e.kind !== "epic" || e.hidden) fail("parent_id: no such epic in this workspace");
+  if (e!.project_id !== projectId) fail("parent_id: the epic belongs to another project than the ticket's");
   if (e!.status !== "todo" && e!.status !== "running") fail("parent_id: the epic is not open (todo or running)");
   if (childrenOf(to as string).length >= MAX_CHILDREN) fail(`parent_id: the epic already has ${MAX_CHILDREN} child tickets`);
   return to as string;
@@ -146,16 +163,17 @@ export function applyTracker(ticketId: string, v: TrackerFields) {
   if (Object.keys(set).length || label_ids) update("tickets", ticketId, { ...set, updated_at: Date.now() });
 }
 
-// The ticket header line of a worker's or planner's first message: what the tracker knows that the agent should weigh.
+// The ticket header line of a worker's or planner's first message: what the tracker knows that the agent should weigh (not
+// the project: the repository it works in is the project).
 export function trackerHeader(ticketId: string) {
-  const r = db.prepare(`SELECT t.priority, t.due_date, p.name AS project, m.name AS milestone,
+  const r = db.prepare(`SELECT t.priority, t.due_date, m.name AS milestone,
       (SELECT group_concat(l.name, ', ') FROM ticket_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.ticket_id = t.id) AS labels
-    FROM tickets t LEFT JOIN projects p ON p.id = t.project_id LEFT JOIN milestones m ON m.id = t.milestone_id WHERE t.id = ?`).get(ticketId) as
-    | { priority: number; due_date: string | null; project: string | null; milestone: string | null; labels: string | null }
+    FROM tickets t LEFT JOIN milestones m ON m.id = t.milestone_id WHERE t.id = ?`).get(ticketId) as
+    | { priority: number; due_date: string | null; milestone: string | null; labels: string | null }
     | undefined;
   if (!r) return "";
   return [
-    r.priority && `Priority: ${PRIORITIES[r.priority]}`, r.labels && `Labels: ${r.labels}`, r.project && `Project: ${r.project}${r.milestone ? ` › ${r.milestone}` : ""}`,
+    r.priority && `Priority: ${PRIORITIES[r.priority]}`, r.labels && `Labels: ${r.labels}`, r.milestone && `Milestone: ${r.milestone}`,
     r.due_date && `Due: ${r.due_date}`,
   ].filter(Boolean).join(" · ");
 }
@@ -201,7 +219,7 @@ function query(ws: string, userId: string, q: Record<string, string>) {
   nullable("t.assignee_id", values(q.assignee).map((v) => (v === "me" ? userId : v)));
   nullable("t.project_id", values(q.project));
   nullable("t.milestone_id", values(q.milestone));
-  nullable("t.cycle_id", values(q.cycle).map((v) => (v === "current" ? (currentCycle(ws)?.id ?? "no current cycle") : v)));
+  nullable("t.cycle_id", values(q.cycle).flatMap((v) => (v === "current" ? currentCycles(ws).map((y) => y.id).concat("no current cycle") : [v])));
   nullable("t.parent_id", values(q.parent));
   const labels = values(q.label);
   const mode = q.label_mode ?? "any";
@@ -221,19 +239,19 @@ function query(ws: string, userId: string, q: Record<string, string>) {
   const search = q.q?.trim();
   if (!search) return { where: where.map((w) => ` AND ${w}`).join(""), params, order, orderParams: [] as SQLInputValue[] };
 
-  // Search: "ABC-12" (this workspace's prefix) or "12" also matches that ticket's key and ranks it first; words are
+  // Search: "ABC-12" (a project's key) or "12" (in any project) also matches that ticket and ranks it first; words are
   // prefix-matched over title + spec (FTS5, title weighted 10:1), quoted so no FTS syntax gets through.
-  const slug = (db.prepare("SELECT slug FROM organization WHERE id = ?").get(ws) as { slug: string }).slug;
   const key = /^([\p{L}\p{N}]+)-(\d+)$/u.exec(search);
-  const number = key && key[1].toUpperCase() === slug.slice(0, 3).toUpperCase() ? Number(key[2]) : /^\d+$/.test(search) ? Number(search) : null;
+  const keyed = key && (db.prepare("SELECT id FROM projects WHERE workspace_id = ? AND key = ?").get(ws, key[1].toUpperCase()) as { id: string } | undefined);
+  const exact = keyed ? { sql: "(t.project_id = ? AND t.number = ?)", params: [keyed.id, Number(key![2])] } : /^\d+$/.test(search) ? { sql: "t.number = ?", params: [Number(search)] } : null;
   const match = (search.match(/[\p{L}\p{N}_]+/gu) ?? []).map((w) => `"${w}"*`).join(" ");
-  const either = [match ? "t.rowid IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH ?)" : "", number !== null ? "t.number = ?" : ""].filter(Boolean);
+  const either = [match ? "t.rowid IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH ?)" : "", exact?.sql ?? ""].filter(Boolean);
   where.push(`(${either.join(" OR ") || "0"})`);
-  params.push(...(match ? [match] : []), ...(number !== null ? [number] : []));
+  params.push(...(match ? [match] : []), ...(exact?.params ?? []));
   const rank = match ? "(SELECT bm25(tickets_fts, 10.0, 1.0) FROM tickets_fts WHERE tickets_fts MATCH ? AND rowid = t.rowid), " : "";
   return {
     where: where.map((w) => ` AND ${w}`).join(""), params,
-    order: `t.number IS ? DESC, ${q.sort ? order : `${rank}t.number`}`, orderParams: [number, ...(match && !q.sort ? [match] : [])] as SQLInputValue[],
+    order: `${exact ? `${exact.sql} DESC, ` : ""}${q.sort ? order : `${rank}t.number`}`, orderParams: [...(exact?.params ?? []), ...(match && !q.sort ? [match] : [])] as SQLInputValue[],
   };
 }
 
@@ -250,10 +268,10 @@ trackerRoutes.get("/tracker", (c) => {
     me: c.get("userId"),
     members: members(ws),
     labels: db.prepare("SELECT id, name, color FROM labels WHERE workspace_id = ? ORDER BY name COLLATE NOCASE").all(ws),
-    projects: (db.prepare("SELECT id, name, status FROM projects WHERE workspace_id = ? ORDER BY name COLLATE NOCASE").all(ws) as Record<string, any>[]).map((p) => ({
+    projects: (db.prepare("SELECT id, key, name, status FROM projects WHERE workspace_id = ? ORDER BY name COLLATE NOCASE").all(ws) as Record<string, any>[]).map((p) => ({
       ...p, milestones: milestones.filter((m) => m.project_id === p.id),
     })),
-    cycles: cycles(ws).map(({ id, number, name, starts_at, ends_at, state }) => ({ id, number, name, starts_at, ends_at, state })),
+    cycles: cycles(ws).map(({ id, project_id, number, name, starts_at, ends_at, state }) => ({ id, project_id, number, name, starts_at, ends_at, state })),
   });
 });
 
@@ -288,8 +306,8 @@ trackerRoutes.patch("/labels/:id", async (c) => {
   return c.json(owned("labels", c.get("workspaceId"), cur.id));
 });
 
-// Deleting a label, project, milestone or cycle unsets it on its tickets (FK cascade / SET NULL).
-for (const table of ["labels", "projects", "cycles"] as const)
+// Deleting a label, milestone or cycle unsets it on its tickets (FK cascade / SET NULL). Projects: below.
+for (const table of ["labels", "cycles"] as const)
   trackerRoutes.delete(`/${table}/:id`, (c) => {
     const r = db.prepare(`DELETE FROM ${table} WHERE id = ? AND workspace_id = ?`).run(c.req.param("id"), c.get("workspaceId"));
     return r.changes ? c.body(null, 204) : c.json({ error: "not_found" }, 404);
@@ -317,13 +335,33 @@ function project(ws: string, projectId: string) {
   return { ...p, lead: p.lead ? JSON.parse(p.lead) : null, progress: progress("t.project_id = ?", p.id), milestones };
 }
 
-function projectBody(ws: string, b: Record<string, any>, partial: boolean) {
+// cur: the project being patched. The repository is checked (root of a repo with commits, the base branch exists; an empty
+// base branch = the repo's current branch) whenever it is given, and always for a new project.
+async function projectBody(ws: string, b: Record<string, any>, cur?: Record<string, any>) {
   const v: Record<string, SQLInputValue> = {};
-  if (b.name !== undefined || !partial) v.name = text(b.name, "name", 100);
+  if (b.name !== undefined || !cur) v.name = text(b.name, "name", 100);
+  if (b.key !== undefined || !cur) {
+    const key = typeof b.key === "string" ? b.key.trim().toUpperCase() : "";
+    if (!KEY.test(key)) fail("key must be 2-5 letters or digits, starting with a letter (it prefixes ticket keys, as in KEY-12)");
+    if (db.prepare("SELECT 1 FROM projects WHERE workspace_id = ? AND key = ? AND id <> ?").get(ws, key, cur?.id ?? "")) fail(`another project already has the key ${key}`);
+    v.key = key;
+  }
   if (b.description !== undefined) v.description = typeof b.description === "string" && b.description.length <= 10_000 ? b.description : fail("description must be a string of at most 10000 chars");
   if (b.status !== undefined) v.status = PROJECT_STATUSES.includes(b.status) ? b.status : fail(`status must be one of ${PROJECT_STATUSES.join(", ")}`);
   if (b.lead_id !== undefined) v.lead_id = b.lead_id === null || isMember(ws, id(b.lead_id, "lead_id")) ? b.lead_id : fail("lead_id: not a member of this workspace");
   if (b.target_date !== undefined) v.target_date = date(b.target_date, "target_date");
+  for (const k of Object.keys(PROJECT_DEFAULTS))
+    if (b[k] !== undefined) v[k] = b[k] === null ? PROJECT_DEFAULTS[k] : typeof b[k] === "string" && b[k].length <= 2000 ? b[k].trim() : fail(`${k} must be a string of at most 2000 chars`);
+  if (v.image === "") v.image = PROJECT_DEFAULTS.image;
+  if (v.image !== undefined && !IMAGE_REF.test(v.image as string)) fail("Sandbox image must be a docker image reference such as node:22 or ghcr.io/org/image:tag");
+  if (typeof v.protected_paths === "string" && v.protected_paths.split(",").some((p) => p.trim().startsWith("/") || p.split("/").includes("..")))
+    fail("Protected paths must be relative to the repository root, without ..");
+  if (b.repo_path !== undefined || b.base_branch !== undefined || !cur) {
+    const str = (k: string) => (typeof b[k] === "string" ? b[k].trim() : b[k] === undefined ? (cur?.[k] ?? "") : fail(`${k} must be a string`));
+    const repo = await inspectRepo(str("repo_path"), str("base_branch"));
+    if ("error" in repo) fail(repo.error);
+    Object.assign(v, repo);
+  }
   return v;
 }
 
@@ -333,7 +371,7 @@ trackerRoutes.get("/projects", (c) => {
   return c.json(ids.map((p) => project(ws, p.id)));
 });
 trackerRoutes.post("/projects", async (c) => {
-  const v = projectBody(c.get("workspaceId"), await body(c), false);
+  const v = await projectBody(c.get("workspaceId"), await body(c));
   const projectId = randomUUID();
   insert("projects", { id: projectId, workspace_id: c.get("workspaceId"), ...v });
   return c.json(project(c.get("workspaceId"), projectId), 201);
@@ -345,8 +383,18 @@ trackerRoutes.get("/projects/:id", (c) => {
 trackerRoutes.patch("/projects/:id", async (c) => {
   const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
-  update("projects", cur.id, { ...projectBody(c.get("workspaceId"), await body(c), true), updated_at: Date.now() });
+  update("projects", cur.id, { ...(await projectBody(c.get("workspaceId"), await body(c), cur)), updated_at: Date.now() });
   return c.json(project(c.get("workspaceId"), cur.id));
+});
+// Only an empty project goes (its tickets' branches and runs would go with it): move on by deleting its tickets first.
+trackerRoutes.delete("/projects/:id", (c) => {
+  const cur = owned("projects", c.get("workspaceId"), c.req.param("id"));
+  if (!cur) return c.json({ error: "not_found" }, 404);
+  if (db.prepare("SELECT 1 FROM tickets WHERE project_id = ? AND hidden = 0").get(cur.id)) fail("delete the project's tickets first");
+  if (db.prepare("SELECT 1 FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE t.project_id = ? AND r.status IN ('queued', 'running')").get(cur.id)) fail("a wiki run of this project is in flight: wait for it or cancel it");
+  db.prepare("DELETE FROM projects WHERE id = ?").run(cur.id);
+  rmSync(wikiDir(cur.id), { recursive: true, force: true });
+  return c.body(null, 204);
 });
 
 trackerRoutes.post("/projects/:id/milestones", async (c) => {
@@ -385,10 +433,11 @@ trackerRoutes.delete("/milestones/:id", (c) => {
 
 // --- cycles ---
 
-type Cycle = { id: string; workspace_id: string; number: number; name: string; starts_at: string; ends_at: string };
+type Cycle = { id: string; workspace_id: string; project_id: string; number: number; name: string; starts_at: string; ends_at: string };
 const stateOf = (y: Cycle, now = today()) => (y.starts_at > now ? "upcoming" : y.ends_at < now ? "past" : "current");
-const currentCycle = (ws: string) =>
-  db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND starts_at <= ? AND ends_at >= ?").get(ws, today(), today()) as Cycle | undefined;
+// The current cycle of each project (at most one: a project's cycles never overlap).
+const currentCycles = (ws: string, projectId?: string) =>
+  db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND (? IS NULL OR project_id = ?) AND starts_at <= ? AND ends_at >= ?").all(ws, projectId ?? null, projectId ?? null, today(), today()) as Cycle[];
 
 // A cycle with its state, progress, and scope change: tickets that entered it after it started.
 function withProgress(y: Cycle) {
@@ -396,44 +445,49 @@ function withProgress(y: Cycle) {
   const added = (db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE cycle_id = ? AND hidden = 0 AND cycle_added_at > ?").get(y.id, start) as { n: number }).n;
   return { ...y, state: stateOf(y), progress: progress("t.cycle_id = ?", y.id), added_after_start: added };
 }
-const cycles = (ws: string) => (db.prepare("SELECT * FROM cycles WHERE workspace_id = ? ORDER BY starts_at").all(ws) as Cycle[]).map(withProgress);
+const cycles = (ws: string, projectId?: string) =>
+  (db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND (? IS NULL OR project_id = ?) ORDER BY starts_at").all(ws, projectId ?? null, projectId ?? null) as Cycle[]).map(withProgress);
 
-function cycleBody(ws: string, b: Record<string, any>, cur?: Cycle) {
+function cycleBody(projectId: string, b: Record<string, any>, cur?: Cycle) {
   const v: Record<string, SQLInputValue> = {};
   if (b.name !== undefined) v.name = b.name === null || b.name === "" ? "" : text(b.name, "name", 100);
   const starts = b.starts_at !== undefined || !cur ? (isDate(b.starts_at) ? b.starts_at : fail("starts_at must be a date (YYYY-MM-DD)")) : cur.starts_at;
   const ends = b.ends_at !== undefined || !cur ? (isDate(b.ends_at) ? b.ends_at : fail("ends_at must be a date (YYYY-MM-DD)")) : cur.ends_at;
   if (ends < starts) fail("ends_at must not be before starts_at");
-  const clash = db.prepare("SELECT number FROM cycles WHERE workspace_id = ? AND id <> ? AND starts_at <= ? AND ends_at >= ?").get(ws, cur?.id ?? "", ends, starts) as { number: number } | undefined;
+  const clash = db.prepare("SELECT number FROM cycles WHERE project_id = ? AND id <> ? AND starts_at <= ? AND ends_at >= ?").get(projectId, cur?.id ?? "", ends, starts) as { number: number } | undefined;
   if (clash) fail(`the dates overlap cycle ${clash.number}`);
   return { ...v, starts_at: starts, ends_at: ends };
 }
 
-trackerRoutes.get("/cycles", (c) => c.json(cycles(c.get("workspaceId"))));
+// ?project=<id>: only that project's cycles.
+trackerRoutes.get("/cycles", (c) => c.json(cycles(c.get("workspaceId"), c.req.query("project"))));
 trackerRoutes.post("/cycles", async (c) => {
   const ws = c.get("workspaceId");
-  const v = cycleBody(ws, await body(c));
+  const b = await body(c);
+  const p = owned("projects", ws, id(b.project_id, "project_id")) ?? fail("project_id: no such project in this workspace");
+  const v = cycleBody(p.id, b);
   const cycleId = randomUUID();
-  const number = (db.prepare("SELECT COALESCE(MAX(number), 0) + 1 AS n FROM cycles WHERE workspace_id = ?").get(ws) as { n: number }).n;
-  insert("cycles", { id: cycleId, workspace_id: ws, number, ...v });
+  const number = (db.prepare("SELECT COALESCE(MAX(number), 0) + 1 AS n FROM cycles WHERE project_id = ?").get(p.id) as { n: number }).n;
+  insert("cycles", { id: cycleId, workspace_id: ws, project_id: p.id, number, ...v });
   return c.json(withProgress(owned("cycles", ws, cycleId) as Cycle), 201);
 });
+// "current" needs ?project=<id>.
 trackerRoutes.get("/cycles/:id", (c) => {
-  const y = c.req.param("id") === "current" ? currentCycle(c.get("workspaceId")) : (owned("cycles", c.get("workspaceId"), c.req.param("id")) as Cycle | undefined);
+  const y = c.req.param("id") === "current" ? currentCycles(c.get("workspaceId"), c.req.query("project") ?? "none")[0] : (owned("cycles", c.get("workspaceId"), c.req.param("id")) as Cycle | undefined);
   return y ? c.json(withProgress(y)) : c.json({ error: "not_found" }, 404);
 });
 trackerRoutes.patch("/cycles/:id", async (c) => {
   const cur = owned("cycles", c.get("workspaceId"), c.req.param("id")) as Cycle | undefined;
   if (!cur) return c.json({ error: "not_found" }, 404);
-  update("cycles", cur.id, cycleBody(c.get("workspaceId"), await body(c), cur));
+  update("cycles", cur.id, cycleBody(cur.project_id, await body(c), cur));
   return c.json(withProgress(owned("cycles", c.get("workspaceId"), cur.id) as Cycle));
 });
-// Everything not done moves to the next cycle (the first one starting after this one ends).
+// Everything not done moves to the project's next cycle (the first one starting after this one ends).
 trackerRoutes.post("/cycles/:id/move-unfinished", (c) => {
   const ws = c.get("workspaceId");
   const cur = owned("cycles", ws, c.req.param("id")) as Cycle | undefined;
   if (!cur) return c.json({ error: "not_found" }, 404);
-  const next = db.prepare("SELECT * FROM cycles WHERE workspace_id = ? AND starts_at > ? ORDER BY starts_at LIMIT 1").get(ws, cur.ends_at) as Cycle | undefined;
+  const next = db.prepare("SELECT * FROM cycles WHERE project_id = ? AND starts_at > ? ORDER BY starts_at LIMIT 1").get(cur.project_id, cur.ends_at) as Cycle | undefined;
   if (!next) fail(`there is no cycle after cycle ${cur.number}: create the next cycle first`);
   const now = Date.now();
   const r = db.prepare("UPDATE tickets SET cycle_id = ?, cycle_added_at = ?, updated_at = ? WHERE cycle_id = ? AND status <> 'done'").run(next!.id, now, now, cur.id);
@@ -514,8 +568,8 @@ export function notify(ws: string, ticketId: string, kind: "review" | "failed" |
 function slack(ticketId: string, text: string) {
   const hook = process.env.POLARIS_SLACK_WEBHOOK;
   if (!hook) return;
-  const { number } = db.prepare("SELECT number FROM tickets WHERE id = ?").get(ticketId) as { number: number };
-  const url = `${process.env.WEB_ORIGIN ?? "http://localhost:5173"}/t/${number}`;
+  const { key } = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t WHERE t.id = ?`).get(ticketId) as { key: string };
+  const url = `${process.env.WEB_ORIGIN ?? "http://localhost:5173"}/t/${key}`;
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   fetch(hook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `<${url}|${esc(text.slice(0, 300))}>` }) })
     .then((r) => r.ok || console.error(`slack webhook: HTTP ${r.status}`))
@@ -523,7 +577,7 @@ function slack(ticketId: string, text: string) {
 }
 
 const ticketOf = (c: Context<Env>) =>
-  db.prepare(`SELECT t.id, ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ? AND t.workspace_id = ?`).get(c.req.param("id") as string, c.get("workspaceId")) as { id: string; key: string } | undefined;
+  db.prepare(`SELECT t.id, ${ticketKey()} AS key FROM tickets t WHERE t.id = ? AND t.workspace_id = ?`).get(c.req.param("id") as string, c.get("workspaceId")) as { id: string; key: string } | undefined;
 
 const COMMENTS = "SELECT c.id, c.body, c.created_at, c.author_id, u.email AS author FROM comments c JOIN user u ON u.id = c.author_id";
 trackerRoutes.get("/tickets/:id/comments", (c) => {
@@ -547,7 +601,7 @@ trackerRoutes.post("/tickets/:id/comments", async (c) => {
 
 // The caller's unread notifications, newest first (their own actions excluded), with the ticket's key and number to open it.
 trackerRoutes.get("/notifications", (c) =>
-  c.json(db.prepare(`SELECT n.id, n.kind, n.text, n.created_at, n.ticket_id, t.number, ${ticketKey()} AS key FROM notifications n JOIN tickets t ON t.id = n.ticket_id JOIN organization o ON o.id = t.workspace_id
+  c.json(db.prepare(`SELECT n.id, n.kind, n.text, n.created_at, n.ticket_id, t.number, ${ticketKey()} AS key FROM notifications n JOIN tickets t ON t.id = n.ticket_id
     WHERE n.workspace_id = ? AND n.read_at IS NULL AND (n.actor_id IS NULL OR n.actor_id <> ?) ORDER BY n.created_at DESC LIMIT 50`).all(c.get("workspaceId"), c.get("userId"))));
 
 // Marks every unread notification read (ids: only those).

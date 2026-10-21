@@ -77,7 +77,7 @@ function backfill(ws: string) {
 }
 
 const openMined = (ws: string, cls: string) =>
-  db.prepare(`SELECT t.id, ${ticketKey()} AS key, t.status FROM tickets t JOIN organization o ON o.id = t.workspace_id
+  db.prepare(`SELECT t.id, ${ticketKey()} AS key, t.status FROM tickets t
     WHERE t.workspace_id = ? AND t.mined_class = ? AND t.status NOT IN ('done', 'failed') ORDER BY t.number DESC LIMIT 1`).get(ws, cls) as { id: string; key: string; status: string } | undefined;
 
 type Row = { run_id: string; class: FailureClass; model: string; ticket_id: string; ticket_key: string; title: string; day: string; reason: string | null };
@@ -93,7 +93,7 @@ export function failures(ws: string, days = 30) {
       CASE WHEN r.failure_class = 'human_rejected'
         THEN (SELECT 'rejected in review: ' || COALESCE(json_extract(payload, '$.note'), '(no note)') FROM events WHERE run_id = r.id AND type = 'review' ORDER BY seq DESC LIMIT 1)
         ELSE (SELECT json_extract(payload, '$.reason') FROM events WHERE run_id = r.id AND type = 'run_finished' ORDER BY seq DESC LIMIT 1) END AS reason
-    FROM runs r JOIN tickets t ON t.id = r.ticket_id JOIN organization o ON o.id = t.workspace_id
+    FROM runs r JOIN tickets t ON t.id = r.ticket_id
     WHERE t.workspace_id = ? AND r.failure_class IS NOT NULL AND r.ended_at >= ?
       AND NOT EXISTS (SELECT 1 FROM ticket_labels tl JOIN labels l ON l.id = tl.label_id WHERE tl.ticket_id = t.id AND l.name = ? COLLATE NOCASE)
     ORDER BY r.ended_at DESC, r.rowid DESC`).all(ws, since, MINED_LABEL) as Row[];
@@ -199,10 +199,11 @@ export async function mine(o: { workspaceId: string; provider: Provider; model: 
         else {
           const id = randomUUID();
           const spec = `${v.spec}\n\n## Mined from failures\n\nClass \`${c.class}\` (${c.description}): ${c.runs} runs on ${c.tickets} tickets in the last ${days} days. Model confidence ${v.confidence.toFixed(2)}. Examples:\n${evidence}`;
-          db.prepare("INSERT INTO tickets (id, workspace_id, title, spec, mined_class) VALUES (?, ?, ?, ?, ?)").run(id, ws, v.title, spec, c.class);
+          // In the project of the newest example: the repository the failures happened in.
+          db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title, spec, mined_class) SELECT ?, ?, project_id, ?, ?, ? FROM tickets WHERE id = ?").run(id, ws, v.title, spec, c.class, c.examples[0].ticket_id);
           applyTracker(id, { label_ids: labelIds(ws, [MINED_LABEL]) });
           touch(ws, { type: "ticket", id });
-          const t = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as { key: string };
+          const t = db.prepare(`SELECT ${ticketKey()} AS key FROM tickets t WHERE t.id = ?`).get(id) as { key: string };
           out.created.push({ class: c.class, ticket_id: id, key: t.key, title: v.title, confidence: v.confidence });
         }
       } catch (e) {

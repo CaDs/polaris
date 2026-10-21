@@ -15,7 +15,7 @@ import { adapterFor, CONTEXT_WINDOW, OLLAMA_URL, ollamaWindow, providerById } fr
 import { addDetached, addWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, protectedChanges, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun } from "./failures.ts";
-import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_IMAGE, type Sandbox } from "./sandbox.ts";
+import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
 import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
@@ -39,8 +39,7 @@ const reviewBudget = (lines: number) => ({ maxTurns: Math.min(25, Math.max(8, 6 
 const WORKER_FINISH = "Wrap up now: make sure the tests pass, then end with your final reply (what is done, what is left).";
 
 type Settings = {
-  workspace_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string;
-  default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
+  workspace_id: string; default_provider_id: string | null; default_model: string | null; compact_at_tokens: number; auto_approve_children: number; model_review: number;
   auto_split: number; child_size_hint: string; triage_model: string; wiki: number; max_turns: number; max_minutes: number;
   monthly_cap_usd: number | null; monthly_cap_tokens: number | null; review_provider_id: string | null; review_model: string | null;
 } & Record<`${ModelPhase}_provider_id` | `${ModelPhase}_model`, string | null>;
@@ -51,23 +50,32 @@ const phaseModel = (s: Settings, p: ModelPhase): Choice | undefined =>
   s[`${p}_provider_id`] || s[`${p}_model`] ? { provider_id: s[`${p}_provider_id`], model: s[`${p}_model`] } : undefined;
 // The one place for settings defaults (a new workspace, GET before the first save, PUT with null). The DB columns repeat them.
 export const SETTINGS_DEFAULTS = {
-  repo_path: "", base_branch: "", setup_command: "npm ci", test_command: "npm test", protected_paths: "tests/,evals/", image: SANDBOX_IMAGE,
   child_size_hint: "at most 3 files and about 60 changed lines, finishable in 20 agent turns", triage_model: "", // M9; "" = no hint / no triage
   compact_at_tokens: 150_000, auto_approve_children: 0, model_review: 1, auto_split: 1, wiki: 1, max_turns: 120, max_minutes: 60,
   monthly_cap_usd: null as number | null, monthly_cap_tokens: null as number | null, // spending caps; null = none
 };
 // Eval case runs use the default worker budget, not the workspace's: a score must not move when someone edits Settings.
 const EVAL_WORKER = { max_turns: SETTINGS_DEFAULTS.max_turns, max_minutes: SETTINGS_DEFAULTS.max_minutes };
+const MODEL_DEFAULTS = Object.fromEntries(["default", "review", ...MODEL_PHASES].flatMap((p) => [[`${p}_provider_id`, null], [`${p}_model`, null]]));
+// The workspace's settings, defaults included (the row exists only once something was saved).
 export const settingsFor = (ws: string) =>
-  db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as Settings | undefined;
+  ({ ...SETTINGS_DEFAULTS, ...MODEL_DEFAULTS, workspace_id: ws, ...(db.prepare("SELECT * FROM workspace_settings WHERE workspace_id = ?").get(ws) as object | undefined) }) as Settings;
+// What a run of a project's ticket uses: the workspace's settings plus the project's repository.
+export type ProjectSettings = Settings & { project_id: string; repo_path: string; base_branch: string; setup_command: string; test_command: string; protected_paths: string; image: string };
+export function projectSettings(projectId: string) {
+  const p = db.prepare("SELECT id AS project_id, workspace_id, repo_path, base_branch, setup_command, test_command, protected_paths, image FROM projects WHERE id = ?").get(projectId) as
+    | { workspace_id: string }
+    | undefined;
+  return p && ({ ...settingsFor(p.workspace_id), ...p } as ProjectSettings);
+}
 
 type TicketRow = {
-  id: string; workspace_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string; test_command: string | null;
+  id: string; workspace_id: string; project_id: string; title: string; spec: string; key: string; provider_id: string | null; model: string | null; parent_id: string | null; kind: string; test_command: string | null;
   escalated_to: string | null;
 };
 const ticketRow = (id: string) =>
-  db.prepare(`SELECT t.id, t.workspace_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, ${ticketKey()} AS key
-    FROM tickets t JOIN organization o ON o.id = t.workspace_id WHERE t.id = ?`).get(id) as TicketRow | undefined;
+  db.prepare(`SELECT t.id, t.workspace_id, t.project_id, t.title, t.spec, t.provider_id, t.model, t.parent_id, t.kind, t.test_command, t.escalated_to, ${ticketKey()} AS key
+    FROM tickets t WHERE t.id = ?`).get(id) as TicketRow | undefined;
 // Every ticket status change goes through here. Becoming done or failed settles a child: its planner may react (settled).
 // quiet: no reaction (a child replaced by a "Split:" epic: that epic is open in its place, nothing to wake up for).
 function setTicket(id: string, status: string, quiet = false) {
@@ -154,7 +162,7 @@ function taskFor(t: { title: string; spec: string; header?: string }, info: {
   if (info.skills.length) parts.push(skillsText(info.skills));
   if (info.lessons) parts.push(`# Lessons from earlier runs\n\n${info.lessons}`);
   if (info.wiki) parts.push(info.wiki);
-  const body = [t.header, t.spec].filter(Boolean).join("\n\n"); // header: the tracker's priority, labels, project, due date (M11)
+  const body = [t.header, t.spec].filter(Boolean).join("\n\n"); // header: the tracker's priority, labels, milestone, due date (M11)
   parts.push(...feedback, `# Task\n\n${body ? `# ${t.title}\n\n${body}` : t.title}`);
   return parts.join("\n\n");
 }
@@ -228,21 +236,20 @@ function choose(t: TicketRow, s: Settings, pick?: Choice, phase?: Choice): { pro
 // Provider + model for a prompt proposal (or a phase's own setting, e.g. chat): the workspace default, else env. Throws a
 // user-facing message.
 export function metaProvider(ws: string, phase?: ModelPhase) {
-  const s = settingsFor(ws) ?? ({ default_provider_id: null, default_model: null } as Settings);
+  const s = settingsFor(ws);
   const c = choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s, undefined, phase && phaseModel(s, phase));
   return { model: c.model, provider: c.provider_id ? adapterFor(providerById(c.provider_id)!) : providerConfig({ model: c.model, workspaceId: ws }).provider("") };
 }
 
-// Queues attempt 1 of a ticket (an epic: its next planner round) after checking the workspace's repo settings. Errors are user-facing.
+// Queues attempt 1 of a ticket (an epic: its next planner round) after checking its project's repo settings. Errors are user-facing.
 // M9: a top-level task's first run is triaged first when the workspace has a triage model; too large → split instead (the
 // returned run is the new epic's round 1, which logs the triage that split it: `triaged`).
 export async function enqueueRun(ticketId: string, pick?: Choice, triaged?: EventPayloads["triage"]): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
   const t = ticketRow(ticketId);
   if (!t) return { error: "not_found", status: 400 };
-  const s = settingsFor(t.workspace_id);
-  if (!s) return { error: "No repository configured. Set one in Settings before running agents.", status: 400 };
+  const s = projectSettings(t.project_id)!;
   const repo = await inspectRepo(s.repo_path, s.base_branch);
-  if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
+  if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in the project's settings.`, status: 400 };
   let chosen: ReturnType<typeof choose>;
   try {
     chosen = choose(t, s, pick, t.kind === "epic" ? phaseModel(s, "planner") : undefined); // later rounds keep round 1's
@@ -359,10 +366,10 @@ function previousAttempt(ticketId: string, reply: string) {
   return parts.join("\n\n");
 }
 
-// The epic gate, run by complete_epic: the epic's test command (its own, else the workspace's) on the base branch's current
+// The epic gate, run by complete_epic: the epic's test command (its own, else the project's) on the base branch's current
 // head, after the setup command, in a fresh detached worktree + sandbox (planner rounds have none). Logged as epic_gate.
 // Returns why it failed; undefined = passed, or there is no command.
-async function epicGate(s: Settings, command: string, log: ReturnType<typeof eventLog>, signal: AbortSignal) {
+async function epicGate(s: ProjectSettings, command: string, log: ReturnType<typeof eventLog>, signal: AbortSignal) {
   if (!command.trim()) return;
   const id = `epic-gate-${randomUUID()}`;
   const wt = join(dataDir(), "worktrees", id);
@@ -393,7 +400,6 @@ export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: s
   if (caseIds && cases.length !== new Set(caseIds).size) return { error: "unknown eval case" };
   if (!cases.length) return { error: "No eval cases yet: add an approved ticket to evals first." };
   const s = settingsFor(ws);
-  if (!s) return { error: "No repository configured. Set one in Settings before running evals." };
   let chosen: ReturnType<typeof choose>;
   try {
     chosen = choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s); // the workspace default, then env
@@ -413,12 +419,12 @@ export function startEval(ws: string, p: Prompt, caseIds?: string[]): { error: s
 
 // FIFO over the whole process: start queued runs until POLARIS_CONCURRENCY (default 2) are in flight.
 // M11: ticket work (not eval cases or wiki runs) goes by ticket priority first, urgent (1) to low (4), then none (0).
-// A wiki run waits queued while another of its workspace runs (it would only wait in wikiSerial, holding a slot).
+// A wiki run waits queued while another of its project runs (it would only wait in wikiSerial, holding a slot).
 export function pump() {
   const limit = Number(process.env.POLARIS_CONCURRENCY ?? 2);
   while (controllers.size < limit) {
     const next = db.prepare(`SELECT r.id FROM runs r JOIN tickets t ON t.id = r.ticket_id WHERE r.status = 'queued'
-      AND NOT (r.role = 'wiki' AND EXISTS (SELECT 1 FROM runs w JOIN tickets wt ON wt.id = w.ticket_id WHERE w.role = 'wiki' AND w.status = 'running' AND wt.workspace_id = t.workspace_id))
+      AND NOT (r.role = 'wiki' AND EXISTS (SELECT 1 FROM runs w JOIN tickets wt ON wt.id = w.ticket_id WHERE w.role = 'wiki' AND w.status = 'running' AND wt.project_id = t.project_id))
       ORDER BY CASE WHEN r.eval_run_id IS NULL AND r.role <> 'wiki' AND t.priority > 0 THEN t.priority ELSE 5 END, r.rowid LIMIT 1`).get() as { id: string } | undefined;
     if (!next) return;
     controllers.set(next.id, new AbortController());
@@ -496,7 +502,7 @@ async function modelFor(run: RunRow, capTokens: number | undefined, log: Ctx["lo
 
 // The reviewer's model: the workspace's review_provider_id/review_model when set (resolved like a run's choice), else the
 // run's own. A deleted review provider (FK → null) with a model left falls back to the environment for that model.
-function reviewerFor(t: TicketRow, s: Settings, run: RunRow) {
+function reviewerFor(t: TicketRow, s: ProjectSettings, run: RunRow) {
   const own = { provider_id: run.provider_id, model: run.model };
   const c = s.review_provider_id || s.review_model ? choose(t, s, { provider_id: s.review_provider_id, model: s.review_model }) : own;
   const stored = c.provider_id ? providerById(c.provider_id) : undefined;
@@ -519,7 +525,7 @@ async function execute(runId: string) {
   const t = ticketRow(run.ticket_id)!;
   if (run.role === "planner") return plan(runId, run, t);
   if (run.role === "wiki") return maintain(runId, run, t);
-  const s = settingsFor(t.workspace_id);
+  const s = projectSettings(t.project_id);
   const ev = run.eval_case_id ? (db.prepare("SELECT * FROM eval_cases WHERE id = ?").get(run.eval_case_id) as EvalCase | undefined) : undefined;
   const cfg = run.eval_run_id ? ev : s; // repo_path, setup/test command, protected paths, image
   const attemptStart = Date.now();
@@ -533,8 +539,8 @@ async function execute(runId: string) {
   let gateOutput = "";
   const worktree = join(dataDir(), "worktrees", runId);
   return pipeline(runId, run.model, async (res, { signal, log, cap }) => {
-    if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "no repository configured for this workspace");
-    // The ticket's own test_command (when set) overrides the workspace one; eval case runs use the case's frozen command.
+    if (!cfg) throw new AgentError("UnexpectedEnvironment", run.eval_run_id ? "the eval case was removed" : "the ticket's project was deleted");
+    // The ticket's own test_command (when set) overrides the project's; eval case runs use the case's frozen command.
     const testCommand = run.eval_run_id ? cfg.test_command : (t.test_command ?? cfg.test_command);
     let protectedPaths = parseProtected(cfg.protected_paths);
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
@@ -551,8 +557,8 @@ async function execute(runId: string) {
     let wikiTree: Awaited<ReturnType<typeof materialize>> | undefined;
     if (s?.wiki && !ev)
       try {
-        wikiTree = await materialize(t.workspace_id, worktree);
-        wiki = await wikiSection(t.workspace_id, cfg.repo_path, base_sha);
+        wikiTree = await materialize(t.project_id, worktree);
+        wiki = await wikiSection(t.project_id, cfg.repo_path, base_sha);
         protectedPaths = [...protectedPaths, ".polaris/wiki"];
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
@@ -729,7 +735,7 @@ async function autoApprove(ticketId: string, runId: string) {
 // host (no sandbox, no write tool), the planner.md system prompt and the planner tools; a fresh conversation per round.
 // No gate, commit, review or reflection; the checkout is always removed. afterRound decides what the epic does next (a retry too).
 async function plan(runId: string, run: RunRow, t: TicketRow) {
-  const s = settingsFor(t.workspace_id);
+  const s = projectSettings(t.project_id);
   const worktree = join(dataDir(), "worktrees", runId);
   const prev = db.prepare("SELECT started_at FROM runs WHERE ticket_id = ? AND role = 'planner' AND rowid < (SELECT rowid FROM runs WHERE id = ?) ORDER BY rowid DESC LIMIT 1").get(t.id, runId) as
     | { started_at: number | null }
@@ -738,7 +744,7 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
   const outcome: Outcome = {};
   let reply = "";
   return pipeline(runId, run.model, async (res, { signal, log }) => {
-    if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
+    if (!s) throw new AgentError("UnexpectedEnvironment", "the epic's project was deleted");
     mkdirSync(join(dataDir(), "worktrees"), { recursive: true });
     const base_sha = await git(s.repo_path, ["rev-parse", "--verify", `refs/heads/${s.base_branch}^{commit}`]);
     await addDetached(s.repo_path, base_sha, worktree);
@@ -749,8 +755,8 @@ async function plan(runId: string, run: RunRow, t: TicketRow) {
     let wiki = "";
     if (s.wiki)
       try {
-        await materialize(t.workspace_id, worktree);
-        wiki = await wikiSection(t.workspace_id, s.repo_path, base_sha);
+        await materialize(t.project_id, worktree);
+        wiki = await wikiSection(t.project_id, s.repo_path, base_sha);
       } catch (e) {
         log({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `project wiki unavailable: ${(e as Error).message}` } });
       }
@@ -798,7 +804,7 @@ async function afterRound(t: TicketRow, runId: string, status: RunStatus, reason
   if (summary === undefined) return wake(t.id);
   db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(summary, t.id);
   setTicket(t.id, "review");
-  if (t.parent_id && settingsFor(t.workspace_id)?.auto_approve_children) await approve(t.id);
+  if (t.parent_id && settingsFor(t.workspace_id).auto_approve_children) await approve(t.id);
 }
 
 // The reason is the epic's handoff: its own view shows it, and a parent planner reads it.
@@ -873,12 +879,12 @@ const WIKI_FIX_BUDGET = { maxTurns: 10, maxTokens: BUDGET.maxTokens };
 const WIKI_FIX_ROUNDS = 2; // more conversation rounds to fix what the mechanical lint found, then the result is rejected
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 
-// Bootstrap and lint runs belong to no ticket: they hang off one hidden ticket per workspace (ingest runs hang off the ticket they ingest).
-function wikiTicket(ws: string) {
-  const row = db.prepare("SELECT id FROM tickets WHERE workspace_id = ? AND hidden = 1").get(ws) as { id: string } | undefined;
+// Bootstrap and lint runs belong to no ticket: they hang off one hidden ticket per project (ingest runs hang off the ticket they ingest).
+function wikiTicket(projectId: string) {
+  const row = db.prepare("SELECT id FROM tickets WHERE project_id = ? AND hidden = 1").get(projectId) as { id: string } | undefined;
   if (row) return row.id;
   const id = randomUUID();
-  db.prepare("INSERT INTO tickets (id, workspace_id, title, status, number, hidden) VALUES (?, ?, 'Project wiki', 'done', -1, 1)").run(id, ws);
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title, status, number, hidden) SELECT ?, workspace_id, id, 'Project wiki', 'done', -1, 1 FROM projects WHERE id = ?").run(id, projectId);
   return id;
 }
 
@@ -891,28 +897,29 @@ function finalReply(runId: string) {
   return "";
 }
 
-// Queues a wiki maintainer run through the normal FIFO queue (runs of one workspace then still go one at a time: wikiSerial).
-// ingest: the merge `sha` of the approved ticket's run `run` (its provider and model are used, else the workspace default).
-// bootstrap / lint: the base branch head, run for the workspace default; lint needs at least one stale page. Errors are user-facing.
-export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint", from?: { ticketId: string; sha: string; run: string }): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
-  const s = settingsFor(ws);
-  if (!s) return { error: "No repository configured. Set one in Settings before using the wiki.", status: 400 };
+// Queues a wiki maintainer run of a project through the normal FIFO queue (runs of one project then still go one at a time:
+// wikiSerial). ingest: the merge `sha` of the approved ticket's run `run` (its provider and model are used, else the
+// workspace default). bootstrap / lint: the base branch head, run for the workspace default; lint needs at least one
+// stale page. Errors are user-facing.
+export async function enqueueWiki(projectId: string, op: "ingest" | "bootstrap" | "lint", from?: { ticketId: string; sha: string; run: string }): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
+  const s = projectSettings(projectId);
+  if (!s) return { error: "not_found", status: 400 };
   if (!s.wiki) return { error: "The project wiki is off. Turn it on in Settings.", status: 409 };
   if (!from) {
     const repo = await inspectRepo(s.repo_path, s.base_branch);
-    if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in Settings.`, status: 400 };
-    if (op === "lint" && !(await pageList(ws, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
+    if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in the project's settings.`, status: 400 };
+    if (op === "lint" && !(await pageList(projectId, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
   }
   let chosen: ReturnType<typeof choose>;
   try {
     const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
     // The wiki's own model when set; else the model of the run it documents; else the workspace default.
     const own = phaseModel(s, "wiki");
-    chosen = !own && prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: ws, provider_id: null, model: null } as TicketRow, s, undefined, own);
+    chosen = !own && prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: s.workspace_id, provider_id: null, model: null } as TicketRow, s, undefined, own);
   } catch (e) {
     return { error: (e as Error).message, status: 400 };
   }
-  const ticketId = from?.ticketId ?? wikiTicket(ws);
+  const ticketId = from?.ticketId ?? wikiTicket(projectId);
   const attempt = (db.prepare("SELECT COUNT(*) AS n FROM runs WHERE ticket_id = ? AND role = 'wiki'").get(ticketId) as { n: number }).n + 1;
   const runId = createRun({ ticketId, model: chosen.model, attempt, providerId: chosen.provider_id, role: "wiki", wikiOp: op, baseSha: from?.sha });
   pump();
@@ -923,15 +930,15 @@ export async function enqueueWiki(ws: string, op: "ingest" | "bootstrap" | "lint
 // place edit_file may write), read_file/search/edit_file only (no shell: nothing on the host can write outside wiki/). Its
 // change is committed to the wiki repo only if the mechanical lint passes; failures go back to the agent (up to
 // WIKI_FIX_ROUNDS more rounds in the same conversation), then the result is rejected and nothing is committed. Runs of one
-// workspace go one at a time, so each sees the previous one's commit. The ticket is never touched.
+// project go one at a time, so each sees the previous one's commit. The ticket is never touched.
 async function maintain(runId: string, run: RunRow, t: TicketRow) {
   const op = run.wiki_op as "ingest" | "bootstrap" | "lint";
-  const ws = t.workspace_id;
-  const s = settingsFor(ws);
+  const pid = t.project_id;
+  const s = projectSettings(pid);
   const root = join(dataDir(), "worktrees", runId);
   return pipeline(runId, run.model, async (res, { signal, log, cap }) => {
-    if (!s) throw new AgentError("UnexpectedEnvironment", "no repository configured for this workspace");
-    await wikiSerial(ws, async () => {
+    if (!s) throw new AgentError("UnexpectedEnvironment", "the project was deleted");
+    await wikiSerial(pid, async () => {
       if (signal.aborted) throw new AgentError("UserAborted", "cancelled");
       mkdirSync(root, { recursive: true });
       const sha = op === "ingest" ? run.base_sha : await headOf(s);
@@ -940,7 +947,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       db.prepare("UPDATE runs SET worktree = ?, base_sha = ? WHERE id = ?").run(root, sha, runId);
       log({ type: "setup", payload: { step: "worktree", branch: "", base_sha: sha } });
       const wiki = join(root, "wiki");
-      await openCopy(ws, wiki);
+      await openCopy(pid, wiki);
       const index = readFileSync(join(wiki, "index.md"), "utf8");
       const repo = basename(s.repo_path);
       const sha8 = sha.slice(0, 8);
@@ -960,7 +967,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
         message = `bootstrap: ${repo} at ${s.base_branch} ${sha8}`;
         entry = `## [${today()}] ingest | bootstrap from ${s.base_branch} (${sha8})`;
       } else {
-        const stale = (await pageList(ws, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
+        const stale = (await pageList(pid, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
         if (!stale.length) {
           res.status = "passed"; // re-verified (or edited) since it was queued: nothing to do
           return void log({ type: "wiki", payload: { op, unchanged: true } });
@@ -972,7 +979,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       const { compactAt, providerFor } = await modelFor(run, s.compact_at_tokens, log);
       const common = {
         provider: providerFor(task), model: run.model, root, system: WIKI_PROMPT, task, tools: wikiTools,
-        protectedPaths: WIKI_PROTECTED, signal, cacheKey: ws, compactAt, onEvent: relay(log),
+        protectedPaths: WIKI_PROTECTED, signal, cacheKey: pid, compactAt, onEvent: relay(log),
       };
       let a = await runAgent({ ...common, budget: WIKI_BUDGET });
       for (let fix = 0; ; fix++) {
@@ -981,7 +988,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
         res.turns += a.turns;
         ({ status: res.status, reason: res.reason } = a);
         if (a.status !== "passed") return;
-        const r: Finished = await finishCopy(ws, wiki, message, entry, s.repo_path);
+        const r: Finished = await finishCopy(pid, wiki, message, entry, s.repo_path);
         if (!("problems" in r)) return void log({ type: "wiki", payload: { op, ...("sha" in r ? { commit: r.sha } : { unchanged: true }) } });
         if (fix === WIKI_FIX_ROUNDS) {
           res.status = "failed";
@@ -1022,8 +1029,9 @@ export const reviewRun = (ticketId: string) =>
     | undefined;
 
 // Removes every worktree + branch the ticket's runs created (approve, reject, delete).
-export async function cleanupTicket(ticketId: string, ws: string) {
-  const s = settingsFor(ws);
+export async function cleanupTicket(ticketId: string) {
+  const t = db.prepare("SELECT project_id FROM tickets WHERE id = ?").get(ticketId) as { project_id: string } | undefined;
+  const s = t && projectSettings(t.project_id);
   if (!s) return;
   const runs = db.prepare("SELECT worktree, branch FROM runs WHERE ticket_id = ? AND branch IS NOT NULL").all(ticketId) as { worktree: string; branch: string }[];
   for (const r of runs) await removeWorktree(s.repo_path, r.worktree, r.branch, dataDir());
@@ -1046,16 +1054,16 @@ export async function approve(ticketId: string): Promise<{ error: string } | { m
     setTicket(ticketId, "done");
     return {};
   }
-  const s = settingsFor(t.workspace_id);
+  const s = projectSettings(t.project_id);
   const r = reviewRun(ticketId);
   if (!s || !r) return { error: "no passed run to merge" };
   const merge_sha = await serial(() => merge(s.repo_path, s.base_branch, r.branch, `Merge ${r.branch}: ${t.key} ${t.title}`));
   eventLog(r.id)({ type: "review", payload: { decision: "approved", merge_sha } });
-  await cleanupTicket(ticketId, t.workspace_id);
+  await cleanupTicket(ticketId);
   setTicket(ticketId, "done");
   // M10: the wiki learns from approved work only. A failure to queue is logged on the approved run; the approval stands.
   if (s.wiki) {
-    const w = await enqueueWiki(t.workspace_id, "ingest", { ticketId, sha: merge_sha, run: r.id }).catch((e: Error) => ({ error: e.message }));
+    const w = await enqueueWiki(t.project_id, "ingest", { ticketId, sha: merge_sha, run: r.id }).catch((e: Error) => ({ error: e.message }));
     if ("error" in w) eventLog(r.id)({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `wiki ingest not queued: ${w.error}` } });
   }
   return { merge_sha };
@@ -1073,7 +1081,7 @@ export async function reject(ticketId: string, note: string) {
     const run = db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(r.id) as { provider_id: string | null; model: string };
     background(reflectOn(r.id, t.workspace_id, run, undefined, note).then((payload) => eventLog(r.id)({ type: "reflection", payload })), "reflection on a reject failed");
   }
-  await cleanupTicket(ticketId, t.workspace_id);
+  await cleanupTicket(ticketId);
   if (!t.parent_id) return setTicket(ticketId, "todo");
   db.prepare("UPDATE tickets SET handoff = COALESCE(handoff || char(10) || char(10), '') || ? WHERE id = ?").run(`Rejected by the reviewer${note ? `: ${note}` : " (no note)"}.`, ticketId);
   setTicket(ticketId, "failed");
@@ -1089,7 +1097,7 @@ export async function moveTicket(id: string, to: string) {
   if (t.status === to) return;
   const active = db.prepare(`SELECT 1 FROM runs WHERE ticket_id = ? AND status IN ('queued', 'running') AND ${OWN_RUNS}`).get(id);
   if (active || !MANUAL.includes(to) || !(MANUAL.includes(t.status) || (t.status === "review" && to === "todo"))) return { error: "invalid_transition", from: t.status, to };
-  if (t.status === "review") await cleanupTicket(id, t.workspace_id);
+  if (t.status === "review") await cleanupTicket(id);
   setTicket(id, to);
   if (to !== "todo" || !t.parent_id) return;
   const status = (tid: string) => (db.prepare("SELECT status FROM tickets WHERE id = ?").get(tid) as { status: string } | undefined)?.status;
@@ -1145,10 +1153,10 @@ export function recoverOrphans() {
     FROM tickets t WHERE t.status = 'running' AND t.kind = 'task'
     AND NOT EXISTS (SELECT 1 FROM runs WHERE ticket_id = t.id AND status IN ('queued', 'running') AND ${OWN_RUNS})`).all() as { id: string; last: RunStatus | null }[];
   for (const t of stuck) setTicket(t.id, (t.last && TICKET_STATUS[t.last]) || "todo");
-  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.workspace_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
+  const orphans = db.prepare(`SELECT r.id, r.ticket_id, r.role, r.worktree, r.branch, r.eval_run_id, r.attempt, r.model, r.provider_id, t.project_id, t.parent_id, c.repo_path AS eval_repo FROM runs r
     JOIN tickets t ON t.id = r.ticket_id LEFT JOIN eval_cases c ON c.id = r.eval_case_id WHERE r.status = 'running'`).all() as {
     id: string; ticket_id: string; role: string; worktree: string | null; branch: string | null; eval_run_id: string | null; attempt: number; model: string; provider_id: string | null;
-    workspace_id: string; parent_id: string | null; eval_repo: string | null;
+    project_id: string; parent_id: string | null; eval_repo: string | null;
   }[];
   const dead = orphans.filter((o) => !controllers.has(o.id));
   const retries: typeof dead = [];
@@ -1166,11 +1174,11 @@ export function recoverOrphans() {
     }
     if (o.role === "wiki") {
       const root = o.worktree;
-      const ws = settingsFor(o.workspace_id);
-      if (root?.startsWith(dataDir())) background((ws ? removeWorktree(ws.repo_path, join(root, "code"), null, dataDir()) : Promise.resolve()).then(() => rmSync(root, { recursive: true, force: true })), "orphan cleanup failed");
+      const s = projectSettings(o.project_id);
+      if (root?.startsWith(dataDir())) background((s ? removeWorktree(s.repo_path, join(root, "code"), null, dataDir()) : Promise.resolve()).then(() => rmSync(root, { recursive: true, force: true })), "orphan cleanup failed");
       continue;
     }
-    const s = (o.branch || o.role === "planner") && settingsFor(o.workspace_id); // CLI runs have neither: their worktree is the user's dir
+    const s = (o.branch || o.role === "planner") && projectSettings(o.project_id); // CLI runs have neither: their worktree is the user's dir
     if (s) background(removeWorktree(s.repo_path, o.worktree, o.branch, dataDir()), "orphan cleanup failed");
     if (o.role === "planner") failEpic(o.ticket_id, `A planner round failed: ${message}`);
     else if (o.branch && o.attempt < MAX_ATTEMPTS) retries.push(o); // the ticket stays running until it is queued

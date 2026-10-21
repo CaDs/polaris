@@ -12,24 +12,26 @@ test("M3: settings, queue, docker sandbox, test gate retry, approve and reject",
   const transcript = page.getByRole("region", { name: "Transcript" });
   const status = page.getByLabel("Status");
 
-  // Without a repository, Run agent explains what to do.
-  await newTicket(page, "Make ok file", "create ok.txt");
-  await openTicket(page, "Make ok file");
-  await page.getByRole("button", { name: "Run agent" }).click();
-  await expect(page.getByRole("alert")).toContainText("No repository configured");
+  // No project yet, so no ticket: New ticket waits for one.
+  await expect(page.getByRole("button", { name: "New ticket" })).toBeDisabled();
 
-  // Settings: a bad path is rejected, the temp repo is accepted and the base branch defaults to its current branch.
-  await page.getByRole("link", { name: "Settings" }).click();
-  await page.getByLabel("Repository path").fill("/nonexistent/repo");
-  await page.getByLabel("Setup command").fill("");
-  await page.getByLabel("Test command").fill("test -f ok.txt");
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("alert")).toContainText("not a git repository");
-  await page.getByLabel("Repository path").fill(repo);
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  // A project: a bad path is rejected, the temp repo is accepted and the base branch defaults to its current branch.
+  const form = page.locator("details.new-project");
+  await form.getByLabel("Name").fill("Orchard");
+  await expect(form.getByLabel("Key")).toHaveValue("ORC"); // suggested from the name
+  await form.getByLabel("Repository path").fill("/nonexistent/repo");
+  await form.getByLabel("Setup command").fill("");
+  await form.getByLabel("Test command").fill("test -f ok.txt");
+  await form.getByRole("button", { name: "Create project" }).click();
+  await expect(form.getByRole("alert")).toContainText("not a git repository");
+  await form.getByLabel("Repository path").fill(repo);
+  await form.getByRole("button", { name: "Create project" }).click();
+  await expect(page).toHaveURL(/\/p\/ORC$/);
+  await page.getByRole("link", { name: "Overview" }).click();
   await expect(page.getByLabel("Base branch")).toHaveValue("main");
   await expect(page.getByLabel("Test command")).toHaveValue("test -f ok.txt");
+  await page.getByRole("link", { name: "Board" }).click();
+  await newTicket(page, "Make ok file", "create ok.txt");
 
   // Queue: a slow run holds the only slot (POLARIS_CONCURRENCY=1), so the next run waits as queued.
   await newTicket(page, "Blocker", "this one is slow");

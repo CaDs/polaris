@@ -11,7 +11,8 @@ const monthStart = Date.parse(`${new Date().toISOString().slice(0, 7)}-01T00:00:
 // A finished run of `model` with these tokens, on a fresh ticket of workspace ws.
 function spent(ws: string, model: string, tokens_in: number, started = Date.now(), tokens_out = 0, tokens_cached = 0) {
   const t = `t${Math.random()}`;
-  db.prepare("INSERT INTO tickets (id, workspace_id, title, status) VALUES (?, ?, 'earlier work', 'done')").run(t, ws);
+  db.prepare("INSERT OR IGNORE INTO projects (id, workspace_id, key, name, repo_path, base_branch) VALUES (?, ?, 'OLD', 'earlier', '/', 'main')").run(`p-${ws}`, ws);
+  db.prepare("INSERT INTO tickets (id, workspace_id, project_id, title, status) VALUES (?, ?, ?, 'earlier work', 'done')").run(t, ws, `p-${ws}`);
   db.prepare("INSERT INTO runs (id, ticket_id, model, status, tokens_in, tokens_out, tokens_cached, started_at) VALUES (?, ?, ?, 'passed', ?, ?, ?, ?)").run(`r${Math.random()}`, t, model, tokens_in, tokens_out, tokens_cached, started);
 }
 const errors = (runId: string, kind: string) => events(runId).filter((e) => e.type === "error" && e.p.kind === kind).map((e) => e.p);

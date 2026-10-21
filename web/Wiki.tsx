@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Transcript } from "./TicketView.tsx";
 import { Alert, Icon, Loading, api, when, type Run } from "./ui.tsx";
+import type { ProjectRef } from "./tracker.tsx";
 
 // M10: the project wiki. The index with stale flags, a page viewer/editor, the wiki repo's history, and the maintainer runs.
 type PageInfo = { path: string; title: string; summary: string; stale: string | null; verified: string; updated: string };
@@ -8,7 +9,7 @@ type WikiRun = {
   id: string; wiki_op: "ingest" | "bootstrap" | "lint"; status: string; started_at: number | null; ticket_key: string | null; ticket_number: number | null;
   result: { commit?: string; unchanged?: boolean; problems?: string[] } | null;
 };
-type Data = { enabled: boolean; configured: boolean; index: string; pages: PageInfo[]; log: string; problems: string[]; runs: WikiRun[] };
+type Data = { enabled: boolean; index: string; pages: PageInfo[]; log: string; problems: string[]; runs: WikiRun[] };
 type Commit = { sha: string; subject: string; date: string };
 
 const resolvePath = (from: string, to: string) => {
@@ -58,7 +59,7 @@ export function Markdown({ path = "", text, open }: { path?: string; text: strin
   return <div className="md">{out}</div>;
 }
 
-function PageView({ path, open, reload }: { path: string; open: (path: string) => void; reload: () => Promise<void> }) {
+function PageView({ base, path, open, reload }: { base: string; path: string; open: (path: string) => void; reload: () => Promise<void> }) {
   const [body, setBody] = useState<string | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -66,14 +67,14 @@ function PageView({ path, open, reload }: { path: string; open: (path: string) =
     setBody(null);
     setDraft(null);
     setError("");
-    api<{ body: string }>(`/api/wiki/page?path=${encodeURIComponent(path)}`).then((r) => setBody(r.body), (e) => setError(e.message));
+    api<{ body: string }>(`${base}/page?path=${encodeURIComponent(path)}`).then((r) => setBody(r.body), (e) => setError(e.message));
   };
   useEffect(load, [path]);
   const stale = /changed since you opened it/.test(error); // a maintainer run (or another tab) wrote the page meanwhile
   async function save() {
     setError("");
     try {
-      await api("/api/wiki/page", "PUT", { path, body: draft, base: body });
+      await api(`${base}/page`, "PUT", { path, body: draft, base: body });
       setBody(draft);
       setDraft(null);
       await reload();
@@ -109,12 +110,12 @@ function PageView({ path, open, reload }: { path: string; open: (path: string) =
   );
 }
 
-function History({ commits }: { commits: Commit[] }) {
+function History({ base, commits }: { base: string; commits: Commit[] }) {
   const [sha, setSha] = useState<string | null>(null);
   const [diff, setDiff] = useState("");
   useEffect(() => {
     setDiff("");
-    if (sha) api<{ diff: string }>(`/api/wiki/diff?sha=${sha}`).then((r) => setDiff(r.diff), (e) => setDiff(e.message));
+    if (sha) api<{ diff: string }>(`${base}/diff?sha=${sha}`).then((r) => setDiff(r.diff), (e) => setDiff(e.message));
   }, [sha]);
   return (
     <section aria-label="History">
@@ -132,7 +133,9 @@ function History({ commits }: { commits: Commit[] }) {
   );
 }
 
-export function Wiki() {
+// The project's wiki (its API is under /api/projects/:id/wiki).
+export function Wiki({ project }: { project: ProjectRef }) {
+  const base = `/api/projects/${project.id}/wiki`;
   const [d, setD] = useState<Data | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [path, setPath] = useState<string | null>(null);
@@ -141,7 +144,7 @@ export function Wiki() {
   const [linted, setLinted] = useState(false);
   const load = async () => {
     try {
-      const [wiki, history] = await Promise.all([api<Data>("/api/wiki"), api<Commit[]>("/api/wiki/history")]);
+      const [wiki, history] = await Promise.all([api<Data>(base), api<Commit[]>(`${base}/history`)]);
       setD(wiki);
       setCommits(history);
     } catch (e) {
@@ -160,7 +163,7 @@ export function Wiki() {
   const start = async (what: "bootstrap" | "lint") => {
     setError("");
     try {
-      const r = await api<Run>(`/api/wiki/${what}`, "POST");
+      const r = await api<Run>(`${base}/${what}`, "POST");
       setRun(r);
     } catch (e) {
       setError((e as Error).message);
@@ -174,8 +177,8 @@ export function Wiki() {
     <div className="wiki">
       {!d.enabled && <p className="warn">The project wiki is off (Settings): runs get no wiki and approved work is not ingested. What is here stays readable.</p>}
       <div className="row">
-        <button className="btn primary" onClick={() => start("bootstrap")} disabled={!d.enabled || !d.configured || !!active}>Build wiki</button>
-        <button className="btn" onClick={() => start("lint")} disabled={!d.enabled || !d.configured || !!active || !stale.length}>Refresh stale pages</button>
+        <button className="btn primary" onClick={() => start("bootstrap")} disabled={!d.enabled || !!active}>Build wiki</button>
+        <button className="btn" onClick={() => start("lint")} disabled={!d.enabled || !!active || !stale.length}>Refresh stale pages</button>
         <button className="btn" onClick={() => (load(), setLinted(true))}>Lint</button>
         {linted && (d.problems.length ? <span className="error" role="status">{d.problems.length} problem{d.problems.length === 1 ? "" : "s"}</span> : <span className="ok-text" role="status">Lint passed</span>)}
         {active && <span className="muted" role="status">A wiki run is working…</span>}
@@ -205,8 +208,8 @@ export function Wiki() {
         </p>
       </section>
 
-      {path && <PageView path={path} open={setPath} reload={load} />}
-      <History commits={commits} />
+      {path && <PageView base={base} path={path} open={setPath} reload={load} />}
+      <History base={base} commits={commits} />
 
       <section aria-label="Wiki runs">
         <h3>Maintainer runs</h3>
