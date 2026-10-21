@@ -19,6 +19,7 @@ import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery
 import { AgentError } from "./agent/types.ts";
 import { chatRoutes, proposalIn } from "./chat.ts";
 import { skillRoutes } from "./skills.ts";
+import { requireRole } from "./roles.ts";
 
 migrate();
 backfillUsage();
@@ -95,6 +96,15 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+// Owners and admins only (server/roles.ts): workspace settings (caps, auto-approve, review, default models), lessons and prompts.
+app.use("/api/settings/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/settings", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/lessons", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts/*", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.use("/api/prompts", (c, next) => (c.req.method === "GET" ? next() : (requireRole(c), next())));
+app.delete("/api/evals/cases/:id", (c, next) => (requireRole(c), next()));
+app.post("/api/tickets/:id/approve", (c, next) => (requireRole(c), next()));
 app.route("/api/providers", providerRoutes);
 app.route("/api", trackerRoutes); // M11: labels, projects (each a repository), milestones, cycles, views, members
 app.route("/api", skillRoutes); // M17: workspace skills, and each project's skills for the chat composer
@@ -170,6 +180,8 @@ async function parse(c: Context<Env>, partial: boolean, cur?: Record<string, any
   const raw = await c.req.json().catch(() => null);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "body must be a JSON object" };
   const b = { ...raw, ...force };
+  // A command the sandbox runs and spending limits: owners and admins only. A form that resends the current value is not a change.
+  if (["test_command", "cap_usd", "cap_tokens"].some((k) => b[k] !== undefined && String(b[k] ?? "") !== String(cur?.[k] ?? ""))) requireRole(c);
   const m = pick(c, b);
   if ("error" in m) return m;
   const v: Omit<Fields, "tracker"> = { ...m.v };

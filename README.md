@@ -341,6 +341,9 @@ tasks.md          milestone checklist
   the proxy set `X-Forwarded-For` itself (Polaris uses the last entry); otherwise leave it unset. Every response carries a
   CSP (own scripts only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`,
   so no page can frame the dashboard; requests with an unknown `Host` header get 421 (DNS rebinding).
+- **Roles.** A workspace's creator is its `owner`; other members are `member` unless an owner makes them `admin`. Only owners
+  and admins change providers, workspace settings, prompts and lessons, a project's repository and commands, a ticket's test
+  command and caps, and approve (merge); members read, file and edit tickets, comment, run, reject and chat.
 - **Secrets.** Provider keys and tokens are encrypted at rest with `POLARIS_SECRET_KEY`, never returned by the API and
   never put in agent context or events. Changing a provider's base URL clears its stored key or tokens unless a new key
   is sent with it, so "Test" can't send them to another host.
