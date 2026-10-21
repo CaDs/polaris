@@ -79,8 +79,10 @@ budget ended it. The loop now watches for that, without a decision model. Consta
 - **`run_metrics`**, one per run right before `run_finished`: `{turns, tool_calls, tool_errors, repeated_calls (same name +
   input as an earlier call of the run), repeated_reads (dedupe stubs), compactions, first_edit_turn (1-based), files_changed
   (worker: paths changed against base incl. untracked, minus `.polaris` scratch; else null), turns_pct, minutes, minutes_pct
-  (null without a deadline), input, output, cache_read, stuck: null | {turn, signal, action}}`. Percentages are 0–100 of the
-  budget; `minutes` is elapsed wall time (1 decimal). The loop logs it for direct runs (CLI); the pipeline logs one for the
+  (null without a deadline), model_secs, tool_secs, shell_secs, input, output, cache_read, stuck: null | {turn, signal,
+  action}}`. Percentages are 0–100 of the budget; `minutes` is elapsed wall time (1 decimal); `model_secs` is time waiting
+  for model calls, `tool_secs` running tools and `shell_secs` the shell commands among them (whole seconds; fix rounds add
+  up). The run's metrics line shows them ("model 3.1 min · tools 1.8 min (shell 1.7 min)"). The loop logs it for direct runs (CLI); the pipeline logs one for the
   whole run instead: fix rounds add up (their turns offset), worker turns/minutes are of the attempt's budget, tokens are
   the run's (`run_finished` usage, reviewer included).
 - **API**: `GET /api/runs/:id/metrics` (the payload, 404 before there is one); `metrics` on each run of `GET

@@ -8,7 +8,7 @@ import { db, migrate } from "../server/db.ts";
 import { createRun, eventLog, subscribe } from "../server/agent/events.ts";
 import { runAgent, type RunOptions } from "../server/agent/loop.ts";
 import { fakeProvider, type Turn } from "../server/agent/providers/fake.ts";
-import { tools } from "../server/agent/tools.ts";
+import { hostExec, tools } from "../server/agent/tools.ts";
 import type { ToolUseBlock } from "../server/agent/types.ts";
 
 migrate();
@@ -183,7 +183,7 @@ test("repeat_call: the third identical read with the same result gets a nudge; a
   });
   assert.deepEqual(r.metrics, {
     turns: 6, tool_calls: 5, tool_errors: 0, repeated_calls: 2, repeated_reads: 2, compactions: 0, first_edit_turn: 1, files_changed: null,
-    turns_pct: 60, minutes: 0, minutes_pct: null, input: 600, output: 120, cache_read: 42, stuck: { turn: 4, signal: "repeat_call", action: "nudge" },
+    turns_pct: 60, minutes: 0, minutes_pct: null, model_secs: 0, tool_secs: 0, shell_secs: 0, input: 600, output: 120, cache_read: 42, stuck: { turn: 4, signal: "repeat_call", action: "nudge" },
   });
   assert.deepEqual(metricsOf(t.runId), r.metrics);
 });
@@ -215,4 +215,18 @@ test("no_progress: 8 read-only turns after a write nudge, 4 more stop; before an
   const failing = run(Array.from({ length: 5 }, (_, i) => [use(`f${i}`, "edit_file", { path: "nope.txt", old_string: `x${i}`, new_string: "y" })]));
   await failing.done;
   assert.deepEqual(stuckEvents(failing.runId)[0], { turn: 3, signal: "repeat_error", action: "nudge", detail: "a call that failed 3 times in a row with: InvalidArguments: file not found: nope.txt" });
+});
+
+test("run metrics say where the time went: model, tools, and shell commands within tools", async () => {
+  // A fake clock: 5 s per model call, 3 s per shell command; reading a file takes no time on it.
+  let clock = 0;
+  const f = fakeProvider([[use("s", "shell", { command: "true" }), use("r", "read_file", { path: "x" })], [{ type: "text", text: "done" }]]);
+  const t = run([], {
+    now: () => clock,
+    provider: { stream: (req, on) => ((clock += 5000), f.provider.stream(req, on)) },
+    exec: (command, o) => ((clock += 3000), hostExec(command, o)),
+  });
+  const r = await t.done;
+  assert.equal(r.status, "passed");
+  assert.deepEqual([r.metrics.model_secs, r.metrics.tool_secs, r.metrics.shell_secs], [10, 3, 3]);
 });

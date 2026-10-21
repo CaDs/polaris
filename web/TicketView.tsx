@@ -216,6 +216,7 @@ const gateFailure = (p: any) =>
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const pct = (n: number | null) => (n === null ? "" : ` (${Math.round(n)}%)`);
 // "34 turns (28%) · 41 tool calls · 2 errors · 3 repeated · first edit at turn 6 · 5 files · 12 min (20%)"; minutes from the run row.
+const secs = (s: number) => (s < 60 ? `${s} s` : `${Math.round(s / 6) / 10} min`);
 function metricsLine(m: RunMetrics, r: Run) {
   const min = r.started_at ? ((r.ended_at ?? Date.now()) - r.started_at) / 60_000 : null;
   return [
@@ -226,6 +227,7 @@ function metricsLine(m: RunMetrics, r: Run) {
     m.first_edit_turn === null ? "no edits" : `first edit at turn ${m.first_edit_turn}`,
     m.files_changed !== null && plural(m.files_changed, "file"),
     min !== null && `${min < 1 ? "<1" : Math.round(min)} min${pct(m.minutes_pct)}`,
+    m.model_secs !== undefined && `model ${secs(m.model_secs)} · tools ${secs(m.tool_secs ?? 0)} (shell ${secs(m.shell_secs ?? 0)})`,
     m.stuck && `stuck at turn ${m.stuck.turn}: ${m.stuck.signal}, ${m.stuck.action === "stop" ? "stopped" : "nudged"}`,
   ].filter(Boolean).join(" · ");
 }
