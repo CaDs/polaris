@@ -54,3 +54,14 @@ test("the API binds to loopback by default", async () => {
     child.kill();
   }
 });
+
+test("the server refuses to start with an unset, short or placeholder BETTER_AUTH_SECRET", async () => {
+  for (const secret of ["change-me-to-32-plus-random-chars", "short", ""]) {
+    const child = spawn(process.execPath, ["server/index.ts"], { env: { ...process.env, BETTER_AUTH_SECRET: secret, PORT: "0", POLARIS_DATA_DIR: mkdtempSync(join(tmpdir(), "sec-")) } });
+    let err = "";
+    child.stderr.on("data", (d) => (err += d));
+    const [code] = await once(child, "exit");
+    assert.notEqual(code, 0, `secret "${secret}"`);
+    assert.match(err, /BETTER_AUTH_SECRET/);
+  }
+});

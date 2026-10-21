@@ -12,6 +12,15 @@ if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" && process.env.POLARIS_ALLO
   process.exit(1);
 }
 
+// Sessions and API tokens are signed with BETTER_AUTH_SECRET: unset, short or the public .env.example placeholder would let anyone forge them.
+const authSecret = process.env.BETTER_AUTH_SECRET;
+if (!authSecret || authSecret.length < 32 || authSecret === "change-me-to-32-plus-random-chars") {
+  console.error("BETTER_AUTH_SECRET is unset, shorter than 32 characters or still the .env.example placeholder, so sessions could be forged. Set a random one: `openssl rand -hex 32` (or run `make setup`).");
+  process.exit(1);
+}
+if (!/^[0-9a-fA-F]{64}$/.test(process.env.POLARIS_SECRET_KEY ?? ""))
+  console.warn("POLARIS_SECRET_KEY is unset or not 64 hex chars (`openssl rand -hex 32`): provider keys cannot be stored until it is.");
+
 // Built dashboard (npm run build). In dev, Vite serves it and proxies /api here.
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("*", serveStatic({ path: "./dist/index.html" }));

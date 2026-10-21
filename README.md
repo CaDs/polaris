@@ -173,7 +173,7 @@ Official contract: [Sign in with ChatGPT](https://developers.openai.com/siwc/tok
 
 | Variable | Purpose |
 |---|---|
-| `BETTER_AUTH_SECRET` | Session signing secret (required, 32+ characters) |
+| `BETTER_AUTH_SECRET` | Session signing secret (required: the server exits without 32+ characters or with the `.env.example` placeholder) |
 | `BETTER_AUTH_URL` | Public URL of the API (default `http://localhost:3000`) |
 | `WEB_ORIGIN` | Origin of the dashboard (default `http://localhost:5173` in dev) |
 | `POLARIS_SECRET_KEY` | 64 hex characters; encrypts provider API keys and OAuth tokens at rest |
