@@ -402,6 +402,8 @@ export function Transcript({ run, onFinish }: { run: Run; onFinish: () => void }
             ? <p key={e.seq} className="muted">Read-only checkout at <span className="mono">{p.base_sha.slice(0, 8)}</span></p>
             : <p key={e.seq} className="muted">Detached worktree at <span className="mono">{p.base_sha.slice(0, 8)}</span> (eval case)</p>;
         if (e.type === "setup" && p.step === "skills") return null; // shown in the header
+        if (e.type === "setup" && p.step === "resumed")
+          return <div key={e.seq} className="divider" role="separator">Resumed after a server restart: the interrupted run's {p.turns} turns and its worktree are kept</div>;
         if (e.type === "setup" && p.step === "sandbox") return <p key={e.seq} className="muted">Sandbox <span className="mono">{p.sandbox}</span> ready</p>;
         if (e.type === "setup" && p.step === "context")
           return <p key={e.seq} className="muted">Context window <span className="mono">{p.window.toLocaleString()}</span> tokens ({p.source}); compacts at <span className="mono">{p.compact_at.toLocaleString()}</span></p>;

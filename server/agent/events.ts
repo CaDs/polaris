@@ -55,12 +55,12 @@ export const liveStream = (runId: string) => (e: StreamEvent) => {
 
 export function createRun(r: {
   ticketId: string; model: string; worktree?: string; role?: string; attempt?: number; providerId?: string | null;
-  promptVersion?: number; lessonsVersion?: number | null; evalRunId?: string; evalCaseId?: string; wikiOp?: string; baseSha?: string;
+  promptVersion?: number; lessonsVersion?: number | null; evalRunId?: string; evalCaseId?: string; wikiOp?: string; baseSha?: string; resumedFrom?: string;
 }) {
   const id = randomUUID();
-  db.prepare("INSERT INTO runs (id, ticket_id, model, worktree, role, attempt, provider_id, prompt_version, lessons_version, eval_run_id, eval_case_id, wiki_op, base_sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT INTO runs (id, ticket_id, model, worktree, role, attempt, provider_id, prompt_version, lessons_version, eval_run_id, eval_case_id, wiki_op, base_sha, resumed_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
     id, r.ticketId, r.model, r.worktree ?? null, r.role ?? "worker", r.attempt ?? 1, r.providerId ?? null,
-    r.promptVersion ?? null, r.lessonsVersion ?? null, r.evalRunId ?? null, r.evalCaseId ?? null, r.wikiOp ?? null, r.baseSha ?? null,
+    r.promptVersion ?? null, r.lessonsVersion ?? null, r.evalRunId ?? null, r.evalCaseId ?? null, r.wikiOp ?? null, r.baseSha ?? null, r.resumedFrom ?? null,
   );
   touchRun(id);
   return id;
