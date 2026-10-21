@@ -9,7 +9,7 @@ import { subscribe, subscribeWorkspace, touch, type Change, type LiveEvent, type
 import { git, MergeError, scratchPathspec } from "./git.ts";
 import { providerRoutes } from "./providers.ts";
 import { failures, mine } from "./failures.ts";
-import { activePrompt, addPrompt, caseSet, currentLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
+import { activePrompt, addPrompt, caseSet, currentLessons, decideLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, projectSettings, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, TREE, withStates } from "./planner.ts";
 import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
@@ -433,7 +433,8 @@ async function textBody(c: Context<Env>, max: number, what: string): Promise<{ e
   return { v: b.body.trim() };
 }
 
-// Every version, newest first, with the run/ticket a reflection came from. The newest is the active one.
+// Every version, newest first, with the run/ticket a reflection came from. The active one is the newest with state accepted;
+// a pending candidate (state pending) is the newest version when there is one.
 app.get("/api/lessons", (c) =>
   c.json({
     max: LESSONS_MAX,
@@ -451,6 +452,10 @@ app.put("/api/lessons", async (c) => {
   if (cur?.body === b.v || (!cur && !b.v)) return c.json(cur ?? null);
   return c.json(saveLessons(c.get("workspaceId"), b.v, { source: "human", author: email(c) }), 201);
 });
+
+// A reflection's or mining's candidate: Accept makes it the active version, Discard drops it. 404 when it is not pending.
+for (const [verb, accept] of [["accept", true], ["discard", false]] as const)
+  app.post(`/api/lessons/:id/${verb}`, (c) => (decideLessons(c.get("workspaceId"), c.req.param("id"), accept) ? c.json({ ok: true }) : c.json({ error: "not_found" }, 404)));
 
 app.post("/api/lessons/:id/restore", (c) => {
   const l = db.prepare("SELECT * FROM lessons WHERE id = ? AND workspace_id = ?").get(c.req.param("id"), c.get("workspaceId")) as { body: string; version: number } | undefined;

@@ -136,7 +136,7 @@ Code: `server/failures.ts`; migration 017.
   {verdict: repo|harness, title, spec, lesson, confidence 0–1}` that is read, never run. `repo` → a `todo` ticket with
   `mined_class`, the label `mined` (created when missing), and the model's spec followed by `## Mined from failures`
   (class, counts, confidence, the example reasons); at most 5 per mining. `harness` → the lesson is appended to the
-  lessons as a new version (source reflection on the newest example run) unless it is there already or would overflow
+  lessons as a new pending version (source reflection on the newest example run) unless it is there already or would overflow
   them. A broken answer skips its class. The result `{id, created: [{class, ticket_id, key, title, confidence}], lessons:
   [{class, version, lesson, confidence}], skipped: [{class, why}]}` is stored in `minings` and returned.
 - Mined tickets never run on their own: a person reads them and presses Run. The ticket page shows "mined from <class>".
@@ -269,7 +269,7 @@ The harness gets better at the user's repo in three loops of increasing risk. Ev
 (`lessons`, `prompts`, `eval_cases`, `eval_runs`, `eval_results`; migration 006), never in the worktree, so no agent tool
 can read or write it, and every change is a new version you can see in full on the **Learning** page (route `/improvement`).
 
-1. **Reflection → lessons** (lowest risk, applies at once). When a run series ends (it passed → review, it failed for
+1. **Reflection → lessons** (waits for a human: the digest carries run and test output the repository controls, and lessons reach every run of every project in the workspace). When a run series ends (it passed → review, it failed for
    good after its retries, or a reviewer rejected it with a note) the harness makes one extra call, except when it failed
    with a provider or environment error (`failureClass`): a lesson about a timeout or a restart misleads every later run,
    so the event is `reflection {skipped: <class>}`. The call: a fresh one-message
@@ -279,9 +279,15 @@ can read or write it, and every change is a new version you can see in full on t
    note); never the transcript. Output: the full updated document (short imperative bullets about this repo and harness,
    deduped), capped at 8,000 chars (≈ 2,000 tokens; asked for in the prompt, then cut at a line break), common secret
    shapes redacted. Same text → no new version. Each version records its source (reflection on run X / human edit /
-   restore of vN). The latest version goes into the first user message of every new run as `# Lessons from earlier runs`
-   (never the system prompt: that would bust the cache prefix); runs record `lessons_version`. Because lessons apply
-   immediately, the Learning page shows them in full with a diff per version and one-click **Restore** (a new version).
+   restore of vN). A reflection's (and a mining's) version is a **pending candidate** (`lessons.state`: `accepted` | `pending` |
+   `discarded`; migration 009; versions that existed before it are accepted): no run sees it until a human presses
+   **Accept** on the Learning page (`POST /api/lessons/:id/accept`; **Discard**: `/discard`), which shows the candidate with a
+   diff against the active version. A newer candidate or a human edit supersedes (discards) the pending one, so at most one is
+   pending; the next reflection builds on it. A human edit or restore is accepted at once. The reflection instructions fence the digest as untrusted data.
+   The latest *accepted* version goes into the first user message of every new run as `# Lessons from earlier runs`
+   (never the system prompt: that would bust the cache prefix); runs record `lessons_version`. The Learning page shows every
+   version in full with a diff and one-click **Restore** (a new, accepted version).
+   ponytail: no `auto_accept_lessons` setting; add it if someone wants lessons to apply unattended again.
    The run gets a `reflection` event (lessons version, chars, usage) just before `run_finished`, so it shows in the
    transcript; reflection tokens are booked as background usage in the ledger, separately from execution counters on the run. Reflections of one workspace are serialized.
 2. **Eval suite from past tickets.** "Add to evals" on an approved (done) ticket freezes a case: title + spec, repo,

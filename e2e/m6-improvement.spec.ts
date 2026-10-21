@@ -25,9 +25,15 @@ test("M6: reflection → lessons, eval case from an approved ticket, eval-gated 
   await page.getByRole("button", { name: "Add to evals" }).click();
   await expect(page.getByText("In evals")).toBeVisible({ timeout: 60_000 });
 
-  // Lessons written by the reflection, with history.
+  // Lessons proposed by the reflection wait for Accept (POL-10), with history.
   await more(page, "Learning");
   const lessons = page.getByRole("textbox", { name: "Lessons" });
+  await expect(lessons).toHaveValue("");
+  const pending = page.getByRole("group", { name: "Pending lessons" });
+  await expect(pending).toContainText("Pending: v1");
+  await expect(pending.locator(".add")).toHaveText("+- APP-1 Make ok file: passed");
+  await pending.getByRole("button", { name: "Accept" }).click();
+  await expect(pending).toBeHidden();
   await expect(lessons).toHaveValue("- APP-1 Make ok file: passed");
   const history = page.getByRole("list", { name: "Lessons history" });
   await expect(history.getByRole("listitem", { name: "Lessons v1" })).toContainText("reflection on APP-1 (run #2)");
