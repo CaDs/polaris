@@ -464,7 +464,11 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
 - **Per-child test command.** `create_ticket` takes an optional `test_command` (validated like the API: a string of ≤ 2,000
   chars, `""` = none) stored as the child's `tickets.test_command` (default: the epic's own, if it has one), which replaces the workspace command in its gate. The
   planner gives one to a child whose part can't pass the full suite until later children land (a single test file, a
-  `--test-name-pattern`, `npx tsc --noEmit`). The children list shows each child's command.
+  `--test-name-pattern`, `npx tsc --noEmit`). The children list shows each child's command. A planner picks that command from
+  text a prompt injection can reach (`true` would pass), so **auto-approve skips a passing child whose command is neither the
+  project's nor its top-level epic's** (`ownGate`): it waits in `review` for a human who sees the command (ticket view,
+  children list). The command still replaces the project's in that child's gate (the TDD flow depends on it); the epic gate
+  at the end runs the project's.
 - **Epic gate.** `complete_epic` (after the open-children check) runs the epic's test command (its own `test_command`,
   else the workspace's) on the base branch's current head, after the setup command, in a fresh detached worktree +
   sandbox that is always removed (planner rounds have no sandbox of their own). It fails → the call is refused with the

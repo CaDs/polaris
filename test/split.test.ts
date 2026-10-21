@@ -9,6 +9,15 @@ const { configure, fileTicket, call, db, events, idle, listen, sh, task, until, 
 const { hostExec, runTool } = await import("../server/agent/tools.ts");
 const { plannerTools } = await import("../server/planner.ts");
 
+// A child whose own gate a planner chose is never auto-approved (POL-9): these flows need the human's click. Polls for them.
+function approver(ws: string, cookie: string) {
+  const timer = setInterval(() => {
+    const ids = db.prepare("SELECT id FROM tickets WHERE workspace_id = ? AND status = 'review' AND parent_id IS NOT NULL AND kind = 'task' AND test_command IS NOT NULL").all(ws) as { id: string }[];
+    for (const { id } of ids) void call("POST", `/api/tickets/${id}/approve`, cookie);
+  }, 300);
+  return () => clearInterval(timer);
+}
+
 test("settings: auto_split defaults on and round-trips; size hint and triage model are stored and validated", async () => {
   const w = await workspace("set", { test_command: "true" });
   const d = (await call("GET", "/api/settings", w.cookie)).body;
@@ -49,6 +58,7 @@ test("escalation: a task failing every attempt becomes a Split epic with the fai
   const w = await workspace("esc", { test_command: "false", auto_approve_children: true });
   const t = await w.create({ title: "Big change", spec: "Write both parts. SPLIT-ME", test_command: "test -f part1.txt && test -f part2.txt" });
   assert.equal((await call("POST", `/api/tickets/${t.id}/runs`, w.cookie)).status, 201);
+  const stop = approver(w.ws, w.cookie);
   const failed = await until("escalated", async () => {
     const x = await w.get(t.id);
     return x.status === "failed" && x.escalated_key && x;
@@ -73,10 +83,12 @@ test("escalation: a task failing every attempt becomes a Split epic with the fai
   assert.deepEqual([sh(w.repo, "git show main:part1.txt"), sh(w.repo, "git show main:part2.txt")], ["part1", "part2"]);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tickets WHERE workspace_id = ? AND title LIKE 'Split:%'").get(epic.workspace_id)!.n, 1);
   await idle(epic.workspace_id);
+  stop();
 });
 
 test("escalation of a child: the Split epic is a sibling, dependents wait for it, the parent is not woken for the failure", async () => {
   const w = await workspace("spl", { test_command: "test -f part1.txt && test -f part2.txt", auto_approve_children: true });
+  const stop = approver(w.ws, w.cookie);
   const root = await w.create({ title: "Two files", spec: "SPLIT-CHILD", kind: "epic" });
   assert.equal((await call("POST", `/api/tickets/${root.id}/runs`, w.cookie)).status, 201);
   const at = await until("A split", async () => {
@@ -105,6 +117,7 @@ test("escalation of a child: the Split epic is a sibling, dependents wait for it
   assert.match(task(done.runs[0].id), /- Failed children: a child task that fails every attempt is split automatically/);
   assert.equal(sh(w.repo, "git ls-tree -r --name-only main"), "README.md\nb.txt\npart1.txt\npart2.txt");
   await idle(root.workspace_id);
+  stop();
 });
 
 test("no escalation at the depth limit (a child of a sub-epic) or with auto_split off", async () => {
@@ -131,6 +144,7 @@ test("no escalation at the depth limit (a child of a sub-epic) or with auto_spli
 
 test("epic gate: a failing workspace test command refuses complete_epic; the planner adds a fix child; then it passes", async () => {
   const w = await workspace("gat", { test_command: "test -f a.txt && test -f fix.txt", auto_approve_children: true });
+  const stop = approver(w.ws, w.cookie);
   const e = await w.create({ title: "Gated", spec: "EPIC-GATE-FAIL", kind: "epic" });
   await call("POST", `/api/tickets/${e.id}/runs`, w.cookie);
   const d = await w.is(e.id, "review");
@@ -143,6 +157,7 @@ test("epic gate: a failing workspace test command refuses complete_epic; the pla
   assert.equal(events(d.runs[1].id).find((x) => x.type === "round_finished")!.p.completed, false);
   assert.equal(sh(w.repo, "git show main:fix.txt"), "fix");
   await idle(e.workspace_id);
+  stop();
   assert.equal(sh(w.repo, "git worktree list").split("\n").length, 1); // the gate's checkouts are removed
 
   // No test command: no epic gate.
@@ -217,6 +232,7 @@ test("triage: score ≥ 3 splits before any run, < 3 runs directly, an error run
 test("escalation: the Split epic copies the ticket's tracker fields; its children inherit them as the planner's do", async () => {
   const w = await workspace("trk", { test_command: "test -f part1.txt && test -f part2.txt", auto_approve_children: true });
   const ws = w.ws;
+  const stop = approver(ws, w.cookie);
   const me = (db.prepare("SELECT userId FROM member WHERE organizationId = ?").get(ws) as { userId: string }).userId;
   db.prepare("INSERT INTO labels (id, workspace_id, name, color) VALUES ('l1', ?, 'bug', 'red'), ('l2', ?, 'ui', 'blue')").run(ws, ws);
   db.prepare("INSERT INTO milestones (id, project_id, name, position) VALUES ('m1', ?, 'Beta', 0)").run(w.project.id);
@@ -239,4 +255,5 @@ test("escalation: the Split epic copies the ticket's tracker fields; its childre
   assert.equal(done.children.length, 2);
   for (const k of done.children) assert.deepEqual([fields(k.id).project_id, fields(k.id).milestone_id, fields(k.id).cycle_id, fields(k.id).priority], [w.project.id, "m1", "c1", 2]);
   await idle(ws);
+  stop();
 });

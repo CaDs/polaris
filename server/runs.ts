@@ -786,11 +786,19 @@ async function execute(runId: string) {
     else if (status === "failed" && s?.auto_split && canSplit(t) && !/(^|the fix round ended: )(ProviderError|UnexpectedEnvironment|Unknown|stuck|SpendingCap):/.test(reason ?? "")) await split(t, previousAttempt(t.id, reply));
     else {
       setTicket(t.id, TICKET_STATUS[status]);
-      if (status === "passed" && t.parent_id && s?.auto_approve_children) await autoApprove(t.id, runId);
+      if (status === "passed" && t.parent_id && s?.auto_approve_children && ownGate(t, s)) await autoApprove(t.id, runId);
       else if (status === "passed") notify(t.workspace_id, t.id, "review", `${t.key} is ready for review`);
       else if (status === "failed") notify(t.workspace_id, t.id, "failed", `${t.key} failed: ${reason ?? "unknown reason"}`);
     }
   });
+}
+
+// Auto-approve only a child whose gate is the project's or its (top-level, human-made) epic's: any other gate came from a
+// planner (POL-9), and a human approves that diff.
+function ownGate(t: TicketRow, s: ProjectSettings) {
+  if (t.test_command === null || t.test_command === s.test_command) return true;
+  const epic = t.parent_id ? ticketRow(t.parent_id) : undefined;
+  return !!epic && !epic.parent_id && t.test_command === epic.test_command;
 }
 
 // Auto-approve (M7 workspace setting): the Approve button's merge path. A failed merge leaves the child in review.
@@ -873,7 +881,7 @@ async function afterRound(t: TicketRow, runId: string, status: RunStatus, reason
   if (summary === undefined) return wake(t.id);
   db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(summary, t.id);
   setTicket(t.id, "review");
-  if (t.parent_id && settingsFor(t.workspace_id).auto_approve_children) await approve(t.id);
+  if (t.parent_id && settingsFor(t.workspace_id).auto_approve_children && ownGate(t, projectSettings(t.project_id)!)) await approve(t.id);
 }
 
 // The reason is the epic's handoff: its own view shows it, and a parent planner reads it.

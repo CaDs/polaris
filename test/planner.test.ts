@@ -384,3 +384,21 @@ test("every worktree and branch is cleaned up", async () => {
   }
   assert.deepEqual(readdirSync(join(process.env.POLARIS_DATA_DIR!, "worktrees")), []);
 });
+
+test("POL-9: with auto-approve on, a child whose gate the planner chose (here: `true`) stays in review after passing; one on the project's gate is merged", async () => {
+  const w = await workspace("p9a", true, { wiki: false });
+  const e = (await fileTicket(w.cookie, { title: "E", kind: "epic" })).body;
+  const use = (input: Record<string, unknown>) =>
+    runTool(plannerTools(e, {}, 0, async () => undefined), { type: "tool_use", id: "x", name: "create_ticket", input }, { root: w.repo, exec: hostExec });
+  await use({ title: "Create a.txt", spec: "s", test_command: "true" }); // the gate a prompt-injected planner would pick
+  await use({ title: "Create b.txt", spec: "s" });
+  const kids = (await w.get(e.id)).children;
+  assert.deepEqual(kids.map((k: any) => k.test_command), ["true", null]);
+  for (const k of kids) assert.equal((await call("POST", `/api/tickets/${k.id}/runs`, w.cookie)).status, 201); // the test's startChild is a no-op
+  await w.is(kids[1].id, "done");
+  await w.is(kids[0].id, "review");
+  await idle(e.workspace_id);
+  assert.equal((await w.get(kids[0].id)).status, "review"); // a human reads the diff and the gate
+  assert.equal(sh(w.repo, "git ls-tree -r --name-only main"), "README.md\nb.txt");
+  db.prepare("DELETE FROM tickets WHERE workspace_id = ?").run(e.workspace_id);
+});
