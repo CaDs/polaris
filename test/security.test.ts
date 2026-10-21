@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostExec, isProtected, readAt, runTool, spill, tools, toolsFor, writeAt } from "../server/agent/tools.ts";
@@ -138,4 +138,47 @@ test("compaction refuses a planted .polaris/history symlink and writes nothing o
   const r = await runAgent({ provider: fake.provider, model: "fake", system: "s", task: "T", tools, root, compactAt: 1000, budget: { maxTurns: 20, maxTokens: 1e6 }, onEvent: () => {} });
   assert.equal(r.status, "failed");
   assert.deepEqual(readdirSync(outside), []);
+});
+
+test("file tools refuse FIFOs and oversized files without blocking the event loop (POL-6)", async () => {
+  const root = tmp("sec-fifo-");
+  execFileSync("mkfifo", [join(root, "p")]);
+  writeFileSync(join(root, "big"), ""), truncateSync(join(root, "big"), 1024 ** 3); // sparse: costs no disk
+  const t0 = Date.now();
+  for (const [name, input] of [["read_file", { path: "p" }], ["edit_file", { path: "p", old_string: "x", new_string: "y" }], ["edit_file", { path: "p", old_string: "", new_string: "y" }]] as const) {
+    const r = await call(root, name, input);
+    assert.match(JSON.stringify(r), /not a regular file/);
+  }
+  assert.match(JSON.stringify(await call(root, "read_file", { path: "big" })), /file too large/);
+  assert.ok(Date.now() - t0 < 1000);
+  // changedLines counts neither (and does not hang on the FIFO)
+  repoWith(root + "-repo");
+  const repo = root + "-repo";
+  const base = sh(repo, "git rev-parse HEAD");
+  execFileSync("mkfifo", [join(repo, "q")]);
+  writeFileSync(join(repo, "big"), ""), truncateSync(join(repo, "big"), 1024 ** 3);
+  writeFileSync(join(repo, "n.txt"), "1\n2\n");
+  assert.equal(await changedLines(repo, base), 2);
+});
+
+// The parent-dir race: `a` flips between a real dir and a symlink to a dir outside, while the tools hammer a/x.
+test("a parent dir swapped for a symlink never lets a file tool touch a file outside the root (POL-7)", async () => {
+  const outside = tmp("sec-race-out-");
+  writeFileSync(join(outside, "x"), "SENTINEL");
+  const root = tmp("sec-race-");
+  mkdirSync(join(root, "real"));
+  writeFileSync(join(root, "real/x"), "inside");
+  // The swapper is its own process: a loop in this thread could never interleave with the (synchronous) tool I/O.
+  const swapper = spawn("sh", ["-c", `while :; do rm -rf a; ln -s '${outside}' a; rm a; mkdir a; echo inside > a/x; done`], { cwd: root, stdio: "ignore" });
+  let leaked = 0;
+  for (let i = 0; i < 2000; i++) {
+    const r = JSON.stringify(await call(root, "read_file", { path: "a/x" }));
+    if (r.includes("SENTINEL")) leaked++;
+    await call(root, "edit_file", { path: "a/x", old_string: "SENTINEL", new_string: "PWNED" });
+    await call(root, "edit_file", { path: "a/x", old_string: "inside", new_string: "edited" });
+  }
+  swapper.kill();
+  assert.equal(leaked, 0);
+  assert.equal(readFileSync(join(outside, "x"), "utf8"), "SENTINEL");
+  assert.deepEqual(readdirSync(outside), ["x"]);
 });

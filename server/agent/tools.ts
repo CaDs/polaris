@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, statSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { AgentError, type ErrorKind, type ToolDef, type ToolUseBlock } from "./types.ts";
@@ -41,36 +41,64 @@ export function writeScratch(root: string, rel: string, text: string, append = f
   writeAt(join(resolveIn(root, dirname(rel)), basename(rel)), text, append ? constants.O_APPEND : constants.O_TRUNC);
 }
 
-// Files at a resolveIn path are opened once, by descriptor, never following a final symlink: one planted after the check
-// (by a process still running in the sandbox) fails instead of redirecting the read or write outside root. null: no file.
-// ponytail: a parent dir swapped for a symlink between resolveIn and open still wins; openat if that matters.
+// Files at a resolveIn path (a real path) are opened once, by descriptor, never following a final symlink: one planted after
+// the check (by a process still running in the sandbox) fails instead of redirecting the read or write outside root.
+// O_NONBLOCK: a FIFO with no writer would block the whole server in open(); it is then refused as not a regular file.
+// A swapped parent dir is caught after the open: the fd must be the file that `file` still names, with no symlink in its
+// parents (realpath of /proc/self/fd/N on Linux; elsewhere realpath of `file` plus dev/ino equal to the fd's). So a
+// write opens without O_TRUNC and truncates only after that check. null: no file.
+// ponytail: mkdir of missing parent dirs (writeAt) and O_CREAT itself still follow a parent swapped in that instant: on
+// macOS (no /proc) an empty file or dir can land outside root, never content; openat would close it.
+export const MAX_FILE = 5_000_000; // read_file/edit_file/apply_patch refuse bigger files
 function openAt(file: string, flags: number) {
+  let fd: number;
   try {
-    return openSync(file, flags | constants.O_NOFOLLOW, 0o644);
+    fd = openSync(file, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o644);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
     if (code === "ELOOP") throw new AgentError("InvalidArguments", `refusing to follow a symlink: ${file}`);
     if (code === "EEXIST") throw new AgentError("InvalidArguments", `already exists: ${file}`);
+    if (code === "ENXIO") throw new AgentError("InvalidArguments", `not a regular file: ${file}`); // a FIFO with no reader
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new AgentError("InvalidArguments", `not a regular file: ${file}`);
+    let moved: boolean;
+    try {
+      moved = process.platform === "linux" ? realpathSync(`/proc/self/fd/${fd}`) !== file : (() => {
+        const now = statSync(file);
+        return realpathSync.native(file) !== file || now.ino !== st.ino || now.dev !== st.dev;
+      })();
+    } catch {
+      moved = true;
+    }
+    if (moved) throw new AgentError("InvalidArguments", `path changed while opening: ${file}`);
+    return { fd, size: st.size };
+  } catch (e) {
+    closeSync(fd);
     throw e;
   }
 }
 export function readAt(file: string) {
-  const fd = openAt(file, constants.O_RDONLY);
-  if (fd === null) return null;
+  const f = openAt(file, constants.O_RDONLY);
+  if (f === null) return null;
   try {
-    return readFileSync(fd);
+    if (f.size > MAX_FILE) throw new AgentError("InvalidArguments", `file too large (${f.size} bytes, max ${MAX_FILE}): ${file}`);
+    return readFileSync(f.fd);
   } finally {
-    closeSync(fd);
+    closeSync(f.fd);
   }
 }
 export function writeAt(file: string, text: string, mode: number = constants.O_TRUNC) {
   mkdirSync(dirname(file), { recursive: true });
-  const fd = openAt(file, constants.O_WRONLY | constants.O_CREAT | mode)!;
+  const f = openAt(file, constants.O_WRONLY | constants.O_CREAT | (mode & ~constants.O_TRUNC))!;
   try {
-    writeFileSync(fd, text);
+    if (mode & constants.O_TRUNC) ftruncateSync(f.fd);
+    writeFileSync(f.fd, text);
   } finally {
-    closeSync(fd);
+    closeSync(f.fd);
   }
 }
 function unlinkAt(file: string, p: string) {
