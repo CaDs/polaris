@@ -411,6 +411,12 @@ previous run's `run_finished` reason, its failing gate output, and the last revi
 - **Tool input errors.** `InvalidArguments` about a tool's input shape (missing or mistyped field) ends with
   `Expected input: {command: string, timeout?: number}`, derived from the tool's schema. Path errors do not.
 - **Per-ticket test command.** The ticket view and New ticket dialog edit `tickets.test_command` (empty = workspace default).
+- **Human review.** A ticket in `review` opens on an evidence-first verdict card: the diff's run supplies the last test
+  result, model review (and reviewer model), effort metrics, and the worker's final summary before the last test gate.
+  Fix rounds, flaky re-runs, review findings, missing tests or review, and multiple worker attempts are notes rather than
+  clean checks. Comments follow the card, then collapsed Ticket (editable spec and test command), Changes (per-file diff),
+  and How it got here (runs and transcript) disclosures; their contents remain rendered while closed. Other statuses keep
+  the spec-first layout. Approval merges the branch and rejection keeps the existing optional steering-note flow.
 
 ## Model review (M8)
 
