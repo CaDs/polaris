@@ -50,7 +50,7 @@ Needs Docker, and Ollama for the default provider. A level takes 5 to 60 minutes
 1. `run.ts` starts `node <server-dir>/server/index.ts` once, on a free port, with a temp `DB_PATH` / `POLARIS_DATA_DIR`
    and `POLARIS_OPEN_SIGNUP=1`.
 2. Per level and run: a fresh target repo (template + level patch, one commit on `main`), a new user and workspace,
-   settings (setup `npm ci`, test `npm test`, protected `test/,e2e/`, model review on, children auto-approved), an Ollama
+   project for the repo (setup `npm ci`, test `npm test`, `test/,e2e/` read-only), settings (model review on, children auto-approved), an Ollama
    provider as the default with `--model`, then the ticket is created and run.
 3. It polls until the ticket, or the Split epic it escalated to and that epic's children, has nothing todo or running.
 4. Grading, only when Polaris passed it (`review` or `done`): the result (a task's review branch; an epic's merged `main`)

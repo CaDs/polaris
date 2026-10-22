@@ -243,20 +243,24 @@ if (import.meta.main) {
   const t00 = Date.now();
   for (const l of levels) {
     for (let run = 1; run <= Number(o.runs); run++) {
-      const name = `${l.level}r${run}-${Date.now()}`.toLowerCase(); // ticket key: L1R-1
+      const name = `${l.level}r${run}-${Date.now()}`.toLowerCase();
       const repo = prepare(l, join(home, "repos", name));
       const baseSha = git(repo, "rev-parse", "HEAD");
       const api = client(base);
       await api("POST", "/api/auth/sign-up/email", { email: `${name}@bench.localhost`, password: "password-123", name });
       const ws = (await api("POST", "/api/auth/organization/create", { name, slug: name })).id;
       await api("PUT", "/api/settings", {
-        repo_path: repo, base_branch: "main", setup_command: SETUP, test_command: TEST, protected_paths: PROTECTED,
         model_review: true, auto_split: o.split === "1", auto_approve_children: true, wiki: o.wiki === "1",
         max_turns: Number(o["max-turns"]), max_minutes: Number(o["max-minutes"]),
       });
+      // The repository and its commands live on a project; its key prefixes the ticket keys (L1-1).
+      const project = await api("POST", "/api/projects", {
+        name: l.title, key: l.level, repo_path: repo, base_branch: "main",
+        setup_command: SETUP, test_command: TEST, protected_paths: PROTECTED, protected_mode: "read_only",
+      });
       const prov = await api("POST", "/api/providers", providerSpec);
       await api("PUT", "/api/settings/default-provider", { provider_id: prov.id, model: o.model });
-      const t = await api("POST", "/api/tickets", { title: l.title, spec: l.spec });
+      const t = await api("POST", "/api/tickets", { title: l.title, spec: l.spec, project_id: project.id });
       await api("POST", `/api/tickets/${t.id}/runs`);
       log(`start ${l.level} run ${run} (${t.key})`);
       const t0 = Date.now();
