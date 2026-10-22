@@ -257,7 +257,7 @@ const readFile: Tool = {
       type: "object",
       properties: {
         path: { type: "string", description: "Path relative to the workspace root" },
-        offset: { type: "integer", description: "First line to read (1-based, default 1)" },
+        offset: { type: "integer", description: "First line to read (1-based, default 1; negative counts from the end)" },
         limit: { type: "integer", description: "Max lines to read (default 2000)" },
       },
       required: ["path"],
@@ -271,7 +271,9 @@ const readFile: Tool = {
     if (buf.subarray(0, 8000).includes(0)) throw new AgentError("InvalidArguments", `${p} is a binary file; inspect it with shell (file, xxd, ...)`); // git's heuristic
     if (!buf.length) return "(empty file)";
     const lines = buf.toString("utf8").split("\n");
-    const start = Math.max(1, num(input, "offset", 1));
+    // A negative offset counts from the end (-20: the last 20 lines); Flint asked for one three times in a row when it was refused.
+    const off = typeof input.offset === "number" && input.offset < 0 ? lines.length + input.offset + 1 : num(input, "offset", 1);
+    const start = Math.max(1, off);
     if (start > lines.length) throw new AgentError("InvalidArguments", `offset ${start} is past the end of ${p} (${lines.length} lines)`);
     const end = Math.min(lines.length, start - 1 + num(input, "limit", 2000));
     // Every line numbered: a bare tab gutter got copied into edit_file's old_string by local models.

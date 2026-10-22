@@ -42,7 +42,7 @@ const STUCK = {
   repeats: 3, // repeat_call: the same call (name + input) with the same result in this many of them
   errors: 3, // repeat_error: the same tool error this many times in a row
   idle: 8, // no_progress: turns in a row of only reads, searches and failed calls (a shell call that succeeds may have written)
-  explore: 12, // no_progress before the first write: only after this turn
+  explore: 20, // no_progress before the first write: only after this turn (an 11-file ticket needs the reading)
   persist: 4, // no_progress after its own nudge: this many more idle turns end the run
 };
 const WRITES = ["edit_file", "apply_patch", "delete_file"];

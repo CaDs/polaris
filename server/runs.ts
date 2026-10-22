@@ -11,7 +11,7 @@ import { anthropic, DEFAULT_MODEL } from "./agent/providers/anthropic.ts";
 import { demoProvider } from "./agent/providers/demo.ts";
 import { parseProtected, readOnlyPaths, tools, toolsFor, truncate, wikiTools, type ExecResult } from "./agent/tools.ts";
 import { addUsage, AgentError, noUsage, type AgentEvent, type Block, type EventPayloads, type Msg, type RunStatus, type Usage } from "./agent/types.ts";
-import { adapterFor, CONTEXT_WINDOW, isDecisionModel, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
+import { adapterFor, CONTEXT_WINDOW, isDecisionModel, isLocalProvider, OLLAMA_URL, ollamaWindow, openrouterWindow, providerById } from "./providers.ts";
 import { addDetached, addWorktree, adoptWorktree, changedLines, changedPaths, commitAll, excludeScratch, git, inspectRepo, merge, nestedRepos, protectedChanges, protectedFilesAt, removeWorktree, restore, scratchPathspec, snapshot } from "./git.ts";
 import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordEvalResult, reflect, seriesDigest, type EvalCase, type Prompt } from "./improve.ts";
 import { classifyRun, failureClass } from "./failures.ts";
@@ -133,11 +133,13 @@ async function rerunFlaky(first: ExecResult, again: () => Promise<ExecResult>) {
   return second.code === 0 ? { r: second, flaky: true as const, first_failure: { code: first.code, timed_out: first.timedOut, output: tail(first) } } : { r: second };
 }
 
-// A run compacts its conversation once the context passes min(70% of the provider's window, the workspace cap).
-// POLARIS_COMPACT_AT overrides it (tests).
-export function compactThreshold(capTokens: number | undefined, window: number) {
+// A run compacts its conversation once the context passes min(70% of the provider's window, the workspace cap), and for a
+// local model also LOCAL_COMPACT_AT: after a prompt-cache miss Ollama re-reads the whole context before its first byte,
+// and 145k tokens took qwen3.8 past the 600 s wait. POLARIS_COMPACT_AT overrides it (tests).
+export const LOCAL_COMPACT_AT = 64_000;
+export function compactThreshold(capTokens: number | undefined, window: number, local = false) {
   const env = Number(process.env.POLARIS_COMPACT_AT);
-  return env > 0 ? env : Math.min(Math.floor(window * 0.7), capTokens ?? SETTINGS_DEFAULTS.compact_at_tokens);
+  return env > 0 ? env : Math.min(Math.floor(window * 0.7), capTokens ?? SETTINGS_DEFAULTS.compact_at_tokens, local ? LOCAL_COMPACT_AT : Infinity);
 }
 const envWindow = () => (process.env.ANTHROPIC_BASE_URL ? CONTEXT_WINDOW.ollama : CONTEXT_WINDOW.anthropic); // no stored provider: env fallback
 
@@ -586,7 +588,7 @@ async function modelFor(run: RunRow, capTokens: number | undefined, log: Ctx["lo
   const stored = run.provider_id ? providerById(run.provider_id) : undefined;
   if (run.provider_id && !stored) throw new AgentError("ProviderError", "the run's provider was deleted");
   const w = await runWindow(stored, run.model);
-  const compactAt = compactThreshold(capTokens, w.window);
+  const compactAt = compactThreshold(capTokens, w.window, !!stored && isLocalProvider(stored));
   log({ type: "setup", payload: { step: "context", ...w, compact_at: compactAt } });
   return { stored, compactAt, providerFor: (task: string) => (stored ? adapterFor(stored) : providerConfig({ model: run.model }).provider(task)) };
 }
@@ -707,9 +709,10 @@ async function execute(runId: string) {
     ({ usage: res.usage, turns: res.turns, status: res.status, reason: res.reason, metrics: res.metrics } = a);
     reply = finalText(a.messages);
     if (res.status !== "passed") {
-      // Stuck, or out of turns, minutes or tokens: a fresh attempt with the reason fed back (a cache-miss streak spends the
-      // token budget fast; it must not end the series). The last attempt's failure is split.
-      retry = !ev && res.status === "failed" && /^(stuck:|(turn|time|token) budget exhausted)/.test(res.reason ?? "") && run.attempt < MAX_ATTEMPTS;
+      // Stuck, out of turns, minutes or tokens, or a provider that never answered (a local model re-reading a long context):
+      // a fresh attempt with the reason fed back (a cache-miss streak spends the token budget fast; it must not end the
+      // series), and it starts on a short context. The last attempt's failure is split.
+      retry = !ev && res.status === "failed" && /^(stuck:|(turn|time|token) budget exhausted|ProviderError: \S+ sent no response)/.test(res.reason ?? "") && run.attempt < MAX_ATTEMPTS;
       return;
     }
 

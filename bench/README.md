@@ -37,7 +37,7 @@ Flags: `--model` (required), `--provider` (`ollama` by default; `anthropic`, `op
 key in `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `LITELLM_API_KEY` or the variable `--api-key-env`
 names; `--base-url` for LiteLLM or a non-default endpoint), `--levels` (default all), `--runs N` (repeat each level), `--split 0|1`
 (auto-split into an epic, default 0), `--wiki 0|1` (default 0), `--max-turns` / `--max-minutes` (per attempt, default
-120 / 60), `--out`, `--tag` (default: the server checkout's short sha), `--server-dir <checkout>` (run another build's
+120 / 60), `--max-hours` (wall clock per level, default 3; a slow local model on L7 needs more), `--out`, `--tag` (default: the server checkout's short sha), `--server-dir <checkout>` (run another build's
 server, e.g. a `git worktree` of an older commit), `--ollama <url>`.
 
 The ChatGPT plan can't be benchmarked here: its sign-in lives in an instance's database and its refresh tokens rotate, so

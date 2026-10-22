@@ -93,6 +93,8 @@ test("read_file: an offset past the end, an empty file and a binary file say so"
   const past = await call("read_file", { path: "five.txt", offset: 9 });
   assert.equal(past.kind, "InvalidArguments");
   assert.match(past.content, /offset 9 is past the end of five\.txt \(5 lines\)/);
+  assert.equal((await call("read_file", { path: "five.txt", offset: -2 })).content, "4\t4\n5\t5"); // from the end
+  assert.equal((await call("read_file", { path: "five.txt", offset: -99 })).content.split("\n")[0], "1\t1");
   writeFileSync(join(root, "empty.txt"), "");
   assert.equal((await call("read_file", { path: "empty.txt" })).content, "(empty file)");
   writeFileSync(join(root, "img.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0xff, 10]));
