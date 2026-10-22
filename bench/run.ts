@@ -1,5 +1,5 @@
 // npm run bench -- --model <model> [--provider ollama|anthropic|openai|openrouter|litellm] [--api-key-env NAME] [--base-url URL]
-//                  [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N] [--max-hours N]
+//                  [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N] [--max-hours N] [--thinking on|off]
 //                  [--out bench/results/x.jsonl] [--tag <label>] [--server-dir <polaris checkout>] [--ollama URL]
 // npm run bench -- --check [--levels ...]   (no model: each level's base must fail the grader, base + answer key must pass)
 // Complexity ladder (bench/README.md): one Polaris server on a free port with a temp DB and data dir; per level and run a
@@ -32,8 +32,8 @@ const fail = (msg: string): never => {
   throw new Error(msg);
 };
 const KEY_ENV: Record<string, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY", litellm: "LITELLM_API_KEY" };
-export function providerBody(o: { provider: string; ollama: string; "api-key-env"?: string; "base-url"?: string }, env: NodeJS.ProcessEnv = process.env) {
-  if (o.provider === "ollama") return { name: "Ollama", kind: "ollama", base_url: o["base-url"] ?? o.ollama };
+export function providerBody(o: { provider: string; ollama: string; "api-key-env"?: string; "base-url"?: string; thinking?: string }, env: NodeJS.ProcessEnv = process.env) {
+  if (o.provider === "ollama") return { name: "Ollama", kind: "ollama", base_url: o["base-url"] ?? o.ollama, ...(o.thinking ? { options: { thinking: o.thinking } } : {}) };
   const keyEnv = o["api-key-env"] ?? KEY_ENV[o.provider];
   if (!keyEnv) fail(`--provider must be one of ollama, ${Object.keys(KEY_ENV).join(", ")} (the ChatGPT plan can't be benchmarked: see bench/README.md)`);
   const key = env[keyEnv]?.trim();
@@ -214,6 +214,7 @@ if (import.meta.main) {
       "max-turns": { type: "string", default: "120" },
       "max-minutes": { type: "string", default: "60" },
       "max-hours": { type: "string", default: "3" },
+      thinking: { type: "string" },
       out: { type: "string", default: "bench/results/results.jsonl" },
       tag: { type: "string" },
       "server-dir": { type: "string", default: resolve(BENCH, "..") },

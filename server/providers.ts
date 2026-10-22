@@ -16,8 +16,8 @@ export type ProviderRow = {
   encrypted_secret: string | null; base_url: string | null; context_window: number; options: string; created_at: number;
 };
 // options (JSON). OpenRouter: data_collection "deny" (the default: route only to providers that neither store nor train on
-// prompts) or "allow".
-type Options = { data_collection?: "deny" | "allow" };
+// prompts) or "allow". Ollama: thinking "off" asks the model not to reason (faster turns), "on" or unset is the model's default.
+type Options = { data_collection?: "deny" | "allow"; thinking?: "on" | "off" };
 const optionsOf = (p: ProviderRow): Options => { try { return JSON.parse(p.options || "{}"); } catch { return {}; } };
 
 // Default context window (tokens) by kind; editable per provider. Ollama and OpenRouter at their default: detected per model.
@@ -128,7 +128,7 @@ export function adapterFor(p: ProviderRow): Provider {
     let provider: Provider;
     const local = isLocalProvider(p);
     const headersTimeoutMs = local ? LOCAL_MODEL_TIMEOUT : undefined;
-    if (p.kind === "ollama") provider = anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL, headersTimeoutMs });
+    if (p.kind === "ollama") provider = anthropic({ apiKey: "ollama", baseUrl: p.base_url || OLLAMA_URL, headersTimeoutMs, ...(optionsOf(p).thinking === "off" ? { extra: { thinking: { type: "disabled" } } } : {}) });
     else if (p.kind === "anthropic") provider = anthropic({ apiKey: secret, baseUrl: p.base_url || undefined });
     else if (p.kind === "openrouter")
       provider = chatCompletions({
@@ -297,9 +297,11 @@ async function parse(c: { req: { json: () => Promise<any> } }, cur?: ProviderRow
   }
   let options = cur ? optionsOf(cur) : {};
   if (b.options !== undefined) {
-    const dc = b.options?.data_collection;
-    if (kind !== "openrouter" || (dc !== undefined && dc !== "deny" && dc !== "allow")) return { error: 'options: only OpenRouter takes options, data_collection "deny" or "allow"' };
-    options = { ...options, ...(dc ? { data_collection: dc } : {}) };
+    const { data_collection: dc, thinking } = b.options ?? {};
+    const ok = kind === "openrouter" ? thinking === undefined && [undefined, "deny", "allow"].includes(dc)
+      : kind === "ollama" ? dc === undefined && [undefined, "on", "off"].includes(thinking) : false;
+    if (!ok) return { error: 'options: OpenRouter takes data_collection "deny" or "allow", Ollama takes thinking "on" or "off"' };
+    options = { ...options, ...(dc ? { data_collection: dc } : {}), ...(thinking ? { thinking } : {}) };
   }
   const context_window = b.context_window ?? cur?.context_window ?? CONTEXT_WINDOW[kind as ProviderRow["kind"]];
   if (!Number.isInteger(context_window) || context_window < 1000 || context_window > 100_000_000) return { error: "context window must be a whole number of tokens (1000 to 100000000)" };

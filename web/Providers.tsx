@@ -155,6 +155,7 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
   const [window, setWindow] = useState(AUTO_WINDOW.includes(kind) && (!p || p.context_window === CONTEXT_WINDOW[kind]) ? "" : String(p?.context_window ?? CONTEXT_WINDOW[kind]));
   const pickKind = (k: Provider["kind"]) => (setKind(k), setAuth(KINDS[k][0]), setWindow(AUTO_WINDOW.includes(k) ? "" : String(CONTEXT_WINDOW[k])));
   const [share, setShare] = useState(p?.options.data_collection === "allow");
+  const [think, setThink] = useState(p?.options.thinking !== "off");
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -162,6 +163,7 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
     const body = {
       name: f.name, kind, auth_type: auth, base_url: f.base_url || null, api_key: f.api_key || undefined, context_window: Number(f.context_window) || CONTEXT_WINDOW[kind],
       ...(kind === "openrouter" ? { options: { data_collection: share ? "allow" : "deny" } } : {}),
+      ...(kind === "ollama" ? { options: { thinking: think ? "on" : "off" } } : {}),
     };
     try {
       await api(p ? `/api/providers/${p.id}` : "/api/providers", p ? "PATCH" : "POST", body);
@@ -202,6 +204,14 @@ function ProviderDialog({ p, close, saved }: { p: Provider | null; close: () => 
               <input type="checkbox" checked={share} onChange={(e) => setShare(e.target.checked)} /> Allow providers that may store or train on prompts
             </label>
             <span className="hint">Off (recommended): OpenRouter routes only to providers that neither retain nor train on your code. Some models are then unavailable.</span>
+          </>
+        )}
+        {kind === "ollama" && (
+          <>
+            <label className="check">
+              <input type="checkbox" checked={think} onChange={(e) => setThink(e.target.checked)} /> Let models think before answering
+            </label>
+            <span className="hint">Off: reasoning models answer without a thinking pass. Turns are faster; hard tickets may suffer.</span>
           </>
         )}
         <label>
