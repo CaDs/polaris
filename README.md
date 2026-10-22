@@ -131,14 +131,13 @@ For bigger work, choose **Epic** when creating the ticket and click **Run planne
 
 ### Working on Polaris with Polaris
 
-Don't point a project at the checkout the server runs from. `npm run dev` restarts the API on every change there, and an
+Don't point a project at the checkout the server runs from. `make dev` restarts the API on every change there, and an
 approved ticket merges into that checkout's `main`, so the restart fails every running run. Use two checkouts:
 
-- **The instance**: its own clone (e.g. `../polaris-instance`), run with `npm run build && npm start`. It owns
-  `polaris.db` and `data/`. Upgrade it when no run is live: `git pull && npm ci && npm run build`, then restart.
-- **The repository it builds**: your usual checkout. The project's repository path points here; merges land here, and
-  nothing watches it. Run `npm run dev` here only with its own database (the default `polaris.db` in this folder is a
-  different file from the instance's).
+- **The server checkout**: your usual clone, run with `make dev`. It owns `polaris.db` and `data/`. Pull and restart it
+  only when no run is live.
+- **The repository it builds**: a second clone (e.g. `../polaris-agents`). The project's repository path points here;
+  merges land here, and nothing watches it. Push from it, or open PRs from its branches, to bring the agents' work back.
 
 The server warns at startup when it runs with `--watch` from a project's own repository.
 
