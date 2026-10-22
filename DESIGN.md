@@ -11,7 +11,7 @@ before first paint. Chosen from a canvas of options (true black and neutral grey
 
 | id | Name | Character | Accent light / dark |
 |---|---|---|---|
-| `black` (default) | Black + Blue | true black, neutral greys, one steel blue | `#1f6d9a` / `#2f7cad` |
+| `black` (default) | Black + Blue | true black, neutral greys, the cads-tech.dev link blue | `#2e6ab3` / `#82acdf` |
 | `graphite` | Graphite | neutral monochrome: the accent is the ink | `#18181b` / `#ededef` |
 | `stone` | Stone & Ink | warm monochrome (paper and ink) | `#1c1a17` / `#ece8e1` |
 | `polar` | Polar Night | the original navy ink, north blue | `#3d68ee` |

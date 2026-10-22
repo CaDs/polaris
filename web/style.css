@@ -9,7 +9,7 @@
   --flow-b: var(--accent-text);
 }
 :root, [data-palette="black"] {
-  /* H · Black + Blue (default): true black, neutral greys, one steel blue */
+  /* H · Black + Blue (default): true black, neutral greys, the cads-tech.dev link blue (#82acdf) */
   --bg: light-dark(#ffffff, #000000);
   --sidebar: light-dark(#f6f7f8, #09090b);
   --surface: light-dark(#ffffff, #101012);
@@ -17,14 +17,14 @@
   --border: light-dark(#e2e4e8, #232328);
   --text: light-dark(#0b0c0e, #ededef);
   --muted: light-dark(#5f636b, #8f8f98);
-  --accent: light-dark(#1f6d9a, #2f7cad);
-  --on-accent: #ffffff;
-  --accent-text: light-dark(#1a5f87, #7fc4e8);
+  --accent: light-dark(#2e6ab3, #82acdf);
+  --on-accent: light-dark(#ffffff, #000000);
+  --accent-text: light-dark(#2e6ab3, #82acdf);
   --warn: light-dark(#93600c, #e0a33a);
-  --review: light-dark(#5b4fd0, #a3b4ff);
+  --review: light-dark(#5b4fd0, #b69cff);
   --ok: light-dark(#25774b, #4cb782);
   --error: light-dark(#c3362f, #eb5f5f);
-  --night: #000000; --glow: #2f7cad; --glow-on: #ffffff; /* the landing panel: always dark */
+  --night: #000000; --glow: #82acdf; --glow-on: #000000; /* the landing panel: always dark */
 }
 [data-palette="graphite"] {
   /* A · Graphite: neutral monochrome, color only for status */
