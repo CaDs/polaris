@@ -21,7 +21,7 @@ that does real, reviewable work on a real codebase, and gets better at it over t
   designed around their limits: small context windows, small steps, imperfect tool calls.
 - **Complex work gets split.** A ticket that is too big for one agent becomes an epic: a planner breaks it into tickets the
   agents can finish, with their own acceptance checks.
-- **It learns.** Each project keeps a wiki from approved work and lessons from execution feedback, and prompt changes are
+- **It learns.** Each project remembers the decisions you approved and keeps lessons from execution feedback, and prompt changes are
   promoted only when they beat the current prompt on an eval set built from past tickets.
 - **Measured, not assumed.** Changes to the harness are validated on a complexity ladder of real tickets on its own
   codebase (see [What we learned](#what-we-learned)).
@@ -42,7 +42,7 @@ ticket ──▶ (optional triage) ──▶ run: git worktree + branch polaris/
                                             │
                               human review: Approve (merge) or Reject (note → next attempt)
                                             │
-                              wiki ingest + lessons ──▶ every later run starts with this memory
+                       project memory (what you confirmed) + lessons ──▶ every later run starts with this memory
 ```
 
 Every step is an event in an append-only log, streamed live to the dashboard: you can watch each tool call and the model's
@@ -65,7 +65,7 @@ how long), see tokens and cost per run, and replay any transcript. On a wide scr
 | **Budgets** | Max turns (default 120) and max minutes (default 60) per attempt, fix rounds included, with a "wrap up" note near either limit. Monthly spending caps per workspace and caps per epic or ticket (cost or tokens). A stuck monitor nudges, then ends an attempt that repeats itself or stops making progress. |
 | **Context management** | Compaction into a structured summary plus the current `git diff`, re-reads of unchanged files skipped, per-model compaction thresholds, skills in `.polaris/skills/`. |
 | **Planner and splitting** | Epics are planned by a planner agent into child tickets with dependencies, handoffs and their own test commands. A ticket that fails all attempts is turned into a `Split:` epic automatically. An epic only completes when the full test suite passes on the merged result. Optional size triage (a chat model or an Ollama decision model) and an optional escalation model for the last attempt. |
-| **Memory** | A per-project LLM-maintained wiki (a git repo with index, pages, log; stale pages flagged against the code; written only from approved work) and versioned lessons from a reflection after every run. |
+| **Memory** | A per-project **project memory**: each ticket ready for review proposes the decisions, rules or gotchas it settled; you edit or untick them and Approve writes them, and every later run (and the model reviewer) follows them. **Remember this** adds one by hand. Around it, optional wiki pages about the code (built and refreshed on request; stale pages flagged against the code), all in one git repo per project. Plus versioned lessons from a reflection after every run. |
 | **Self-improvement** | Eval cases from approved tickets (must fail at their base commit), prompt versions proposed by the model, eval-gated promotion with a human click (evals on the same model). Failure mining: per-run metrics, failure classes and draft improvement tickets. A new built-in worker prompt replaces an unmodified built-in; an edited prompt is kept and the new one waits as a candidate. |
 | **Tracker** | Labels, priority (the run queue starts urgent tickets first), assignee, estimate, due date, projects with milestones, cycles (sprints), filters as shareable URLs, full-text search, saved views, command palette (Cmd/Ctrl+K), keyboard shortcuts, comments, a notification bell (runs to review, failures, comments) and a live board over a workspace event stream. |
 

@@ -3,16 +3,16 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { refuseSymlinks, resolveIn, truncate } from "./agent/tools.ts";
+import { refuseSymlinks, resolveIn } from "./agent/tools.ts";
 import { AgentError } from "./agent/types.ts";
 import { git } from "./git.ts";
 import { dataDir } from "./sandbox.ts";
 import { today } from "./tracker.ts";
 
 // M10 per-project wiki (see SPEC "Project wiki (M10)"): a git repository per project at <dataDir>/wikis/<project_id>/,
-// owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the only writers are the wiki
-// maintainer run (in a clone, committed here only if the mechanical lint passes) and human edits. Everything is
-// serialized per project (wikiSerial). The orchestration of maintainer runs lives in runs.ts.
+// owned by the harness. Agents only read a snapshot of its HEAD (.polaris/wiki/); the writers are approvals (the project
+// memory, memory.ts), the wiki maintainer run (Build / Refresh, in a clone, committed here only if the mechanical lint
+// passes) and human edits. Everything is serialized per project (wikiSerial). Maintainer runs are orchestrated in runs.ts.
 
 const execFileP = promisify(execFile);
 export const WIKI_PROMPT = readFileSync(new URL("./agent/prompts/wiki.md", import.meta.url), "utf8");
@@ -20,10 +20,13 @@ const SCHEMA = readFileSync(new URL("./agent/prompts/wiki-schema.md", import.met
 const INDEX_MAX = 6000; // chars
 const PAGE_MAX = 3500;
 const SPECIAL = ["SCHEMA.md", "index.md", "log.md"]; // every other .md is a content page
-const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+)\.md$/; // root .md files, modules/*.md, howto/*.md
+const PATH = /^([\w.-]+|(modules|howto)\/[\w.-]+|memory\/\d{4}-[a-z0-9-]+)\.md$/; // root .md files, modules/*.md, howto/*.md, memory/NNNN-slug.md
+const LAYOUT = "only root .md files, modules/*.md, howto/*.md and memory/NNNN-slug.md";
+const isMemory = (p: string) => p.startsWith("memory/");
 const LINK = /^- \[([^\]]+)\]\(([^)]+)\)(?:\s+—\s+(.*))?$/;
-// edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host).
-export const WIKI_PROTECTED = ["code", "wiki/.git"];
+// edit_file must not write the read-only code checkout, nor the clone's .git (its config could run commands on the host),
+// nor the project memory (only approvals and humans write it).
+export const WIKI_PROTECTED = ["code", "wiki/.git", "wiki/memory"];
 
 export const wikiDir = (pid: string) => join(dataDir(), "wikis", pid);
 
@@ -68,14 +71,20 @@ type Meta = { title: string; sources: string[]; verified: string; updated: strin
 
 // Frontmatter of a content page, or why it is invalid. `sources: [a, b]` is a flow list; verified is a commit sha (hex), so
 // it can never be read as a git option.
-export function frontmatter(text: string): Meta | string {
+const unq = (s: string) => s.replace(/^(["'])(.*)\1$/, "$2");
+// The frontmatter block's `key: value` lookup, or undefined when there is no block.
+function fields(text: string) {
   const fm = /^---\n([\s\S]*?)\n---(\n|$)/.exec(text)?.[1];
-  if (fm === undefined) return "missing frontmatter (a --- block at the top)";
-  const unq = (s: string) => s.replace(/^(["'])(.*)\1$/, "$2");
-  const get = (k: string) => {
+  if (fm === undefined) return undefined;
+  return (k: string) => {
     const v = new RegExp(`^${k}:[ \\t]*(.*)$`, "m").exec(fm)?.[1];
     return v === undefined ? undefined : v.trim();
   };
+}
+
+export function frontmatter(text: string): Meta | string {
+  const get = fields(text);
+  if (!get) return "missing frontmatter (a --- block at the top)";
   const title = unq(get("title") ?? "");
   if (!title) return "frontmatter needs a title";
   const list = /^\[(.*)\]$/.exec(get("sources") ?? "");
@@ -86,6 +95,26 @@ export function frontmatter(text: string): Meta | string {
   const verified = unq(get("verified") ?? "");
   if (!/^[0-9a-f]{7,40}$/i.test(verified)) return "frontmatter needs verified: <commit sha of the project repo>";
   return { title, sources, verified, updated: unq(get("updated") ?? "") };
+}
+
+// --- project memory: memory/NNNN-slug.md, one approved decision, rule or gotcha each (written by approvals and humans) ---
+
+export const MEMORY_KINDS = ["decision", "rule", "gotcha"] as const;
+export type MemoryMeta = { title: string; kind: (typeof MEMORY_KINDS)[number]; status: "active" | "superseded"; superseded_by: string; source: string; date: string };
+const MEMORY_MAX = 3000; // chars, frontmatter included
+
+export function memoryMeta(text: string): MemoryMeta | string {
+  const get = fields(text);
+  if (!get) return "missing frontmatter (a --- block at the top)";
+  const v = (k: string) => unq(get(k) ?? "");
+  const m = { title: v("title"), kind: v("kind"), status: v("status"), superseded_by: v("superseded_by"), source: v("source"), date: v("date") };
+  if (!m.title) return "frontmatter needs a title";
+  if (!(MEMORY_KINDS as readonly string[]).includes(m.kind)) return `kind must be one of ${MEMORY_KINDS.join(", ")}`;
+  if (m.status !== "active" && m.status !== "superseded") return "status must be active or superseded";
+  if (m.status === "superseded" && !(isMemory(m.superseded_by) && PATH.test(m.superseded_by))) return "a superseded entry needs superseded_by: memory/NNNN-slug.md";
+  if (!m.source) return "frontmatter needs a source (a ticket key or who added it)";
+  if (!/^\d{4}-\d\d-\d\d$/.test(m.date)) return "frontmatter needs date: YYYY-MM-DD";
+  return m as MemoryMeta;
 }
 
 // [line, title, path, summary] of every page entry in index.md.
@@ -105,8 +134,15 @@ export function lintDir(dir: string): string[] {
     }
   };
   walk("");
-  for (const p of files) if (!PATH.test(p)) out.push(`${p}: not allowed (only root .md files, modules/*.md and howto/*.md)`);
-  const pages = files.filter((p) => PATH.test(p) && !SPECIAL.includes(p));
+  for (const p of files) if (!PATH.test(p)) out.push(`${p}: not allowed (${LAYOUT})`);
+  for (const p of files.filter((f) => PATH.test(f) && isMemory(f)).sort()) {
+    const text = readFileSync(join(dir, p), "utf8");
+    if (text.length > MEMORY_MAX) out.push(`${p} is ${text.length} chars (at most ${MEMORY_MAX})`);
+    const meta = memoryMeta(text);
+    if (typeof meta === "string") out.push(`${p}: ${meta}`);
+    else if (meta.superseded_by && !files.includes(meta.superseded_by)) out.push(`${p}: superseded_by ${meta.superseded_by} does not exist`);
+  }
+  const pages = files.filter((p) => PATH.test(p) && !SPECIAL.includes(p) && !isMemory(p)); // memory entries are listed by the harness, not the index
   for (const f of SPECIAL) if (!files.includes(f)) out.push(`${f} is missing`);
   const index = files.includes("index.md") ? readFileSync(join(dir, "index.md"), "utf8") : "";
   if (index.length > INDEX_MAX) out.push(`index.md is ${index.length} chars (at most ${INDEX_MAX}): shorten the summaries`);
@@ -171,6 +207,36 @@ export async function pageList(pid: string, stale?: { repo: string; base: string
   return { index, pages };
 }
 
+export type MemoryEntry = MemoryMeta & { path: string };
+
+// Every memory entry at HEAD, newest first (the number orders them). An entry with invalid frontmatter is skipped.
+export async function memoryList(pid: string): Promise<MemoryEntry[]> {
+  const paths = (await git(await ensureWiki(pid), ["ls-tree", "--name-only", "HEAD", "memory/"]).catch(() => "")).split("\n").filter((p) => PATH.test(p) && isMemory(p));
+  const all = await Promise.all(paths.map(async (path) => {
+    const m = memoryMeta((await show(pid, path)) ?? "");
+    return typeof m === "string" ? [] : [{ ...m, path }];
+  }));
+  return all.flat().sort((a, b) => b.path.localeCompare(a.path));
+}
+
+const MEMORY_SECTION_MAX = 6000; // chars of entry lines; older entries are left to search
+
+// The # Project memory section of the first user message: the active entries, newest first. "" when there are none.
+export function memorySection(entries: MemoryEntry[]) {
+  const active = entries.filter((e) => e.status === "active");
+  if (!active.length) return "";
+  const lines: string[] = [];
+  let size = 0;
+  for (const e of active) {
+    const line = `- ${e.kind}: ${e.title} (.polaris/wiki/${e.path}, ${e.source})`;
+    if (size + line.length > MEMORY_SECTION_MAX) break;
+    lines.push(line);
+    size += line.length + 1;
+  }
+  const more = active.length - lines.length;
+  return `# Project memory\n\nDecisions, rules and gotchas approved for this project. Read the entries relevant to your task. Follow them; when the task requires going against one, say which and why in your final reply.\n\n${lines.join("\n")}${more ? `\n- … ${more} older entries: search .polaris/wiki/memory` : ""}`;
+}
+
 export async function readPage(pid: string, path: string) {
   safe(await ensureWiki(pid), path);
   return show(pid, path);
@@ -180,21 +246,22 @@ export async function readPage(pid: string, path: string) {
 // is never mistaken for a code file), with a ⚠ flag on pages whose sources changed since they were verified (computed against
 // `base`, the commit the run starts from). "" when the wiki has no pages.
 export async function wikiSection(pid: string, repo: string, base: string) {
+  const memory = memorySection(await memoryList(pid));
   const { index, pages } = await pageList(pid, { repo, base });
-  if (!pages.length) return "";
+  if (!pages.length) return memory;
   const byLine = new Map(pages.map((p) => [p.line, p]));
   const lines = index.split("\n").filter((l) => l.trim() && !l.startsWith("# ")).map((l) => {
     const p = byLine.get(l.trim());
     return p ? l.replace(`](${p.path})`, `](.polaris/wiki/${p.path})`) + (p.stale ? ` ⚠ may be stale: ${p.stale}` : "") : l;
   });
-  return `# Project wiki\n\nRead the pages relevant to your task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`;
+  return [`# Project wiki\n\nRead the pages relevant to your task (.polaris/wiki/<path>) before exploring the code; trust code over the wiki when they disagree.\n\n${lines.join("\n")}`, memory].filter(Boolean).join("\n\n");
 }
 
 export async function wikiView(pid: string, stale?: { repo: string; base: string }) {
   const { index, pages } = await pageList(pid, stale);
   const dir = wikiDir(pid);
   const wt = await git(dir, ["status", "--porcelain"]);
-  return { index, pages, log: (await show(pid, "log.md")) ?? "", problems: wt ? ["wiki working copy has uncommitted changes"] : await lintHead(pid) };
+  return { index, pages, memory: await memoryList(pid), log: (await show(pid, "log.md")) ?? "", problems: wt ? ["wiki working copy has uncommitted changes"] : await lintHead(pid) };
 }
 
 // Mechanical lint of HEAD (the Lint button): exports HEAD to a temp dir.
@@ -285,7 +352,7 @@ export async function finishCopy(pid: string, copy: string, message: string, ent
 }
 
 // A human edit of one existing page: same validation and commit flow as the maintainer's. `base`: the page as the editor
-// opened it; a page that changed since (an ingest landed meanwhile) is refused rather than overwritten.
+// opened it; a page that changed since (a maintainer run or another edit landed meanwhile) is refused rather than overwritten.
 export function editPage(pid: string, path: string, body: string, email: string, o: { base?: string; repo?: string } = {}) {
   return wikiSerial(pid, async () => {
     const tmp = join(dataDir(), "worktrees", `wiki-edit-${randomUUID()}`);
@@ -310,12 +377,7 @@ export function editPage(pid: string, path: string, body: string, email: string,
 
 // --- maintainer tasks (the first user message of a wiki run) ---
 
-const MAX_DIFF = 15_000;
-
-export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
-  repo: string; sha: string; index: string;
-  ticket?: { key: string; title: string; spec: string }; files?: string[]; diff?: string; reply?: string; stale?: { path: string; why: string }[];
-}) {
+export function wikiTask(op: "bootstrap" | "lint", o: { repo: string; sha: string; index: string; stale?: { path: string; why: string }[] }) {
   const parts = [
     [
       "# Environment",
@@ -324,16 +386,7 @@ export function wikiTask(op: "ingest" | "bootstrap" | "lint", o: {
       `- Commit for \`verified\`: ${o.sha}; today is ${today()}`,
     ].join("\n"),
   ];
-  if (op === "ingest") {
-    const t = o.ticket!;
-    parts.push(
-      `# Task: ingest an approved change\n\nThe change below was reviewed, merged (merge commit ${o.sha}) and is part of \`code/\`. Update the wiki for it.`,
-      `# Ticket\n\n${t.key} ${t.title}${t.spec ? `\n\n${t.spec}` : ""}`,
-      `# Files changed\n\n${o.files!.join("\n") || "(none)"}`,
-      `# Merged diff\n\n\`\`\`diff\n${truncate(o.diff ?? "", MAX_DIFF, "head")}\n\`\`\``,
-      `# The worker's final reply (it may contain a "## Wiki notes" section; check its claims against the code)\n\n${o.reply?.trim() ? truncate(o.reply.trim(), 4000, "head") : "(none)"}`,
-    );
-  } else if (op === "bootstrap")
+  if (op === "bootstrap")
     parts.push("# Task: build the wiki\n\nWrite `overview.md` (architecture map), a `modules/` page for each main part, `howto/` pages for common changes (from the README, AGENTS.md or CLAUDE.md if present, and from the code) and `gotchas.md`. Pages that already exist: improve them rather than duplicating.\n\nWrite as you go, not at the end: first `overview.md` from the README and the file tree, then read one part of the code and write its `modules/` page before you read the next part. A run that only reads for many turns is stopped as stuck.");
   else
     parts.push(`# Task: re-verify stale pages\n\nThe sources of these pages changed in the project since they were verified. Check each against the current code and fix or delete it, then set verified to ${o.sha}.\n\n${o.stale!.map((p) => `- ${p.path} — changed: ${p.why}`).join("\n")}`);

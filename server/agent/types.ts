@@ -131,6 +131,9 @@ export type EventPayloads = {
   // POL-30: this attempt runs on the escalation model instead of the previous attempt's (logged first, before run_started).
   escalated: { from: string; to: string; reason: string; attempt: number };
   // M10: a wiki maintainer run ended: the wiki commit it made, nothing to commit (unchanged), or the mechanical problems that rejected it.
-  wiki: { op: "ingest" | "bootstrap" | "lint"; commit?: string; unchanged?: boolean; problems?: string[] };
+  wiki: { op: "ingest" | "bootstrap" | "lint"; commit?: string; unchanged?: boolean; problems?: string[] }; // ingest: before the project memory
+  // Project memory: what a passing run proposes to remember (the human confirms it when approving), and what an approval wrote.
+  memory_proposal: { items: { kind: "decision" | "rule" | "gotcha"; title: string; body: string; supersedes?: string }[] } | { error: string };
+  memory: { paths: string[]; commit: string } | { error: string };
 };
 export type AgentEvent = { [K in keyof EventPayloads]: { type: K; payload: EventPayloads[K] } }[keyof EventPayloads];

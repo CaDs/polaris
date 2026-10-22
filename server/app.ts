@@ -14,7 +14,8 @@ import { failures, mine } from "./failures.ts";
 import { activePrompt, addPrompt, caseSet, currentLessons, decideLessons, LESSONS_MAX, promote, promotion, PROMPT_MAX, promptIn, propose, saveLessons, validateCase, type Prompt } from "./improve.ts";
 import { approve, cancelRun, cleanupTicket, enqueueRun, enqueueWiki, metaProvider, MODEL_PHASES, moveTicket, monthSpend, projectSettings, reject, reviewRun, SETTINGS_DEFAULTS, settingsFor, startEval, startReady, treeSpend, wake, type Choice } from "./runs.ts";
 import { OWN_RUNS, TREE, withStates } from "./planner.ts";
-import { editPage, headOf, history, readPage, wikiDiff, wikiView } from "./wiki.ts";
+import { editPage, headOf, history, memoryList, readPage, wikiDiff, wikiView } from "./wiki.ts";
+import { memoryItems, writeMemory, type MemoryItem } from "./memory.ts";
 import { applyTracker, hydrate, Invalid, KINDS, STATUSES, ticketKey, ticketQuery, TRACKER_COLS, trackerFields, trackerRoutes, type TrackerFields } from "./tracker.ts";
 import { AgentError } from "./agent/types.ts";
 import { chatRoutes, proposalIn } from "./chat.ts";
@@ -341,7 +342,15 @@ app.post("/api/tickets/:id/approve", async (c) => {
   const t = ticketIn(c);
   if (!t) return c.json({ error: "not_found" }, 404);
   if (t.status !== "review") return c.json({ error: "ticket is not in review" }, 409);
-  const r = await approve(t.id);
+  // memory: the project memory entries the reviewer confirmed (absent = the run's proposal as it is).
+  const b = await c.req.json().catch(() => ({}));
+  let memory: MemoryItem[] | undefined;
+  if (b?.memory !== undefined) {
+    const items = memoryItems(b.memory, (await memoryList(t.project_id)).filter((e) => e.status === "active").map((e) => e.path));
+    if (typeof items === "string") return c.json({ error: items }, 400);
+    memory = items;
+  }
+  const r = await approve(t.id, memory);
   if ("error" in r) return c.json(r, 409);
   return c.json(ticketIn(c));
 });
@@ -672,7 +681,18 @@ app.get(`${WIKI}/diff`, async (c) => {
   }
 });
 
-// "Build wiki" / "Refresh stale pages": queue a maintainer run (same flow as an ingest); the run row tells where to watch it.
+// "Remember this": a human adds one project memory entry ({kind, title, body, supersedes?}); source = their email.
+app.post(`${WIKI}/memory`, async (c) => {
+  const s = projectOf(c);
+  if (!s.wiki) return c.json({ error: "The project wiki is off. Turn it on in Settings." }, 409);
+  const b = await c.req.json().catch(() => null);
+  const items = memoryItems([b], (await memoryList(s.project_id)).filter((e) => e.status === "active").map((e) => e.path));
+  if (typeof items === "string") return c.json({ error: items.replace("memory[0].", "") }, 400);
+  const r = await writeMemory(s.project_id, items, email(c), `added by ${email(c)}`);
+  return "sha" in r ? c.json({ paths: r.paths, commit: r.sha }, 201) : c.json({ error: "problems" in r ? r.problems.join("\n") : "nothing to write" }, 400);
+});
+
+// "Build wiki" / "Refresh stale pages": queue a maintainer run; the run row tells where to watch it.
 for (const [path, op] of [["bootstrap", "bootstrap"], ["lint", "lint"]] as const)
   app.post(`${WIKI}/${path}`, async (c) => {
     const r = await enqueueWiki(projectOf(c).project_id, op);

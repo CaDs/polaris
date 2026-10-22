@@ -175,8 +175,8 @@ function AutomationTab({ s, saved }: Tab) {
         <input type="checkbox" name="wiki" defaultChecked={!!s.wiki} /> Keep a project wiki
       </label>
       <span className="hint">
-        Every run starts with the wiki's index (pages flagged when their source files changed) and a read-only copy of its pages. After you approve
-        a ticket, a maintainer agent updates the wiki from the merged change. Off: no wiki section, no snapshot, no ingest.
+        Every run starts with the project memory (the decisions, rules and gotchas you approved), the wiki's index and a read-only copy of its
+        pages. A ticket ready for review proposes what to remember; you confirm it when you approve. Off: none of this.
       </span>
     </Form>
   );

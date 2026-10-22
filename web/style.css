@@ -364,6 +364,8 @@ td .icon { vertical-align: -2px; }
 .verdict-row dt > span { display: inline-flex; width: 16px; justify-content: center; }
 .verdict-check { color: var(--ok); }
 .verdict-row dd { margin: 0; overflow-wrap: anywhere; }
+.memory-item { display: grid; gap: 6px; margin: 12px 0; }
+.memory-item .check { margin: 0; }
 .verdict-row ul { margin: 8px 0; padding-left: 16px; }
 .review-details { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
 .review-details > summary { cursor: pointer; font-weight: 600; }

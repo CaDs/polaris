@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// M10: the per-project wiki: lint, snapshot + staleness in every run, serialized ingest after approve, bootstrap/lint runs,
-// human edits, the wiki setting. POLARIS_SANDBOX=host (no docker), demo provider as the maintainer.
+// M10: the per-project wiki: lint, snapshot + staleness in every run, bootstrap/lint runs, human edits, the wiki setting.
+// The project memory (what approvals write) is test/memory.test.ts. POLARIS_SANDBOX=host (no docker), demo provider as the maintainer.
 process.env.POLARIS_PROVIDER = "fake";
 process.env.POLARIS_CONCURRENCY = "3";
 const { configure, fileTicket, projectOf, call, db, events, idle, sh, task, tempRepo, until, user, waitFor, workspace: base, wsOf, worktreeOf } = await import("./helpers.ts");
@@ -92,8 +92,8 @@ test("mechanical lint: frontmatter, index links both ways, size caps, allowed fi
   symlinkSync("/etc/hosts", join(dir, "howto.md"));
   assert.deepEqual(lintDir(dir), [
     "howto.md: not a regular file",
-    "notes.txt: not allowed (only root .md files, modules/*.md and howto/*.md)",
-    "src/a.md: not allowed (only root .md files, modules/*.md and howto/*.md)",
+    "notes.txt: not allowed (only root .md files, modules/*.md, howto/*.md and memory/NNNN-slug.md)",
+    "src/a.md: not allowed (only root .md files, modules/*.md, howto/*.md and memory/NNNN-slug.md)",
   ]);
 });
 
@@ -106,6 +106,7 @@ test("the maintainer can read the code and edit the wiki copy, never the code ch
   const edit = (path: string) => runTool(wikiTools, { type: "tool_use", id: "1", name: "edit_file", input: { path, old_string: "", new_string: "x" } }, ctx);
   assert.match((await edit("code/a.ts")).content, /read-only \(protected path\)/);
   assert.match((await edit("wiki/.git/config")).content, /read-only \(protected path\)/); // its config could run commands on the host
+  assert.match((await edit("wiki/memory/0001-x.md")).content, /read-only \(protected path\)/); // only approvals and humans write the memory
   assert.match((await edit("../escape.md")).content, /outside the workspace/);
   assert.equal((await edit("wiki/index.md")).is_error, false);
 });
@@ -140,75 +141,66 @@ test("the maintainer can delete a page; the commit drops it only together with i
 
 let w: Awaited<ReturnType<typeof workspace>>;
 
-test("approve → one ingest run: demo page, index, log line and commit message in the wiki repo; the ticket is untouched", async () => {
+test("Build wiki → overview page, index, log line and commit message in the wiki repo; the run hangs off a hidden ticket", async () => {
   w = await workspace("wiki1");
-  const { t, run } = await w.ticket("First change", "WIKI-NOTES");
   assert.equal((await call("GET", wiki(w.cookie), w.cookie)).body.pages.length, 0);
-  await w.approve(t.id);
-  const merge = sh(w.repo, "git rev-parse HEAD");
+  const r = await call("POST", wiki(w.cookie, "/bootstrap"), w.cookie);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
   await w.commits(2);
   await w.idle();
-  const sha8 = merge.slice(0, 8);
-  assert.deepEqual(w.wikiLog(), ["init wiki", `ingest WIK-1: First change (merge ${sha8})`]);
-  assert.match(w.wikiFile("modules/demo.md"), new RegExp(`^---\ntitle: Demo module\nsources: \\[notes\\.txt\\]\nverified: ${merge}\nupdated: \\d{4}-\\d\\d-\\d\\d\n---`));
-  assert.match(w.wikiFile("index.md"), /- \[Demo module\]\(modules\/demo\.md\) — written by the demo maintainer/);
-  assert.match(w.wikiFile("log.md"), new RegExp(`# Log\n\n## \\[\\d{4}-\\d\\d-\\d\\d\\] ingest \\| WIK-1 First change \\(merge ${sha8}\\)$`));
+  const head = sh(w.repo, "git rev-parse HEAD");
+  const sha8 = head.slice(0, 8);
+  assert.deepEqual(w.wikiLog(), ["init wiki", `bootstrap: ${sh(w.repo, "basename $PWD")} at main ${sha8}`]);
+  assert.match(w.wikiFile("overview.md"), new RegExp(`^---\ntitle: Overview\nsources: \\[README\\.md\\]\nverified: ${head}\nupdated: \\d{4}-\\d\\d-\\d\\d\n---`));
+  assert.match(w.wikiFile("index.md"), /- \[Overview\]\(overview\.md\) — written by the demo maintainer/);
+  assert.match(w.wikiFile("log.md"), new RegExp(`# Log\n\n## \\[\\d{4}-\\d\\d-\\d\\d\\] bootstrap \\| from main \\(${sha8}\\)$`));
 
-  // The run is listed in the ticket (role wiki) but changes neither its status nor its totals.
-  const d = await w.get(t.id);
-  assert.deepEqual([d.status, d.run_count, d.runs.map((r: any) => r.role), d.runs[1].status, d.runs[1].branch], ["done", 1, ["worker", "wiki"], "passed", null]);
-  const ev = events(d.runs[1].id);
-  assert.deepEqual(ev.find((e) => e.type === "wiki")!.p, { op: "ingest", commit: sh(wikiDir(w.pid), "git rev-parse HEAD") });
+  const run = db.prepare("SELECT * FROM runs WHERE id = ?").get(r.body.id) as any;
+  assert.deepEqual([run.role, run.wiki_op, run.status, run.branch, run.base_sha], ["wiki", "bootstrap", "passed", null, head]);
+  const ev = events(run.id);
+  assert.deepEqual(ev.find((e) => e.type === "wiki")!.p, { op: "bootstrap", commit: sh(wikiDir(w.pid), "git rev-parse HEAD") });
   assert.deepEqual(ev.filter((e) => e.type === "tool_call").map((e) => e.p.name), ["read_file", "edit_file", "edit_file"]);
-  assert.equal(d.runs[1].base_sha, merge);
-
-  // What the maintainer was given: the merged diff and files, the worker's notes, the index; system prompt = the wiki prompt.
-  const first = task(d.runs[1].id);
-  assert.match(first, new RegExp(`code/\` is a read-only checkout at commit ${merge}`));
-  assert.match(first, /# Ticket\n\nWIK-1 First change\n\nWIKI-NOTES/);
-  assert.match(first, /# Files changed\n\nnotes\.txt\n/);
-  assert.match(first, /# Merged diff\n\n```diff\ndiff --git a\/notes\.txt/);
-  assert.match(first, /## Wiki notes\n- notes\.txt is written by the demo agent\./);
-  assert.match(first, /# Current wiki\/index\.md\n\n# Index$/);
-  // Nothing was left behind.
-  assert.equal(sh(w.repo, "git worktree list").split("\n").length, 1);
-  assert.equal(existsSync(worktreeOf(d.runs[1].id)), false);
+  assert.match(task(run.id), new RegExp(`code/\` is a read-only checkout at commit ${head}`));
+  assert.match(task(run.id), /# Current wiki\/index\.md\n\n# Index$/);
+  // Nothing was left behind (cleanup ends just after the run does), and the hidden ticket does not exist for the board.
+  await until("maintainer checkout removed", () => !existsSync(worktreeOf(run.id)) && sh(w.repo, "git worktree list").split("\n").length === 1);
   assert.equal(sh(wikiDir(w.pid), "git status --porcelain"), "");
-  assert.equal(run.role, "worker");
-
-  // The hidden ticket does not exist for the board.
-  assert.equal((await call("GET", "/api/tickets", w.cookie)).body.length, 1);
+  assert.equal((await call("GET", "/api/tickets", w.cookie)).body.length, 0);
 });
 
-test("the next run sees the wiki: snapshot in .polaris/wiki, index in the first message, read-only, git-excluded", async () => {
+test("the next run sees the wiki: snapshot in .polaris/wiki, index in the first message, read-only, git-excluded; approving queues no maintainer run", async () => {
   const { t, run } = await w.ticket("Second change");
   const first = task(run.id);
-  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer\n\n\(end of reference notes\)\n\n# Task/);
-  assert.doesNotMatch(first, /may be stale/);
+  assert.match(first, /\n\n# Project wiki\n\nRead the pages relevant to your task \(\.polaris\/wiki\/<path>\) before exploring the code; trust code over the wiki when they disagree\.\n\n- \[Overview\]\(\.polaris\/wiki\/overview\.md\) — written by the demo maintainer\n\n\(end of reference notes\)\n\n# Task/);
+  assert.doesNotMatch(first, /may be stale|# Project memory/);
   assert.match(first, /Read-only paths \(changes there fail the run\): tests, evals, \.polaris\/wiki/);
   const wt = worktreeOf((await w.get(t.id)).runs[0].id);
-  assert.match(readFileSync(join(wt, ".polaris/wiki/modules/demo.md"), "utf8"), /^---\ntitle: Demo module/);
+  assert.match(readFileSync(join(wt, ".polaris/wiki/overview.md"), "utf8"), /^---\ntitle: Overview/);
   assert.equal(sh(wt, "git status --porcelain"), ""); // the snapshot is invisible to git (the run's change is committed)
   assert.equal(sh(wt, "git ls-files"), "README.md\nnotes.txt");
   // The system prompt (worker.md) never carries it.
   const sys = db.prepare("SELECT body FROM prompts WHERE workspace_id = ? AND role = 'worker'").get(w.ws) as { body: string };
-  assert.doesNotMatch(sys.body, /modules\/demo\.md/);
+  assert.doesNotMatch(sys.body, /overview\.md/);
   assert.match(sys.body, /## Wiki notes/);
-  await call("POST", `/api/tickets/${t.id}/reject`, w.cookie, {}); // frees the worktree; a reject queues no ingest
+  await w.approve(t.id);
+  await w.idle();
+  assert.deepEqual((await w.get(t.id)).runs.map((r: any) => r.role), ["worker"]); // the code pages are refreshed on request only
   assert.equal(w.wikiLog().length, 2);
 });
 
 test("staleness: a page whose sources changed since verified is flagged in the index and in the API; an unknown sha is stale", async () => {
-  sh(w.repo, `echo more >> notes.txt && ${GIT} commit -qam "touch notes"`);
-  const { run } = await w.ticket("Third change");
-  assert.match(task(run.id), /- \[Demo module\]\(\.polaris\/wiki\/modules\/demo\.md\) — written by the demo maintainer ⚠ may be stale: notes\.txt\n/);
+  sh(w.repo, `echo more >> README.md && ${GIT} commit -qam "touch readme"`);
+  const { t, run } = await w.ticket("Third change");
+  assert.match(task(run.id), /- \[Overview\]\(\.polaris\/wiki\/overview\.md\) — written by the demo maintainer ⚠ may be stale: README\.md\n/);
+  await call("POST", `/api/tickets/${t.id}/reject`, w.cookie, {});
   const api = (await call("GET", wiki(w.cookie), w.cookie)).body;
-  assert.deepEqual(api.pages.map((p: any) => [p.path, p.stale, p.sources]), [["modules/demo.md", "notes.txt", ["notes.txt"]]]);
+  assert.deepEqual(api.pages.map((p: any) => [p.path, p.stale, p.sources]), [["overview.md", "README.md", ["README.md"]]]);
   assert.deepEqual(api.problems, []);
 
-  // Pages unrelated to the change stay unflagged: edit the page's sources to a file nobody touched.
-  const body = (await call("GET", wiki(w.cookie, "/page?path=modules/demo.md"), w.cookie)).body.body as string;
-  const e = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: body.replace("sources: [notes.txt]", "sources: [README.md]") });
+  // Pages unrelated to the change stay unflagged: point the page at a file nobody touched since.
+  const body = (await call("GET", wiki(w.cookie, "/page?path=overview.md"), w.cookie)).body.body as string;
+  const head = sh(w.repo, "git rev-parse HEAD");
+  const e = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: body.replace("sources: [README.md]", "sources: [notes.txt]").replace(/verified: \w+/, `verified: ${head}`) });
   assert.equal(e.status, 200, JSON.stringify(e.body));
   assert.equal((await call("GET", wiki(w.cookie), w.cookie)).body.pages[0].stale, null);
 });
@@ -220,17 +212,17 @@ const legacy = (ws: string, path: string, text: string) => {
 };
 
 test("sources and verified must exist in the project repo: unknown ones are rejected, and flagged stale on older pages", async () => {
-  const body = (await call("GET", wiki(w.cookie, "/page?path=modules/demo.md"), w.cookie)).body.body as string;
+  const body = (await call("GET", wiki(w.cookie, "/page?path=overview.md"), w.cookie)).body.body as string;
   const v8 = /verified: (\w{8})/.exec(body)![1];
-  const put = (text: string) => call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: text });
+  const put = (text: string) => call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: text });
   const noSha = await put(body.replace(/verified: \w+/, "verified: 1234567"));
-  assert.deepEqual([noSha.status, noSha.body.problems], [400, ["modules/demo.md: verified commit 1234567 is not in the project repo"]]);
-  const noFile = await put(body.replace("sources: [README.md]", "sources: [README.md, nope.ts]"));
-  assert.deepEqual([noFile.status, noFile.body.problems], [400, [`modules/demo.md: source nope.ts does not exist at ${v8}`]]);
-  assert.equal(w.wikiFile("modules/demo.md"), body.trimEnd());
-  legacy(w.pid, "modules/demo.md", body.replace("sources: [README.md]", "sources: [nope.ts]"));
+  assert.deepEqual([noSha.status, noSha.body.problems], [400, ["overview.md: verified commit 1234567 is not in the project repo"]]);
+  const noFile = await put(body.replace("sources: [notes.txt]", "sources: [README.md, nope.ts]"));
+  assert.deepEqual([noFile.status, noFile.body.problems], [400, [`overview.md: source nope.ts does not exist at ${v8}`]]);
+  assert.equal(w.wikiFile("overview.md"), body.trimEnd());
+  legacy(w.pid, "overview.md", body.replace("sources: [notes.txt]", "sources: [nope.ts]"));
   assert.equal((await call("GET", wiki(w.cookie), w.cookie)).body.pages[0].stale, `source nope.ts does not exist at ${v8}`);
-  legacy(w.pid, "modules/demo.md", body.replace(/verified: \w+/, "verified: 1234567"));
+  legacy(w.pid, "overview.md", body.replace(/verified: \w+/, "verified: 1234567"));
   assert.equal((await call("GET", wiki(w.cookie), w.cookie)).body.pages[0].stale, "verified commit 1234567 is not in the project repo");
 });
 
@@ -242,8 +234,8 @@ test("lint run (Refresh stale pages) re-verifies the stale pages and commits; no
   await w.commits(before + 1);
   await w.idle();
   assert.equal(w.wikiLog().at(-1), `lint: re-verify 1 stale page at ${head.slice(0, 8)}`);
-  assert.match(w.wikiFile("modules/demo.md"), new RegExp(`verified: ${head}`));
-  assert.match(w.wikiFile("log.md"), /\] lint \| re-verified modules\/demo\.md at /);
+  assert.match(w.wikiFile("overview.md"), new RegExp(`verified: ${head}`));
+  assert.match(w.wikiFile("log.md"), /\] lint \| re-verified overview\.md at /);
   assert.equal((await call("GET", wiki(w.cookie), w.cookie)).body.pages[0].stale, null);
   const again = await call("POST", wiki(w.cookie, "/lint"), w.cookie);
   assert.deepEqual([again.status, again.body.error], [409, "No page is stale."]);
@@ -259,30 +251,30 @@ test("history and diff of the wiki repo; bad shas are rejected", async () => {
   assert.match(h[0].subject, /^lint: re-verify 1 stale page/);
   const d = (await call("GET", wiki(w.cookie, `/diff?sha=${h[0].sha}`), w.cookie)).body.diff as string;
   assert.match(d, /^lint: re-verify/);
-  assert.match(d, /diff --git a\/modules\/demo\.md[\s\S]*\+verified: /);
+  assert.match(d, /diff --git a\/overview\.md[\s\S]*\+verified: /);
   assert.equal((await call("GET", wiki(w.cookie, "/diff?sha=--output=x"), w.cookie)).status, 400);
   assert.equal((await call("GET", wiki(w.cookie, "/diff?sha=0123456789"), w.cookie)).status, 404);
 });
 
 test("human edit: PUT commits 'edit <path> by <email>' with a log entry; invalid edits and bad paths commit nothing", async () => {
   const before = w.wikiLog().length;
-  const body = (await call("GET", wiki(w.cookie, "/page?path=modules/demo.md"), w.cookie)).body.body as string;
-  const ok = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: `${body}\nA human added this line.` });
+  const body = (await call("GET", wiki(w.cookie, "/page?path=overview.md"), w.cookie)).body.body as string;
+  const ok = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: `${body}\nA human added this line.` });
   assert.equal(ok.status, 200);
   assert.equal(w.wikiLog().length, before + 1);
-  assert.equal(w.wikiLog().at(-1), "edit modules/demo.md by wiki1@x.dev");
-  assert.match(w.wikiFile("modules/demo.md"), /A human added this line\.$/);
-  assert.match(w.wikiFile("log.md"), /\] edit \| modules\/demo\.md by wiki1@x\.dev$/);
+  assert.equal(w.wikiLog().at(-1), "edit overview.md by wiki1@x.dev");
+  assert.match(w.wikiFile("overview.md"), /A human added this line\.$/);
+  assert.match(w.wikiFile("log.md"), /\] edit \| overview\.md by wiki1@x\.dev$/);
   assert.equal(sh(wikiDir(w.pid), "git status --porcelain"), "");
   // Same text again: nothing to commit.
-  assert.deepEqual((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: `${body}\nA human added this line.` })).body, { unchanged: true });
+  assert.deepEqual((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: `${body}\nA human added this line.` })).body, { unchanged: true });
   assert.equal(w.wikiLog().length, before + 1);
 
-  const bad = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: "no frontmatter" });
-  assert.deepEqual([bad.status, bad.body.problems], [400, ["modules/demo.md: missing frontmatter (a --- block at the top)"]]);
+  const bad = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: "no frontmatter" });
+  assert.deepEqual([bad.status, bad.body.problems], [400, ["overview.md: missing frontmatter (a --- block at the top)"]]);
   assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "index.md", body: "# Index\n" })).status, 400); // would unlink the demo page
-  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: page({ sources: "[../x]" }) })).status, 400);
-  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: page() + "x".repeat(3500) })).status, 400);
+  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: page({ sources: "[../x]" }) })).status, 400);
+  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: page() + "x".repeat(3500) })).status, 400);
   for (const path of ["../x.md", "/etc/passwd", "modules/../../x.md", "modules/../index.md", "notes.txt", ".git/config", "modules/a/b.md", "src/x.md", ""]) {
     assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path, body: page() })).status, 400, `PUT ${path}`);
     assert.equal((await call("GET", wiki(w.cookie, `/page?path=${encodeURIComponent(path)}`), w.cookie)).status, 400, `GET ${path}`);
@@ -293,21 +285,16 @@ test("human edit: PUT commits 'edit <path> by <email>' with a log entry; invalid
   assert.equal(sh(wikiDir(w.pid), "git status --porcelain"), "");
 });
 
-test("a human edit of a page that changed since it was opened is refused: the ingest in between is kept", async () => {
-  const opened = (await call("GET", wiki(w.cookie, "/page?path=modules/demo.md"), w.cookie)).body.body as string;
-  const { t } = await w.ticket("Fourth change");
-  const before = w.wikiLog().length;
-  await w.approve(t.id);
-  await w.commits(before + 1);
-  await w.idle();
-  const ingested = w.wikiFile("modules/demo.md");
-  assert.notEqual(ingested, opened.trimEnd());
-  const late = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: `${opened}Late line.\n`, base: opened });
-  assert.deepEqual([late.status, late.body.error], [400, "modules/demo.md changed since you opened it: reload it and edit again"]);
-  assert.equal(w.wikiFile("modules/demo.md"), ingested);
-  const fresh = (await call("GET", wiki(w.cookie, "/page?path=modules/demo.md"), w.cookie)).body.body as string;
-  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "modules/demo.md", body: `${fresh}Late line.\n`, base: fresh })).status, 200);
-  assert.match(w.wikiFile("modules/demo.md"), /Late line\.$/);
+test("a human edit of a page that changed since it was opened is refused: the edit in between is kept", async () => {
+  const opened = (await call("GET", wiki(w.cookie, "/page?path=overview.md"), w.cookie)).body.body as string;
+  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: `${opened}Another tab.\n`, base: opened })).status, 200);
+  const between = w.wikiFile("overview.md");
+  const late = await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: `${opened}Late line.\n`, base: opened });
+  assert.deepEqual([late.status, late.body.error], [400, "overview.md changed since you opened it: reload it and edit again"]);
+  assert.equal(w.wikiFile("overview.md"), between);
+  const fresh = (await call("GET", wiki(w.cookie, "/page?path=overview.md"), w.cookie)).body.body as string;
+  assert.equal((await call("PUT", wiki(w.cookie, "/page"), w.cookie, { path: "overview.md", body: `${fresh}Late line.\n`, base: fresh })).status, 200);
+  assert.match(w.wikiFile("overview.md"), /Another tab\.\n?Late line\.$/);
 });
 
 test("other workspaces see and edit only their own wiki; each project has its own", async () => {
@@ -315,7 +302,7 @@ test("other workspaces see and edit only their own wiki; each project has its ow
   const x = await workspace("wiki-other");
   const api = (await call("GET", wiki(x.cookie), x.cookie)).body;
   assert.deepEqual([api.pages, api.enabled], [[], true]);
-  assert.equal((await call("GET", wiki(x.cookie, "/page?path=modules/demo.md"), x.cookie)).status, 404);
+  assert.equal((await call("GET", wiki(x.cookie, "/page?path=overview.md"), x.cookie)).status, 404);
   assert.match(sh(wikiDir(x.pid), "git log --format=%s"), /^init wiki$/);
   for (const [m, path] of [["GET", ""], ["GET", "/page?path=index.md"], ["PUT", "/page"], ["POST", "/bootstrap"], ["GET", "/history"]])
     assert.equal((await call(m, wiki(w.cookie, path), x.cookie, m === "PUT" ? { path: "index.md", body: "# Index\n" } : undefined)).status, 404, `${m} ${path}: another workspace's project`);
@@ -331,7 +318,7 @@ test("bootstrap writes overview.md at the base branch head; the planner and the 
   await x.idle();
   assert.equal(x.wikiLog().at(-1), `bootstrap: ${sh(x.repo, "basename $PWD")} at main ${sh(x.repo, "git rev-parse --short=8 HEAD")}`);
   assert.match(x.wikiFile("overview.md"), /^---\ntitle: Overview\nsources: \[README\.md\]\nverified: [0-9a-f]{40}/);
-  assert.match(x.wikiFile("log.md"), /\] ingest \| bootstrap from main \(/);
+  assert.match(x.wikiFile("log.md"), /\] bootstrap \| from main \(/);
   // A first build writes as it goes (a run that only reads is stopped as stuck) and gets 60 turns.
   const boot = (db.prepare("SELECT id FROM runs WHERE wiki_op = 'bootstrap' ORDER BY started_at DESC LIMIT 1").get() as { id: string }).id;
   assert.match(task(boot), /Write as you go, not at the end: first `overview\.md` from the README and the file tree/);
@@ -349,16 +336,17 @@ test("bootstrap writes overview.md at the base branch head; the planner and the 
   assert.match(task(round.id), /# Project wiki\n[\s\S]*- \[Overview\]\(\.polaris\/wiki\/overview\.md\)[\s\S]*# Epic\n\n# Plan it/);
 });
 
-test("wiki off: no snapshot, no section, no ingest, no bootstrap", async () => {
+test("wiki off: no snapshot, no section, no memory, no bootstrap", async () => {
   const x = await workspace("wiki3");
   await call("POST", wiki(x.cookie, "/bootstrap"), x.cookie);
   await x.commits(2);
   await x.idle();
   assert.equal((await configure(x.cookie, { repo_path: x.repo, setup_command: "", test_command: "", wiki: false })).body.wiki, 0);
   assert.equal((await call("GET", "/api/settings", x.cookie)).body.wiki, 0);
-  const { t, run } = await x.ticket("Without wiki");
+  const { t, run } = await x.ticket("Without wiki", "REMEMBER: Not while the wiki is off");
   const first = task(run.id);
   assert.doesNotMatch(first, /Project wiki|\.polaris\/wiki/);
+  assert.equal(events(run.id).some((e) => e.type === "memory_proposal"), false);
   const wt = worktreeOf((await x.get(t.id)).runs[0].id);
   assert.equal(existsSync(join(wt, ".polaris/wiki")), false);
   await x.approve(t.id);
@@ -373,57 +361,35 @@ test("wiki off: no snapshot, no section, no ingest, no bootstrap", async () => {
   assert.equal((await call("GET", "/api/settings", x.cookie)).body.wiki, 0);
 });
 
-test("ingests are serialized: two approvals in a row make two commits in order, no conflict", async () => {
-  const x = await workspace("wiki4");
-  const a = await x.ticket("Alpha");
-  const b = await x.ticket("Beta");
-  await x.approve(a.t.id);
-  await x.approve(b.t.id);
-  await x.commits(3);
-  await x.idle();
-  const log = x.wikiLog();
-  assert.equal(log.length, 3);
-  assert.match(log[1], /^ingest WIK-1: Alpha \(merge /);
-  assert.match(log[2], /^ingest WIK-2: Beta \(merge /);
-  const idx = x.wikiFile("index.md");
-  assert.equal(idx.match(/modules\/demo\.md/g)!.length, 1);
-  const lines = x.wikiFile("log.md").split("\n").filter((l) => l.startsWith("## "));
-  assert.deepEqual(lines.map((l) => l.replace(/\[.*?\] |\(merge.*/g, "").trim()), ["## ingest | WIK-1 Alpha", "## ingest | WIK-2 Beta"]);
-  // The second ingest updated the page the first one created (verified = its own merge).
-  assert.match(x.wikiFile("modules/demo.md"), new RegExp(`verified: ${sh(x.repo, "git rev-parse HEAD")}`));
-  const runs = db.prepare("SELECT id FROM runs WHERE role = 'wiki' AND ticket_id IN (?, ?)").all(a.t.id, b.t.id) as { id: string }[];
-  assert.equal(new Set(runs.map((r) => events(r.id).find((e) => e.type === "wiki")!.p.commit)).size, 2);
-});
-
 test("a wiki that fails the mechanical lint is not committed: fix rounds first, then rejected with an error event", async () => {
   const x = await workspace("wiki5");
-  // WIKI-BAD: the agent never fixes the page → 3 rounds, rejected, nothing committed.
-  const bad = await x.ticket("Broken wiki", "WIKI-BAD");
-  await x.approve(bad.t.id);
-  await x.idle();
-  const run = (await x.get(bad.t.id)).runs.find((r: any) => r.role === "wiki");
+  await ensureWiki(x.pid);
+  const boot = async () => {
+    const r = await call("POST", wiki(x.cookie, "/bootstrap"), x.cookie);
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    await x.idle();
+    return db.prepare("SELECT * FROM runs WHERE id = ?").get(r.body.id) as any;
+  };
+  // WIKI-BAD in the index: the agent never fixes the page → 3 rounds, rejected, nothing committed.
+  legacy(x.pid, "index.md", "# Index\nWIKI-BAD\n");
+  const run = await boot();
   assert.equal(run.status, "failed");
   const ev = events(run.id);
   const problems = ["modules/bad.md: missing frontmatter (a --- block at the top)", "modules/bad.md is not linked from index.md"];
-  assert.deepEqual(ev.find((e) => e.type === "wiki")!.p, { op: "ingest", problems });
+  assert.deepEqual(ev.find((e) => e.type === "wiki")!.p, { op: "bootstrap", problems });
   assert.match(ev.find((e) => e.type === "error")!.p.message, /^the wiki check failed after 2 fix rounds; nothing was committed:\nmodules\/bad\.md: missing frontmatter/);
   assert.equal(ev.filter((e) => e.type === "assistant_message").length, 4);
-  assert.deepEqual(x.wikiLog(), ["init wiki"]);
+  assert.deepEqual(x.wikiLog(), ["init wiki", "legacy"]);
   assert.equal(sh(wikiDir(x.pid), "git status --porcelain"), "");
   assert.equal(existsSync(join(wikiDir(x.pid), "modules")), false);
-  assert.equal((await x.get(bad.t.id)).status, "done"); // approval stands
 
   // WIKI-FIXME: the check's problems go back into the same conversation and the agent repairs the page → committed.
-  const fix = await x.ticket("Fixable wiki", "WIKI-FIXME");
-  await x.approve(fix.t.id);
-  await x.commits(2);
-  await x.idle();
-  const fixRun = (await x.get(fix.t.id)).runs.find((r: any) => r.role === "wiki");
+  legacy(x.pid, "index.md", "# Index\nWIKI-FIXME\n");
+  const fixRun = await boot();
   assert.equal(fixRun.status, "passed");
-  const resumed = events(fixRun.id).filter((e) => e.type === "run_started");
-  assert.equal(resumed.length, 2);
+  assert.equal(events(fixRun.id).filter((e) => e.type === "run_started").length, 2);
   assert.match(x.wikiFile("modules/bad.md"), /^---\ntitle: Bad/);
-  assert.match(x.wikiLog().at(-1)!, /^ingest WIK-2: Fixable wiki /);
+  assert.match(x.wikiLog().at(-1)!, /^bootstrap: /);
   assert.deepEqual((await call("GET", wiki(x.cookie), x.cookie)).body.problems, []);
 });
 
@@ -439,15 +405,6 @@ test("a worker that writes .polaris/wiki fails the gate (protected path); edit_f
   mkdirSync(join(root, ".polaris/wiki"), { recursive: true });
   const r = await runTool(wikiTools, { type: "tool_use", id: "1", name: "edit_file", input: { path: ".polaris/wiki/x", old_string: "", new_string: "x" } }, { root, exec: async () => ({ stdout: "", stderr: "", code: 0, timedOut: false }), protectedPaths: [".polaris/wiki"] });
   assert.match(r.content, /read-only \(protected path\)/);
-});
-
-test("deleting a ticket is refused while its ingest run is active", async () => {
-  const x = await workspace("wiki7");
-  const { t } = await x.ticket("Busy");
-  await x.approve(t.id);
-  assert.equal((await call("DELETE", `/api/tickets/${t.id}`, x.cookie)).status, 409);
-  await x.idle();
-  assert.equal((await call("DELETE", `/api/tickets/${t.id}`, x.cookie)).status, 204);
 });
 
 let held: { x: Awaited<ReturnType<typeof workspace>>; a: string; b: string };

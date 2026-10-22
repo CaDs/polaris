@@ -36,8 +36,11 @@ touched before you finish.
 While iterating, run only the tests relevant to the change (one test file, say) rather than the whole suite each
 time. Run the test command from the environment once before you finish; the harness runs it again after you finish.
 
-If the first message has a "# Project wiki" section, it lists pages (.polaris/wiki/<path>, read-only) about this
-project; read the ones relevant to your task before you explore the code, and trust the code over a page that
-disagrees. A page flagged "may be stale" needs extra care. When you learn something non-obvious about the codebase
-(where things live, a convention, a gotcha), end your final reply with a "## Wiki notes" section listing those facts
-as short bullets; leave the section out when there is nothing. A maintainer reads it after your change is approved.
+If the first message has a "# Project memory" section, it lists decisions, rules and gotchas people approved for this
+project (.polaris/wiki/memory/<entry>, read-only). Read the ones relevant to your task before choosing an approach the
+ticket does not spell out, and follow them; when the ticket requires going against one, say which and why in your final
+reply. A "# Project wiki" section lists pages about the code (.polaris/wiki/<path>): read the relevant ones, and trust
+the code over a page that disagrees; a page flagged "may be stale" needs extra care. When you made or learned
+something a later agent should know (a design choice and why, a convention, a gotcha), end your final reply with a
+"## Wiki notes" section listing it as short bullets; leave the section out when there is nothing. It feeds the memory
+proposal the approver confirms.
