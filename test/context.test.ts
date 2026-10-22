@@ -278,6 +278,7 @@ test("provider/workspace context settings: defaults per kind, editable, validate
   assert.equal(compactThreshold(150_000, 1_000_000), 150_000); // workspace cap
   assert.equal(compactThreshold(150_000, 32_768), 22_937); // 70% of a small window
   assert.equal(compactThreshold(undefined, 400_000), 150_000);
+  assert.equal(compactThreshold(150_000, 262_144, true), 64_000); // a local model re-reads it all after a cache miss
   process.env.POLARIS_COMPACT_AT = "1000";
   assert.equal(compactThreshold(150_000, 1_000_000), 1000);
   delete process.env.POLARIS_COMPACT_AT;

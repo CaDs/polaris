@@ -197,7 +197,7 @@ test("repeat_call: a model that ignores the nudge is stopped with the reason", a
   assert.deepEqual(r.metrics.stuck, { turn: 7, signal: "repeat_call", action: "stop" });
 });
 
-test("no_progress: 8 read-only turns after a write nudge, 4 more stop; before any write only after turn 12; repeat_error", async () => {
+test("no_progress: 8 read-only turns after a write nudge, 4 more stop; before any write only after turn 20; repeat_error", async () => {
   const reads = (n: number) => Array.from({ length: n }, (_, i) => [use(`r${i}`, "read_file", { path: "a.txt", offset: i + 1, limit: 1 })]);
   const t = run([write, ...reads(19)], { budget: { maxTurns: 30, maxTokens: 1e6 } });
   const r = await t.done;
@@ -208,9 +208,9 @@ test("no_progress: 8 read-only turns after a write nudge, 4 more stop; before an
   assert.match(noteAt(t.fake, 9).join(), /^\[harness\] No progress: 8 turns .* make the change now/);
   assert.equal(r.reason, "stuck: no_progress (4 turns of only reads and searches since the last edit)");
 
-  const never = run(Array.from({ length: 20 }, (_, i) => [use(`n${i}`, "read_file", { path: `missing${i}.txt` })]), { budget: { maxTurns: 30, maxTokens: 1e6 } });
+  const never = run(Array.from({ length: 28 }, (_, i) => [use(`n${i}`, "read_file", { path: `missing${i}.txt` })]), { budget: { maxTurns: 40, maxTokens: 1e6 } });
   await never.done;
-  assert.deepEqual(stuckEvents(never.runId)[0], { turn: 13, signal: "no_progress", action: "nudge", detail: "13 turns of only reads and searches, no edit yet" });
+  assert.deepEqual(stuckEvents(never.runId)[0], { turn: 21, signal: "no_progress", action: "nudge", detail: "21 turns of only reads and searches, no edit yet" });
 
   const failing = run(Array.from({ length: 5 }, (_, i) => [use(`f${i}`, "edit_file", { path: "nope.txt", old_string: `x${i}`, new_string: "y" })]));
   await failing.done;

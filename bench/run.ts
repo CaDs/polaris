@@ -1,5 +1,5 @@
 // npm run bench -- --model <model> [--provider ollama|anthropic|openai|openrouter|litellm] [--api-key-env NAME] [--base-url URL]
-//                  [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N]
+//                  [--levels L1,L2] [--runs N] [--split 0|1] [--wiki 0|1] [--max-turns N] [--max-minutes N] [--max-hours N]
 //                  [--out bench/results/x.jsonl] [--tag <label>] [--server-dir <polaris checkout>] [--ollama URL]
 // npm run bench -- --check [--levels ...]   (no model: each level's base must fail the grader, base + answer key must pass)
 // Complexity ladder (bench/README.md): one Polaris server on a free port with a temp DB and data dir; per level and run a
@@ -213,6 +213,7 @@ if (import.meta.main) {
       wiki: { type: "string", default: "0" },
       "max-turns": { type: "string", default: "120" },
       "max-minutes": { type: "string", default: "60" },
+      "max-hours": { type: "string", default: "3" },
       out: { type: "string", default: "bench/results/results.jsonl" },
       tag: { type: "string" },
       "server-dir": { type: "string", default: resolve(BENCH, "..") },
@@ -265,8 +266,8 @@ if (import.meta.main) {
       log(`start ${l.level} run ${run} (${t.key})`);
       const t0 = Date.now();
       let s: Awaited<ReturnType<typeof settled>> | undefined;
-      // ponytail: fixed 3h ceiling per level (a split epic at the default budget fits); make it a flag if a level needs more.
-      while (Date.now() - t0 < 3 * 3600_000) {
+      // Wall-clock ceiling per level: 3 attempts at the default budget fit in 3 h, but a slow local model's review may not.
+      while (Date.now() - t0 < Number(o["max-hours"]) * 3600_000) {
         await sleep(15_000);
         s = await settled(api, t.id).catch((e) => (log(`poll: ${e.message}`), s));
         if (s?.done) break;
