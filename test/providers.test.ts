@@ -13,7 +13,7 @@ const bob = await user("bob");
 
 // Mock Anthropic-compatible server (also Ollama's /api/tags). Turn 1 of a task calls the shell tool, then it answers.
 // A task that mentions a previous failed attempt also creates ok.txt. mode "plain" never calls a tool.
-const ollama = { models: ["mock-a", "mock-b"], plain: false, models_seen: [] as string[] };
+const ollama = { models: ["mock-a", "mock-b"], plain: false, models_seen: [] as string[], thinking_seen: [] as unknown[] };
 const { srv, url: mock } = await listen(async (req, res) => {
   if (req.url === "/api/tags") return void res.end(JSON.stringify({ models: ollama.models.map((name) => ({ name })) }));
   if (req.url!.startsWith("/api/")) return void res.writeHead(404).end(); // /api/ps, /api/show: no window info, run falls back
@@ -21,6 +21,7 @@ const { srv, url: mock } = await listen(async (req, res) => {
   for await (const c of req) raw += c;
   const b = JSON.parse(raw);
   ollama.models_seen.push(b.model);
+  ollama.thinking_seen.push(b.thinking);
   const last = b.messages.at(-1).content[0];
   const task: string = b.messages[0].content[0].text;
   const tool = last.type !== "tool_result" && !ollama.plain && !!b.tools; // no tools: an M6 reflection
@@ -142,6 +143,15 @@ test("models and the tool-calling smoke test", async () => {
   const plain = (await call("POST", `/api/providers/${local}/test`, alice, { model: "mock-b" })).body;
   assert.deepEqual([plain.ok, plain.tool_call], [true, false]);
   ollama.plain = false;
+
+  // thinking "off" asks Ollama to skip the thinking pass; unset leaves the model's default.
+  assert.equal(ollama.thinking_seen.at(-1), undefined);
+  assert.deepEqual((await call("PATCH", `/api/providers/${local}`, alice, { options: { thinking: "off" } })).body.options, { thinking: "off" });
+  await call("POST", `/api/providers/${local}/test`, alice, { model: "mock-a" });
+  assert.deepEqual(ollama.thinking_seen.at(-1), { type: "disabled" });
+  for (const options of [{ thinking: "maybe" }, { data_collection: "allow" }])
+    assert.equal((await call("PATCH", `/api/providers/${local}`, alice, { options })).status, 400);
+  await call("PATCH", `/api/providers/${local}`, alice, { options: { thinking: "on" } });
   const dead = (await call("POST", "/api/providers", alice, { name: "Dead", kind: "ollama", base_url: "http://127.0.0.1:1" })).body.id;
   const bad = (await call("POST", `/api/providers/${dead}/test`, alice, { model: "m" })).body;
   assert.equal(bad.ok, false);

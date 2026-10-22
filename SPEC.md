@@ -243,6 +243,8 @@ summaries. Encrypted-only reasoning shows nothing.
   (migration 003, `providers.options` JSON): `deny` (default) sends `provider: {data_collection: "deny"}`, so only providers
   that neither retain nor train on prompts serve the request; `allow` lifts it. Attribution headers `HTTP-Referer` and
   `X-Title: Polaris`. Context window left at the default (128000): each model's `context_length` from the catalog.
+- **Ollama.** `options.thinking`: `off` sends `thinking: {type: "disabled"}`, so a reasoning model answers without a
+  thinking pass; `on` or unset leaves the model's default.
 - **LiteLLM.** Models: the proxy's `/v1/models` (its `model_list` aliases the key may use). Cost: unknown (priced from the
   table when the model is in it).
 - **Env fallback.** A workspace with no provider uses `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` only when it is one of the first account's

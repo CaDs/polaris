@@ -29,7 +29,7 @@ const cached = <T extends object>(xs: T[]) => xs.map((x, i) => (i === xs.length 
 // The request body. Prefix order: tools, system, messages. At most 3 of the 4 allowed breakpoints: end of tools, end of
 // system, and a moving one on the last block of the last message (so each turn reads the previous turn's prefix from cache).
 // Earlier messages are sent exactly as they were, never edited.
-export function requestBody(req: ProviderRequest) {
+export function requestBody(req: ProviderRequest, extra: object = {}) {
   const messages = req.messages.map((m) => ({ role: m.role, content: m.content.map(toApi).filter((b) => b !== undefined) }));
   const last = messages.at(-1)?.content;
   if (last?.length) last[last.length - 1] = { ...last[last.length - 1], cache_control: BREAKPOINT };
@@ -40,17 +40,18 @@ export function requestBody(req: ProviderRequest) {
     system: cached(req.system.map(toApi).filter((b) => b !== undefined)),
     ...(req.tools.length ? { tools: cached(req.tools.map((t) => stable(t) as object)) } : {}), // sorted keys: the tools prefix must serialize identically to hit the cache; none: M6 meta calls
     messages,
+    ...extra,
   };
 }
 
-export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeoutMs?: number }): Provider {
+export function anthropic(opts: { apiKey: string; baseUrl?: string; headersTimeoutMs?: number; extra?: object }): Provider {
   const secrets = opts.apiKey === "ollama" ? [] : [opts.apiKey]; // "ollama" is a placeholder, not a secret
   const url = `${(opts.baseUrl ?? "https://api.anthropic.com").replace(/\/$/, "")}/v1/messages`;
   async function once(req: ProviderRequest, onEvent: (e: StreamEvent) => void) {
     let raw: Record<string, number> = {};
     const usageOf = (): Usage => ({ input: raw.input_tokens ?? 0, output: raw.output_tokens ?? 0, cache_read: raw.cache_read_input_tokens ?? 0, cache_write: raw.cache_creation_input_tokens ?? 0 });
     try {
-    const body = requestBody(req);
+    const body = requestBody(req, opts.extra);
     let res: Response;
     try {
       res = await providerFetch(url, {
