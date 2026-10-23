@@ -9,7 +9,7 @@ import { createRun, eventLog, subscribe } from "../server/agent/events.ts";
 import { runAgent, type RunOptions } from "../server/agent/loop.ts";
 import { fakeProvider, type Turn } from "../server/agent/providers/fake.ts";
 import { hostExec, tools } from "../server/agent/tools.ts";
-import type { ToolUseBlock } from "../server/agent/types.ts";
+import { AgentError, type ToolUseBlock } from "../server/agent/types.ts";
 
 migrate();
 db.prepare("INSERT INTO organization (id, name, slug, createdAt) VALUES ('w', 'w', 'w', '2026-01-01')").run();
@@ -229,4 +229,25 @@ test("run metrics say where the time went: model, tools, and shell commands with
   const r = await t.done;
   assert.equal(r.status, "passed");
   assert.deepEqual([r.metrics.model_secs, r.metrics.tool_secs, r.metrics.shell_secs], [10, 3, 3]);
+});
+
+test("a reply the endpoint cut off mid-stream is asked for again, twice at most; a third cut fails the run", async () => {
+  const cut = () => { throw new AgentError("ProviderError", "stream ended before message_delta"); };
+  const ok = run([cut, cut, [{ type: "text", text: "done" }]]);
+  const r = await ok.done;
+  assert.equal(r.status, "passed");
+  assert.equal(ok.fake.requests.length, 3);
+  assert.equal(ok.fake.requests[2].messages.length, 1); // nothing of a cut reply was kept
+  const retries = events(ok.runId).filter((e) => e.type === "error").map((e) => JSON.parse(e.payload));
+  assert.deepEqual(retries.map((p) => [p.message, p.retrying]), [
+    ["stream ended before message_delta (asking again 1/2)", true],
+    ["stream ended before message_delta (asking again 2/2)", true],
+  ]);
+  const failed = run([cut, cut, cut, [{ type: "text", text: "never" }]]);
+  const f = await failed.done;
+  assert.deepEqual([f.status, f.reason, failed.fake.requests.length], ["failed", "ProviderError: stream ended before message_delta", 3]);
+  // Any other provider error is not asked again here.
+  const other = run([() => { throw new AgentError("ProviderError", "HTTP 400: bad request"); }, [{ type: "text", text: "never" }]]);
+  assert.equal((await other.done).status, "failed");
+  assert.equal(other.fake.requests.length, 1);
 });

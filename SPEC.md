@@ -202,7 +202,9 @@ never changed mid-conversation either (cache prefix, model behaviour).
   ids that are not a plain `.md` file name, are left out.
 - **Provider retries.** HTTP 429/500/502/503/504/529, "overloaded" and network errors are retried up to 4 times with
   exponential backoff (1 s base, ×2, ≤ 30 s) plus jitter, or the `retry-after` header when present. Each retry is an
-  `error` event with `retrying: true`. Never after output started streaming.
+  `error` event with `retrying: true`. Never after output started streaming. One exception, in the agent loop: a reply
+  the endpoint cut off mid-stream (`stream ended …`: Ollama closes the stream when it cannot parse the model's tool call) is
+  asked for again up to 2 times (`asking again n/2`, `retrying: true`); nothing of the cut reply is kept.
 
 ## Providers
 
