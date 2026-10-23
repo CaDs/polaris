@@ -54,7 +54,7 @@ test("M2: tickets, live agent run, cancel, theme, delete", async ({ page }) => {
 
   await page.getByRole("link", { name: "Board" }).click();
   await expect(column("review").getByRole("button", { name: /First ticket edited/ })).toBeVisible();
-  await expect(column("review")).toContainText("580 tok"); // 480 input/output + 40 cache reads + 60 background reflection
+  await expect(column("review")).toContainText("640 tok"); // 480 input/output + 40 cache reads + 60 reflection + 60 memory proposal (background)
 
   // A slow run can be cancelled; the ticket goes back to todo.
   await column("todo").getByRole("button", { name: /Slow ticket/ }).click();

@@ -17,7 +17,8 @@ import { activePrompt, currentLessons, gateFailure, lessonsAt, promptAt, recordE
 import { classifyRun, failureClass } from "./failures.ts";
 import { COMMAND_TIMEOUT, dataDir, openSandbox, removeStaleContainers, SANDBOX_TOOLS, type Sandbox } from "./sandbox.ts";
 import { findingsText, MAX_REVIEW_ROUNDS, REVIEWER_PROMPT, reviewerTools, reviewTask, type Review } from "./review.ts";
-import { finishCopy, headOf, materialize, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { finishCopy, headOf, materialize, memoryList, openCopy, pageList, WIKI_PROMPT, WIKI_PROTECTED, wikiSection, wikiSerial, wikiTampered, wikiTask, type Finished } from "./wiki.ts";
+import { proposeMemory, writeMemory, type MemoryItem } from "./memory.ts";
 import { notify, ticketKey, today, trackerHeader } from "./tracker.ts";
 import { writeWorkspaceSkills, WORKSPACE_SKILLS } from "./skills.ts";
 import { childrenOf, finalText, handoffRequest, handoffText, MAX_CHILDREN, MAX_ROUNDS, openChildren, OWN_RUNS, PLANNER_PROMPT, plannerTask, plannerTools, TREE, type Outcome } from "./planner.ts";
@@ -548,6 +549,34 @@ async function reflectOn(runId: string, ws: string, run: { provider_id: string |
   }
 }
 
+// The project memory proposal for a passing run (memory.ts): the wiki's own model when set, else the run's. The worktree still
+// holds the committed change. Never throws: a failure is the payload.
+async function memoryProposal(runId: string, t: TicketRow, s: ProjectSettings, run: RunRow, worktree: string, base: string, signal?: AbortSignal): Promise<EventPayloads["memory_proposal"]> {
+  try {
+    const own = phaseModel(s, "wiki");
+    const c = own ? choose({ workspace_id: s.workspace_id, provider_id: null, model: null } as TicketRow, s, undefined, own) : run;
+    const stored = c.provider_id ? providerById(c.provider_id) : undefined;
+    if (c.provider_id && !stored) throw new Error("the provider was deleted");
+    const provider = stored ? adapterFor(stored) : providerConfig({ model: c.model }).provider("");
+    const payloads = (sql: string, ...args: string[]) => (db.prepare(sql).all(...args) as { payload: string }[]).map((e) => JSON.parse(e.payload));
+    const input = {
+      ticket: { key: t.key, title: t.title, spec: t.spec ?? "" },
+      comments: (db.prepare("SELECT c.body, u.email FROM comments c JOIN user u ON u.id = c.author_id WHERE c.ticket_id = ? ORDER BY c.created_at").all(t.id) as { body: string; email: string }[]).map((c) => `${c.email}: ${c.body}`),
+      rejections: payloads("SELECT e.payload FROM events e JOIN runs r ON r.id = e.run_id WHERE r.ticket_id = ? AND e.type = 'review' ORDER BY r.rowid, e.seq", t.id)
+        .flatMap((p: EventPayloads["review"]) => (p.decision === "rejected" && p.note?.trim() ? [p.note.trim()] : [])),
+      findings: payloads("SELECT payload FROM events WHERE run_id = ? AND type = 'model_review' ORDER BY seq", runId)
+        .flatMap((p) => (Array.isArray(p.findings) ? p.findings.map((f: { file: string; problem: string; fix: string }) => `${f.file}: ${f.problem} → ${f.fix}`) : [])),
+      reply: finalReply(runId),
+      files: await changedPaths(worktree, base).catch(() => []),
+      diff: await git(worktree, ["diff", "--no-color", base, "--", ".", ...scratchPathspec]).catch(() => ""),
+      active: await memoryList(t.project_id),
+    };
+    return await withUsage({ workspaceId: t.workspace_id, runId, ticketId: t.id, purpose: "memory", background: true }, () => proposeMemory(provider, c.model, input, signal));
+  } catch (e) {
+    return { error: `memory proposal failed: ${(e as Error).message}` };
+  }
+}
+
 type Result = Omit<RunResult, "messages" | "metrics"> & { metrics?: RunResult["metrics"] };
 type Ctx = { signal: AbortSignal; log: ReturnType<typeof eventLog>; cap: () => void }; // cap: capCheck for this run (throws)
 // An agent call's events, minus the ones the pipeline writes itself once for the whole run.
@@ -856,6 +885,9 @@ async function execute(runId: string) {
     const infra = status === "failed" ? failureClass({ status, reason }) : null;
     if (!run.eval_run_id && s && !retry && status !== "cancelled" && !reason?.startsWith("SpendingCap:")) // reflecting is a model call too
       log({ type: "reflection", payload: infra === "provider_error" || infra === "environment" ? { skipped: infra } : await reflectOn(runId, t.workspace_id, run, { status, reason, turns }, undefined, signal) });
+    // Project memory: what this change settles, for the human to confirm when approving.
+    if (status === "passed" && !run.eval_run_id && s?.wiki && diffBase && !signal.aborted)
+      log({ type: "memory_proposal", payload: await memoryProposal(runId, t, s, run, worktree, diffBase, signal) });
     if (t.parent_id && !run.eval_run_id && !retry && status !== "cancelled") {
       const text = handoffText(reply, status === "passed" ? undefined : `${reason}${gateOutput ? `\n\`\`\`\n${truncate(gateOutput, 1000, "tail")}\n\`\`\`` : ""}`);
       db.prepare("UPDATE tickets SET handoff = ? WHERE id = ?").run(text, t.id);
@@ -1048,7 +1080,7 @@ const WIKI_FIX_BUDGET = { maxTurns: 10, maxTokens: BUDGET.maxTokens };
 const WIKI_FIX_ROUNDS = 2; // more conversation rounds to fix what the mechanical lint found, then the result is rejected
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 
-// Bootstrap and lint runs belong to no ticket: they hang off one hidden ticket per project (ingest runs hang off the ticket they ingest).
+// Maintainer runs belong to no ticket: they hang off one hidden ticket per project.
 function wikiTicket(projectId: string) {
   const row = db.prepare("SELECT id FROM tickets WHERE project_id = ? AND hidden = 1").get(projectId) as { id: string } | undefined;
   if (row) return row.id;
@@ -1066,31 +1098,25 @@ function finalReply(runId: string) {
   return "";
 }
 
-// Queues a wiki maintainer run of a project through the normal FIFO queue (runs of one project then still go one at a time:
-// wikiSerial). ingest: the merge `sha` of the approved ticket's run `run` (its provider and model are used, else the
-// workspace default). bootstrap / lint: the base branch head, run for the workspace default; lint needs at least one
-// stale page. Errors are user-facing.
-export async function enqueueWiki(projectId: string, op: "ingest" | "bootstrap" | "lint", from?: { ticketId: string; sha: string; run: string }): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
+// Queues a wiki maintainer run of a project (Build wiki / Refresh stale pages) through the normal FIFO queue (runs of one
+// project then still go one at a time: wikiSerial), on the base branch head, for the wiki's own model, else the workspace
+// default; lint needs at least one stale page. Errors are user-facing.
+export async function enqueueWiki(projectId: string, op: "bootstrap" | "lint"): Promise<{ runId: string } | { error: string; status: 400 | 409 }> {
   const s = projectSettings(projectId);
   if (!s) return { error: "not_found", status: 400 };
   if (!s.wiki) return { error: "The project wiki is off. Turn it on in Settings.", status: 409 };
-  if (!from) {
-    const repo = await inspectRepo(s.repo_path, s.base_branch);
-    if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in the project's settings.`, status: 400 };
-    if (op === "lint" && !(await pageList(projectId, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
-  }
+  const repo = await inspectRepo(s.repo_path, s.base_branch);
+  if ("error" in repo) return { error: `Repository settings are invalid: ${repo.error}. Fix them in the project's settings.`, status: 400 };
+  if (op === "lint" && !(await pageList(projectId, { repo: s.repo_path, base: (await headOf(s))! })).pages.some((p) => p.stale)) return { error: "No page is stale.", status: 409 };
   let chosen: ReturnType<typeof choose>;
   try {
-    const prev = from && (db.prepare("SELECT provider_id, model FROM runs WHERE id = ?").get(from.run) as { provider_id: string | null; model: string });
-    // The wiki's own model when set; else the model of the run it documents; else the workspace default.
-    const own = phaseModel(s, "wiki");
-    chosen = !own && prev && (!prev.provider_id || providerById(prev.provider_id)) ? prev : choose({ workspace_id: s.workspace_id, provider_id: null, model: null } as TicketRow, s, undefined, own);
+    chosen = choose({ workspace_id: s.workspace_id, provider_id: null, model: null } as TicketRow, s, undefined, phaseModel(s, "wiki"));
   } catch (e) {
     return { error: (e as Error).message, status: 400 };
   }
-  const ticketId = from?.ticketId ?? wikiTicket(projectId);
+  const ticketId = wikiTicket(projectId);
   const attempt = (db.prepare("SELECT COUNT(*) AS n FROM runs WHERE ticket_id = ? AND role = 'wiki'").get(ticketId) as { n: number }).n + 1;
-  const runId = createRun({ ticketId, model: chosen.model, attempt, providerId: chosen.provider_id, role: "wiki", wikiOp: op, baseSha: from?.sha });
+  const runId = createRun({ ticketId, model: chosen.model, attempt, providerId: chosen.provider_id, role: "wiki", wikiOp: op });
   pump();
   return { runId };
 }
@@ -1101,7 +1127,7 @@ export async function enqueueWiki(projectId: string, op: "ingest" | "bootstrap" 
 // WIKI_FIX_ROUNDS more rounds in the same conversation), then the result is rejected and nothing is committed. Runs of one
 // project go one at a time, so each sees the previous one's commit. The ticket is never touched.
 async function maintain(runId: string, run: RunRow, t: TicketRow) {
-  const op = run.wiki_op as "ingest" | "bootstrap" | "lint";
+  const op = run.wiki_op as "bootstrap" | "lint";
   const pid = t.project_id;
   const s = projectSettings(pid);
   const root = join(dataDir(), "worktrees", runId);
@@ -1110,7 +1136,7 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
     await wikiSerial(pid, async () => {
       if (signal.aborted) throw new AgentError("UserAborted", "cancelled");
       mkdirSync(root, { recursive: true });
-      const sha = op === "ingest" ? run.base_sha : await headOf(s);
+      const sha = await headOf(s);
       if (!sha) throw new AgentError("UnexpectedEnvironment", `base branch ${s.base_branch} not found`);
       await addDetached(s.repo_path, sha, join(root, "code"));
       db.prepare("UPDATE runs SET worktree = ?, base_sha = ? WHERE id = ?").run(root, sha, runId);
@@ -1123,18 +1149,10 @@ async function maintain(runId: string, run: RunRow, t: TicketRow) {
       let task: string;
       let message: string;
       let entry: string;
-      if (op === "ingest") {
-        const range = [`${sha}^1`, sha];
-        const diff = await git(s.repo_path, ["diff", "--no-color", ...range, "--", ".", ...scratchPathspec]).catch((e) => `(diff unavailable: ${e.message})`);
-        const files = (await git(s.repo_path, ["diff", "--name-only", ...range]).catch(() => "")).split("\n").filter(Boolean);
-        const approved = reviewRun(t.id);
-        task = wikiTask("ingest", { repo, sha, index, ticket: t, files, diff, reply: approved ? finalReply(approved.id) : "" });
-        message = oneLine(`ingest ${t.key}: ${t.title} (merge ${sha8})`);
-        entry = `## [${today()}] ingest | ${t.key} ${oneLine(t.title)} (merge ${sha8})`;
-      } else if (op === "bootstrap") {
+      if (op === "bootstrap") {
         task = wikiTask("bootstrap", { repo, sha, index });
         message = `bootstrap: ${repo} at ${s.base_branch} ${sha8}`;
-        entry = `## [${today()}] ingest | bootstrap from ${s.base_branch} (${sha8})`;
+        entry = `## [${today()}] bootstrap | from ${s.base_branch} (${sha8})`;
       } else {
         const stale = (await pageList(pid, { repo: s.repo_path, base: sha })).pages.flatMap((p) => (p.stale ? [{ path: p.path, why: p.stale }] : []));
         if (!stale.length) {
@@ -1214,8 +1232,15 @@ function serial<T>(fn: () => Promise<T>) {
   return job;
 }
 
-// An epic merges nothing (its children were merged one by one): approving it marks it done.
-export async function approve(ticketId: string): Promise<{ error: string } | { merge_sha?: string }> {
+// The latest memory proposal of a run, or undefined.
+export function memoryProposalOf(runId: string) {
+  const e = db.prepare("SELECT payload FROM events WHERE run_id = ? AND type = 'memory_proposal' ORDER BY seq DESC LIMIT 1").get(runId) as { payload: string } | undefined;
+  return e && (JSON.parse(e.payload) as EventPayloads["memory_proposal"]);
+}
+
+// An epic merges nothing (its children were merged one by one): approving it marks it done. memory: the entries the human
+// confirmed (validated by the caller); undefined = the run's proposal as it is (auto-approve, an API call without it).
+export async function approve(ticketId: string, memory?: MemoryItem[]): Promise<{ error: string } | { merge_sha?: string }> {
   const t = ticketRow(ticketId)!;
   if (t.kind === "epic") {
     const last = db.prepare("SELECT id FROM runs WHERE ticket_id = ? ORDER BY rowid DESC LIMIT 1").get(ticketId) as { id: string } | undefined;
@@ -1228,13 +1253,16 @@ export async function approve(ticketId: string): Promise<{ error: string } | { m
   if (!s || !r) return { error: "no passed run to merge" };
   const merge_sha = await serial(() => merge(s.repo_path, s.base_branch, r.branch, `Merge ${r.branch}: ${t.key} ${t.title}`));
   eventLog(r.id)({ type: "review", payload: { decision: "approved", merge_sha } });
+  // Project memory: the approval writes what the human confirmed (before the ticket is done, so its transcript replays it). A
+  // failure is logged on the approved run; the approval stands.
+  const proposal = memoryProposalOf(r.id);
+  const items = memory ?? (proposal && "items" in proposal ? proposal.items : []);
+  if (s.wiki && items.length) {
+    const w = await writeMemory(t.project_id, items, t.key, `${t.key} ${oneLine(t.title)} (merge ${merge_sha.slice(0, 8)})`).catch((e: Error) => ({ problems: [e.message] }));
+    eventLog(r.id)({ type: "memory", payload: "sha" in w ? { paths: w.paths!, commit: w.sha } : { error: "problems" in w ? w.problems.join("; ") : "nothing to write" } });
+  }
   await cleanupTicket(ticketId);
   setTicket(ticketId, "done");
-  // M10: the wiki learns from approved work only. A failure to queue is logged on the approved run; the approval stands.
-  if (s.wiki) {
-    const w = await enqueueWiki(t.project_id, "ingest", { ticketId, sha: merge_sha, run: r.id }).catch((e: Error) => ({ error: e.message }));
-    if ("error" in w) eventLog(r.id)({ type: "error", payload: { kind: "UnexpectedEnvironment", message: `wiki ingest not queued: ${w.error}` } });
-  }
   return { merge_sha };
 }
 

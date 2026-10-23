@@ -1,8 +1,9 @@
 # Wiki schema
 
-This wiki is the project's memory: short, interlinked markdown pages that agents read before they explore the code.
-An LLM maintainer keeps it up to date after each approved change; humans can edit any page. Code is the source of
-truth: when a page and the code disagree, the page is wrong.
+This wiki is the project's memory. Its core is `memory/`: the decisions, rules and gotchas people approved, so agents
+make choices consistent with them. Around it, optional pages map the code; an LLM maintainer builds or refreshes them
+on request, and humans can edit any page. Code is the source of truth for what the code does: when a page and the code
+disagree, the page is wrong.
 
 ## Files
 
@@ -15,8 +16,27 @@ truth: when a page and the code disagree, the page is wrong.
   `file:line` pointers, invariants, how it talks to the other parts.
 - `howto/<task>.md`: how to do a common change here (add an endpoint, add a migration, run one test, release).
 - `gotchas.md`: non-obvious facts that cost time: traps, naming oddities, things that look wrong but are intended.
+- `memory/NNNN-slug.md`: one approved decision, rule or gotcha each, written when a ticket is approved (from a proposal
+  the approver confirmed) or added by a person. Not listed in `index.md`: agents get the active entries in their task.
 
-Nothing else is allowed: root `.md` files, `modules/*.md` and `howto/*.md` only.
+Nothing else is allowed: root `.md` files, `modules/*.md`, `howto/*.md` and `memory/NNNN-slug.md` only.
+
+## Memory entries
+
+```
+---
+title: The decision, rule or gotcha as one sentence
+kind: decision | rule | gotcha
+status: active | superseded
+superseded_by: memory/NNNN-slug.md   (only when superseded)
+source: POL-12 (the approved ticket) or the email of the person who added it
+date: YYYY-MM-DD
+---
+What was decided, why, and what was turned down.
+```
+
+An entry is never rewritten to say something else: a new entry supersedes it, and the old one stays for the record with
+`status: superseded`. At most 3000 characters.
 
 ## Content pages
 

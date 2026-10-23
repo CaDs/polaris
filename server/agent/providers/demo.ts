@@ -24,11 +24,14 @@ import { fakeProvider } from "./fake.ts";
 // harness splits it; the "Split:" epic (its spec still says SPLIT-ME) plans part1.txt and part2.txt with their own test
 // commands. EPIC-GATE-FAIL plans only a.txt; the test sets a workspace test command that also needs fix.txt, so the epic
 // gate refuses the first complete_epic and the planner creates "Fix: create fix.txt". SPLIT-CHILD passes SPLIT-ME on to a.txt.
-// M10: a system prompt starting "You maintain a project wiki" is the wiki maintainer (wikiScript). An ingest writes
-// modules/demo.md (sources: the files the merged diff touched), a bootstrap overview.md, a lint re-verifies its first stale
-// page; each also lists the page in index.md. A page that exists is updated line by line (sources, verified, updated).
+// M10: a system prompt starting "You maintain a project wiki" is the wiki maintainer (wikiScript). A bootstrap writes
+// overview.md, a lint re-verifies its first stale page; each also lists the page in index.md. A page that exists is updated
+// line by line (sources, verified, updated). WIKI-BAD / WIKI-FIXME in the wiki's index.md make the maintainer produce an
+// invalid wiki that it never fixes / fixes in the first fix round.
 // WIKI-WRITE in a ticket makes a worker write .polaris/wiki/x with the shell (the gate must fail it); WIKI-NOTES adds a
-// "## Wiki notes" section to its final reply; WIKI-BAD / WIKI-FIXME make the maintainer of its ingest produce an invalid wiki.
+// "## Wiki notes" section to its final reply.
+// Project memory: a request with submit_memory (demoMemory) proposes one decision per "REMEMBER: <title>" line of the
+// ticket, superseding the entry named by a "SUPERSEDE: <path>" line; else nothing.
 // M13: requests with propose_ticket are chat turns (chatScript), one step per request: read README.md, propose a ticket
 // titled after the user's message, then reply. A message containing NO-PROPOSAL only replies; REPLACE-P<n> replaces P<n>.
 const use = (id: string, name: string, input: Record<string, unknown>): ToolUseBlock => ({ type: "tool_use", id, name, input });
@@ -152,14 +155,14 @@ function childScript(ticket: string) {
 function wikiScript(task: string) {
   const sha = /Commit for `verified`: (\w+)/.exec(task)![1];
   const day = /today is (\S+)/.exec(task)![1];
-  const op = /# Task: (ingest|build|re-verify)/.exec(task)![1];
-  const files = op === "ingest" ? (/# Files changed\n\n([\s\S]*?)\n\n# Merged diff/.exec(task)?.[1] ?? "").split("\n").filter((f) => f && f !== "(none)") : op === "build" ? ["README.md"] : [];
-  const page = op === "ingest" ? "modules/demo.md" : op === "build" ? "overview.md" : /^- (\S+) — changed/m.exec(task)![1];
-  const title = op === "build" ? "Overview" : "Demo module";
+  const op = /# Task: (build|re-verify)/.exec(task)![1];
+  const files = op === "build" ? ["README.md"] : [];
+  const page = op === "build" ? "overview.md" : /^- (\S+) — changed/m.exec(task)![1];
+  const title = "Overview";
   const usage = { input: 80, output: 15, cache_read: 5, cache_write: 0 };
   const line = (req: ProviderRequest, key: string) => new RegExp(`^\\d+\t(${key}: .*)$`, "m").exec(lastResult(req))?.[1] ?? `${key}: `;
   const first = [say("Reading the index."), use("w1", "read_file", { path: "wiki/index.md" })];
-  // WIKI-BAD / WIKI-FIXME in the ticket: a page without frontmatter and not in the index; the fix rounds leave it (BAD) or repair it (FIXME).
+  // WIKI-BAD / WIKI-FIXME in the index: a page without frontmatter and not in the index; the fix rounds leave it (BAD) or repair it (FIXME).
   const bad = /WIKI-(BAD|FIXME)/.exec(task)?.[1];
   if (bad) {
     const page = { path: "wiki/modules/bad.md", old_string: "no frontmatter\n" };
@@ -214,6 +217,15 @@ function demoMeta(req: ProviderRequest): ProviderResponse {
     text = (lines.includes(bullet) ? lines : [...lines, bullet]).join("\n");
   }
   return { message: { role: "assistant", content: [{ type: "text", text }] }, usage: { input: 50, output: 10, cache_read: 0, cache_write: 0 }, stopReason: "end_turn" };
+}
+
+// Project memory (a request with submit_memory): one decision per REMEMBER line of the ticket.
+function demoMemory(req: ProviderRequest): ProviderResponse {
+  const msg = req.messages[0].content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+  const ticket = msg.slice(0, msg.indexOf("# Comments"));
+  const supersedes = /SUPERSEDE: (memory\/\S+)/.exec(ticket)?.[1];
+  const entries = [...ticket.matchAll(/REMEMBER: (.+)/g)].map((m) => ({ kind: "decision", title: m[1].trim(), body: "Recorded by the demo memory proposer.", ...(supersedes ? { supersedes } : {}) }));
+  return { message: { role: "assistant", content: [use("mem1", "submit_memory", { entries })] }, usage: { input: 50, output: 10, cache_read: 0, cache_write: 0 }, stopReason: "tool_use" };
 }
 
 // M12 failure mining (a request with submit_mined_ticket): a repo verdict naming the dossier's class and count.
@@ -288,6 +300,7 @@ export function demoProvider(task: string, delayMs = 400): Provider {
     async stream(req, onEvent) {
       if (!req.tools.length) return demoMeta(req);
       if (req.tools.some((t) => t.name === "submit_mined_ticket")) return demoMine(req);
+      if (req.tools.some((t) => t.name === "submit_memory")) return demoMemory(req);
       const retry = /Previous attempt (failed|was stopped)/.test(task);
       const always = req.system.some((b) => b.type === "text" && b.text.includes("ALWAYS-CREATE-OK"));
       const resumed = req.messages.at(-1)!.content.some((b) => b.type === "text" && b.text.startsWith("# Model review"));

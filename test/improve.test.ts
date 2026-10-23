@@ -81,7 +81,7 @@ test("reflection: a separate no-tools conversation, capped, injected into the ne
   assert.deepEqual([v1.version, v1.source, v1.ticket_key, v1.run_attempt, v1.state], [1, "reflection", "RIT-1", 1, "pending"]);
   const ev = events(one.run.id);
   assert.deepEqual(ev.find((e) => e.type === "reflection")!.p, { lessons_id: v1.id, version: 1, chars: v1.body.length, unchanged: false, usage: { input: 10, output: 5, cache_read: 0, cache_write: 0 }, accounted: true });
-  assert.deepEqual(ev.slice(-3).map((e) => e.type), ["reflection", "run_metrics", "run_finished"]); // before run_finished: live in the transcript
+  assert.deepEqual(ev.slice(-4).map((e) => e.type), ["reflection", "memory_proposal", "run_metrics", "run_finished"]); // before run_finished: live in the transcript
   assert.equal(runRow(one.run.id).tokens_out, 5); // the reflection is not booked on the run
 
   // The next run does not see the candidate (POL-10): nobody accepted it yet.
@@ -134,7 +134,7 @@ test("a reject with a note is reflected on too; the event lands after run_finish
   assert.match(seriesDigest(run.id, undefined, "keep it smaller"), /^Ticket: REX-1 too much\nFinal status: rejected after 1 attempt\nReviewer note: keep it smaller\n/);
   const sse = await (await app.request(`/api/runs/${run.id}/events`, { headers: { cookie: rex, origin } })).text();
   const types = sse.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)).type);
-  assert.deepEqual(types.slice(-5), ["reflection", "run_metrics", "run_finished", "review", "reflection"]);
+  assert.deepEqual(types.slice(-6), ["reflection", "memory_proposal", "run_metrics", "run_finished", "review", "reflection"]);
 });
 
 // Shared by the eval tests below: alice's repo (gate `test -f ok.txt`) and her approved case.
@@ -347,7 +347,7 @@ test("a running run keeps its prompt version; runs queued after a promotion use 
   await waitFor(w.cookie, next.ticket.id, "review");
   mock.gate = Promise.resolve();
 
-  const heldReqs = mock.bodies.filter((b) => b.tools && b.messages[0].content[0].text.includes("hold this one"));
+  const heldReqs = mock.bodies.filter((b) => b.tools && !b.tools.some((t: any) => t.name === "submit_memory") && b.messages[0].content[0].text.includes("hold this one")); // the run's own calls
   assert.equal(heldReqs.length, 2);
   assert.ok(heldReqs.every((b) => b.system[0].text === worker)); // static within the run
   assert.equal(firstRequest("after the switch").system[0].text, "SECOND PROMPT");

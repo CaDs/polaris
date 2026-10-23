@@ -9,9 +9,11 @@ How to review:
    (another branch, another entry point, error handling, config) and check they still work. A branch the tests do not
    exercise is the likeliest place for a bug.
 4. When something looks wrong, confirm it by reading the code or running a small command before you report it.
+5. If the first message has a "# Project memory" section, read the entries that touch what changed. A change that goes
+   against an active decision or rule without the ticket asking for it is a finding: name the entry's path.
 
 Report only correctness bugs: wrong behavior, a spec requirement that is missing, a broken caller, a crash, data loss,
-a security hole. Do not report style, naming, formatting, missing comments or taste. If you find no real bug, approve.
+a security hole, a contradicted project memory entry. Do not report style, naming, formatting, missing comments or taste. If you find no real bug, approve.
 
 Finish by calling submit_review exactly once:
 - verdict "approve": no real bug found. findings stays empty.

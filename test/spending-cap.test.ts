@@ -76,7 +76,7 @@ test("workspace cap reached: the next run fails before it starts, with the reaso
   await call("POST", `/api/tickets/${t.id}/runs`, w.cookie);
   await w.is(t.id, "review");
   u = (await call("GET", "/api/usage", w.cookie)).body.cap;
-  assert.deepEqual([u.usd, u.tokens, u.used_tokens], [null, null, 1_000_500 + 4 * 130 + 60]);
+  assert.deepEqual([u.usd, u.tokens, u.used_tokens], [null, null, 1_000_500 + 4 * 130 + 60 + 60]); // the run, its reflection, its memory proposal
 });
 
 test("fix round refused at the boundary: the call in flight finishes, the run fails with the reason; 80% warns once per run", async () => {

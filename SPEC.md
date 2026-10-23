@@ -556,15 +556,18 @@ whose planner splits it into tickets of a size the worker model can finish. Migr
 
 ## Project wiki (M10)
 
-Per-project memory as an "LLM wiki" (Karpathy): a persistent, interlinked markdown wiki that an LLM maintains and agents read
-with their normal tools. Workspace setting `wiki` (migration 011, default on); off = no snapshot, no section, no ingest, no
-bootstrap (existing pages stay readable in the UI).
+Per-project memory, kept as a git repo of markdown files that agents read with their normal tools. Its core is the
+**project memory** (`memory/`): the decisions, rules and gotchas people approved, written when a ticket is approved, so
+later agents make choices consistent with them. Around it, optional code pages (an "LLM wiki", Karpathy) that a maintainer
+builds or refreshes on request. Workspace setting `wiki` (migration 011, default on); off = no snapshot, no sections, no
+memory proposals or writes, no bootstrap (existing pages stay readable in the UI).
 
 - **Storage.** A git repository per project at `<dataDir>/wikis/<project_id>/`, created with an initial commit on first use,
   owned by the harness (`server/wiki.ts`). Files: `SCHEMA.md` (conventions, seeded from `prompts/wiki-schema.md`, humans may
   edit), `index.md` (one line per page: `- [Title](path.md) — summary`; ≤ 6,000 chars), `log.md` (append-only,
-  `## [date] ingest | KEY Title (merge sha8)` / `lint | …` / `edit | path by user`; **written by the harness**, never by the agent:
-  the agent's changes to it are undone before the entry is appended), `overview.md`, `gotchas.md`, `modules/*.md`, `howto/*.md`.
+  `## [date] memory | KEY Title (merge sha8): paths` / `bootstrap | …` / `lint | …` / `edit | path by user`; **written by the harness**, never by the agent:
+  the agent's changes to it are undone before the entry is appended), `overview.md`, `gotchas.md`, `modules/*.md`, `howto/*.md`,
+  and the memory entries `memory/NNNN-slug.md` (below; not in the index).
   Each content page has frontmatter `title`, `sources: [repo-relative paths]`, `verified: <sha of the project repo>`, `updated`;
   ≤ 3,500 chars (the maintainer splits longer pages). Reads always use the repo's HEAD (`git show`), never the working tree.
 - **Reading (worker, planner, reviewer; not frozen eval cases).** At run start the HEAD is exported into the run's worktree at
@@ -575,54 +578,80 @@ bootstrap (existing pages stay readable in the UI).
   mistaken for a code file), with a
   ` ⚠ may be stale: <files>` flag on each page whose `sources` changed in the project repo between its `verified` sha and the run's
   base sha (`git diff --name-only <verified> <base> -- <sources>`; a verified sha the repo does not have, or a source missing at it, = stale; no sources =
-  fresh). Absent when the wiki has no pages. Per-run text only in the first user message (the cache prefix rule). A wiki that
-  cannot be read does not stop the run (an `error` event, no section).
-- **Writing: one serialized maintainer, only from approved work.** Approve (button or auto-approve of children; not an epic's)
-  queues a **wiki ingest**: a run with `role = 'wiki'`, `wiki_op = 'ingest'`, `base_sha` = the merge commit, on the ticket
-  (listed in its run list as "wiki", never the default transcript, not counted in its status or totals), with the approved
-  run's provider and model (else the workspace default). It goes through the normal FIFO queue and concurrency slots (but stays queued
-  while another wiki run of its project runs, so it never holds a slot just to wait), and `wikiSerial` makes runs of one
-  project (ingest, bootstrap, lint, human edit) go strictly one at a time, so each sees the previous commit. Environment: a temp dir with `code/` (detached, read-only checkout of the merge commit) and `wiki/` (a clone of
-  the wiki repo). Tools: `read_file`, `search`, `edit_file`, `delete_file` only; `code/` and `wiki/.git` (its config could run commands on the host) are protected paths, so `edit_file` and `delete_file` there fail. **No
-  shell**: a host shell could write anywhere, and the planner works the same way. System prompt `prompts/wiki.md` (static).
-  First message: environment, ticket title and spec, the files changed, the merged diff (15,000 chars), the worker's final reply
-  (which may contain a `## Wiki notes` section; worker.md asks for one when it learned something non-obvious) and the current
-  index. Budget 30 turns.
+  fresh). Absent when the wiki has no pages. After it (or alone), `# Project memory` (below). Per-run text only in the first
+  user message (the cache prefix rule). A wiki that cannot be read does not stop the run (an `error` event, no section).
+- **Project memory** (`server/memory.ts`). One file per entry, `memory/NNNN-slug.md` (numbered in order), frontmatter `title`
+  (the decision itself, one line), `kind` (`decision` | `rule` | `gotcha`), `status` (`active` | `superseded`), `superseded_by`
+  (when superseded), `source` (the approved ticket's key, or the email of whoever added it), `date`; the body says what, why and
+  what was turned down; ≤ 3,000 chars. Entries are never rewritten by the harness: a newer entry supersedes an older one,
+  which stays, marked. Writers:
+  - **Proposal.** When a worker run passes (not an eval case) with the wiki on, one model call (`prompts/memory.md`, tool
+    `submit_memory`, usage purpose `memory`, background) gets the ticket, its comments, notes from rejected attempts, the
+    model review's findings, the worker's final reply (worker.md asks for a `## Wiki notes` section), the changed files, the
+    diff (8,000 chars) and the active entries, and proposes 0–3 entries (validated: kind, a one-line title ≤ 160 chars, a body
+    ≤ 2,000 chars, `supersedes` naming an active entry). The wiki's own model when set, else the run's. Event `memory_proposal
+    {items} | {error}`, before `run_finished`; a failure never fails the run.
+  - **Approval.** The review card shows the proposal under **Will remember** (each entry: a tick, an editable title and text).
+    Approve sends the ticked, edited entries (`POST …/approve {memory: [...]}`, validated like the proposal: 400 otherwise);
+    without `memory` (auto-approve of children, an API call) the proposal is written as it is. The approval writes them in one
+    wiki commit `memory: KEY title (merge sha8)` (log `memory | …: paths`), marks superseded entries, and logs `memory {paths,
+    commit} | {error}` on the approved run, before the ticket is done; a failure leaves the approval standing.
+  - **Remember this** (`POST …/wiki/memory {kind, title, body, supersedes?}`, 201 / 400 / 409 when the wiki is off): a person
+    adds an entry; commit `memory: added by <email>`.
+  - Humans can edit an entry like any page (checked the same way). The maintainer never can: `wiki/memory` is a protected path
+    of its runs.
+
+  Agents get `# Project memory`: an instruction (read the relevant entries, follow them, say which and why when the task
+  requires going against one) and one line per active entry, newest first (`- kind: title (.polaris/wiki/memory/<file>,
+  source)`), up to 6,000 chars, then `- … N older entries: search .polaris/wiki/memory`. The reviewer prompt makes a change
+  that contradicts an active decision or rule (without the ticket asking for it) a finding.
+- **Maintainer runs (code pages, on request).** **Build wiki** and **Refresh stale pages** (below) queue a run with
+  `role = 'wiki'` on the base branch head, for the wiki's own model, else the workspace default. Approving no longer queues one
+  (it did before the project memory: those old `ingest` runs stay listed). Runs go through the normal FIFO queue and
+  concurrency slots (but stay queued while another wiki run of the project runs, so they never hold a slot just to wait), and
+  `wikiSerial` makes the writers of one project (maintainer runs, memory writes, human edits) go strictly one at a time.
+  Environment: a temp dir with `code/` (detached, read-only checkout) and `wiki/` (a clone of the wiki repo). Tools:
+  `read_file`, `search`, `edit_file`, `delete_file` only; `code/`, `wiki/.git` (its config could run commands on the host) and
+  `wiki/memory` are protected paths, so `edit_file` and `delete_file` there fail. **No shell**: a host shell could write
+  anywhere, and the planner works the same way. System prompt `prompts/wiki.md` (static).
 - **Validation and commit.** After the agent ends, the harness lints the clone (below). Problems go back into the same conversation
   (`resume`, ≤ 2 more rounds of ≤ 10 turns), then the result is rejected: nothing is committed, the run fails, a `wiki` event
-  lists the problems and an `error` event says so; the approval stands. A valid change is committed in the clone with
-  `ingest KEY: title (merge sha8)` and fast-forwarded into the wiki repo; nothing changed = no commit (`wiki {unchanged}`).
-  Event `wiki {op, commit | unchanged | problems}`. An ingest that cannot be queued is logged on the approved run.
+  lists the problems and an `error` event says so. A valid change is committed in the clone and fast-forwarded into the wiki
+  repo; nothing changed = no commit (`wiki {unchanged}`). Event `wiki {op, commit | unchanged | problems}`.
 - **Mechanical lint** (`lintDir`, on every commit and the **Lint** button): every content page has valid frontmatter (title, a
   `sources: [...]` list of repo-relative paths, hex `verified`); every content page is linked from `index.md` and every index link is
-  a content page; page and index size caps; only root `.md` files, `modules/*.md` and `howto/*.md` exist (no other files, no
-  symlinks). On commit (maintainer and human edit) also: each page's `verified` is a commit of the project repo and each of its
+  a content page; page and index size caps; every memory entry has valid frontmatter, its `superseded_by` exists, ≤ 3,000 chars;
+  only root `.md` files, `modules/*.md`, `howto/*.md` and `memory/NNNN-slug.md` exist (no other files, no symlinks). On commit (maintainer and human edit) also: each page's `verified` is a commit of the project repo and each of its
   `sources` exists at that commit.
 - **Bootstrap** (**Build wiki**, `POST …/wiki/bootstrap`): the same flow on the base branch head, task: overview, a page per main
   part, howto pages (from README/AGENTS.md/CLAUDE.md and the code), gotchas, written as it goes (overview first from the
   README and file tree, then a module page after reading each part: a maintainer that read 17 turns without writing was
-  stopped as stuck), with 60 turns instead of the other operations' 30. Commit `bootstrap: <repo> at <branch> <sha8>`.
+  stopped as stuck), with 60 turns instead of the other operations' 30. Commit `bootstrap: <repo> at <branch> <sha8>` (log
+  `bootstrap | from <branch> (sha8)`).
   **Refresh stale pages** (`POST …/wiki/lint`, 409 when nothing is stale): the task lists the pages stale against the base head;
   the maintainer re-verifies each against the code and fixes or deletes it. Commit `lint: re-verify N stale pages at <sha8>`. A
   lint run that finds nothing stale when it starts (an earlier run or an edit fixed it) passes with `wiki {unchanged}`.
-  Bootstrap and lint runs have no ticket: they hang off one hidden ticket per project (`tickets.hidden`, number -1).
-- **UI.** The **Wiki** nav entry (`web/Wiki.tsx`): the index with stale flags, a page viewer (small markdown subset, internal links)
+  Maintainer runs have no ticket: they hang off one hidden ticket per project (`tickets.hidden`, number -1).
+- **UI.** The **Wiki** nav entry (`web/Wiki.tsx`): the **Memory** (active entries with kind, source and date; superseded ones
+  folded; **Remember this**: kind, title, text, the entry it replaces), the index with stale flags, a page viewer (small markdown subset, internal links)
   and editor (`PUT` with the page as opened as `base`, refused if the page changed since → mechanical lint → commit
   `edit <path> by <email>` + log entry), history with a per-commit diff, the maintainer
   runs with their transcripts, the buttons above. Transcripts show a "First message" disclosure for each conversation.
 - **API** (under `/api/projects/:id/wiki`, a project of the caller's workspace, else 404; page paths are checked against the
   allowed layout and resolved with `resolveIn`): `GET …/wiki` (index, pages with stale flags, log, lint problems of HEAD,
-  recent maintainer runs), `GET|PUT …/wiki/page`, `GET …/wiki/history`, `GET …/wiki/diff?sha=`, `POST …/wiki/bootstrap`,
-  `POST …/wiki/lint`. Humans can edit existing
-  pages only (new pages come from the maintainer; `log.md` is the harness's).
-- **Demo provider.** The maintainer is recognized by its system prompt. Ingest writes `modules/demo.md` (sources = the files the
-  merged diff touched, verified = the merge sha) and lists it in the index; bootstrap writes `overview.md`; lint re-verifies the first
-  stale page; an existing page is updated line by line. `WIKI-NOTES` in a ticket adds a `## Wiki notes` section to the worker's reply,
-  `WIKI-WRITE` makes the worker write `.polaris/wiki/x` with the shell (the gate must fail it), `WIKI-BAD` / `WIKI-FIXME` make the
-  maintainer of its ingest produce an invalid wiki that it never fixes / fixes in the first fix round.
-- **Not built, on purpose:** embeddings or search over the wiki (the index plus `read_file`/`rg` is enough at this size); the
-  worker writing the wiki directly (only approved, linted, serialized changes land); LLM lint on a schedule (a button);
-  multi-file human edits (a new page has to be linked from the index in the same commit, so humans edit existing pages).
+  recent maintainer runs, the memory entries), `GET|PUT …/wiki/page`, `GET …/wiki/history`, `GET …/wiki/diff?sha=`,
+  `POST …/wiki/bootstrap`, `POST …/wiki/lint`, `POST …/wiki/memory`. Humans can edit existing pages (memory entries included)
+  and add memory entries; new code pages come from the maintainer; `log.md` is the harness's.
+- **Demo provider.** The maintainer is recognized by its system prompt. Bootstrap writes `overview.md`; lint re-verifies the first
+  stale page; an existing page is updated line by line. `WIKI-BAD` / `WIKI-FIXME` in the wiki's `index.md` make the maintainer
+  produce an invalid wiki that it never fixes / fixes in the first fix round. `WIKI-NOTES` in a ticket adds a `## Wiki notes`
+  section to the worker's reply, `WIKI-WRITE` makes the worker write `.polaris/wiki/x` with the shell (the gate must fail it). A
+  memory proposal (`submit_memory`) proposes a decision per `REMEMBER: <title>` line of the ticket, superseding the entry named
+  by a `SUPERSEDE: <path>` line.
+- **Not built, on purpose:** embeddings or search over the wiki (the index, the memory list plus `read_file`/`rg` is enough at
+  this size); the worker writing the wiki directly (only approved, linted, serialized changes land); capturing work merged
+  outside Polaris (the memory learns from Polaris approvals and people only); LLM lint on a schedule (a button); multi-file
+  human edits (a new page has to be linked from the index in the same commit, so humans edit existing pages).
 
 ## Chat (M13)
 

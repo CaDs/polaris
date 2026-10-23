@@ -7,6 +7,7 @@ import { Alert, COLUMNS, Confirm, Dialog, Icon, ModelPicker, StatusIcon, api, co
 // spent (epics): what its spending caps measure, the whole tree's runs incl. cached tokens.
 type Detail = Ticket & { usage?: TokenSummary; background_usage?: TokenSummary; runs: Run[]; children?: Child[]; cap_usd: number | null; cap_tokens: number | null; spent?: { usd: number; tokens: number } };
 type Ev = { seq: number; type: string; payload: any; created_at?: number };
+type MemoryItem = { kind: string; title: string; body: string; supersedes?: string };
 // A running model call's output, sent live and never stored (server/agent/events.ts liveStream).
 type LivePart = { kind: "text" | "reasoning"; text: string } | { kind: "tool"; id: string; name: string };
 
@@ -110,7 +111,7 @@ export function TicketView({ ticket, reload, close, open }: { ticket: Ticket; re
   }
 
   const runs = detail?.runs ?? [];
-  const current = runs.find((r) => r.id === selected) ?? runs.findLast((r) => r.role !== "wiki") ?? runs.at(-1); // M10: a wiki ingest after approval is listed, not the default
+  const current = runs.find((r) => r.id === selected) ?? runs.findLast((r) => r.role !== "wiki") ?? runs.at(-1); // M10: a wiki ingest after approval (before the project memory) is listed, not the default
   const running = ticket.status === "running";
   const epic = ticket.kind === "epic";
   const reviewing = ticket.status === "review";
@@ -598,6 +599,11 @@ export function Transcript({ run, onFinish, autoFollow = true }: { run: Run; onF
               <ul>{p.problems.map((x: string) => <li key={x}>{x}</li>)}</ul>
             </details>
           ) : <div key={e.seq} className="note ok"><strong>Wiki {p.op}</strong> · {p.commit ? <>committed <span className="mono">{p.commit.slice(0, 8)}</span></> : "nothing to change"}</div>;
+        if (e.type === "memory_proposal")
+          return <p key={e.seq} className="muted">{p.error ? `Memory proposal failed: ${p.error}` : p.items.length ? `Memory proposal: ${p.items.map((m: MemoryItem) => m.title).join("; ")}` : "Memory proposal: nothing new"}</p>;
+        if (e.type === "memory")
+          return p.error ? <p key={e.seq} className="error">Project memory not written: {p.error}</p>
+            : <div key={e.seq} className="note ok"><strong>Remembered</strong> · {p.paths.join(", ")} · committed <span className="mono">{p.commit.slice(0, 8)}</span></div>;
         if (e.type === "error") return <p key={e.seq} className={p.retrying ? "warn" : "error"}>{p.kind}: {p.message}</p>;
         if (e.type === "stuck")
           return (
@@ -705,6 +711,11 @@ function Review({ ticket, reload, d, diffError, runs, protectedPaths }: {
     : !test.passed ? "Tests failed" : `${testCounts(test.output ?? "") ?? "passed (exit 0)"} · ${test.flaky ? "flaky: passed on a re-run" : fixed ? "after a fix round" : "1st try"}${test.flaky && fixed ? " · after a fix round" : ""}`;
   const reviewText = !review ? "No model review" : review.verdict === "error" ? `Model review failed: ${review.message ?? "unknown error"}`
     : review.verdict === "approve" ? `approved by ${reviewer ?? "unknown model"}, round ${review.round}` : `Changes requested, round ${review.round}`;
+  // Project memory: the run's proposal, which the reviewer can edit or untick before approving.
+  const proposal = events.findLast((e) => e.type === "memory_proposal")?.payload;
+  const [memory, setMemory] = useState<(MemoryItem & { keep: boolean })[] | null>(null);
+  useEffect(() => setMemory(proposal?.items ? proposal.items.map((m: MemoryItem) => ({ ...m, keep: true })) : null), [proposal]);
+  const editMemory = (i: number, patch: Partial<MemoryItem & { keep: boolean }>) => setMemory((all) => all!.map((m, j) => (j === i ? { ...m, ...patch } : m)));
 
   async function decide(action: "approve" | "reject", body?: object) {
     setBusy(true);
@@ -747,10 +758,29 @@ function Review({ ticket, reload, d, diffError, runs, protectedPaths }: {
         </dl>
         <h4>What the agent did</h4>
         {summary ? <Markdown text={summary} /> : <p className="muted">No agent summary recorded.</p>}
+        {proposal && (
+          <section aria-label="Will remember">
+            <h4>Will remember</h4>
+            {proposal.error ? <p className="muted">No memory proposal: {proposal.error}</p>
+              : !memory?.length ? <p className="muted">Nothing new for the project memory.</p>
+              : <>
+                <p className="muted">Approving adds the ticked entries to the project memory; later agents follow them.</p>
+                {memory.map((m, i) => (
+                  <div key={i} className="memory-item">
+                    <label className="check">
+                      <input type="checkbox" checked={m.keep} onChange={(e) => editMemory(i, { keep: e.target.checked })} /> {m.kind}{m.supersedes && <span className="muted"> · replaces {m.supersedes}</span>}
+                    </label>
+                    <input aria-label={`Memory ${i + 1} title`} value={m.title} disabled={!m.keep} onChange={(e) => editMemory(i, { title: e.target.value })} />
+                    <textarea aria-label={`Memory ${i + 1} text`} rows={3} value={m.body} disabled={!m.keep} onChange={(e) => editMemory(i, { body: e.target.value })} />
+                  </div>
+                ))}
+              </>}
+          </section>
+        )}
       </>}
       <div className="row end">
         <button className="btn" onClick={() => setRejecting(true)} disabled={busy}>Reject</button>
-        <button className="btn primary" onClick={() => decide("approve")} disabled={busy || (!epic && !d)}>{epic ? "Approve" : "Approve & merge"}</button>
+        <button className="btn primary" onClick={() => decide("approve", memory ? { memory: memory.filter((m) => m.keep).map(({ keep, ...m }) => m) } : undefined)} disabled={busy || (!epic && !d)}>{epic ? "Approve" : "Approve & merge"}</button>
       </div>
       {rejecting && (
         <Dialog title="Reject changes?" onClose={() => setRejecting(false)}>

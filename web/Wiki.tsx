@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { linkHost, normalizeMarkdown } from "./markdown.ts";
@@ -6,13 +6,15 @@ import { Transcript } from "./TicketView.tsx";
 import { Alert, Icon, Loading, api, when, type Run } from "./ui.tsx";
 import type { ProjectRef } from "./tracker.tsx";
 
-// M10: the project wiki. The index with stale flags, a page viewer/editor, the wiki repo's history, and the maintainer runs.
+// M10: the project wiki. The project memory (approved decisions, rules, gotchas) with "Remember this", the index with stale
+// flags, a page viewer/editor, the wiki repo's history, and the maintainer runs.
 type PageInfo = { path: string; title: string; summary: string; stale: string | null; verified: string; updated: string };
 type WikiRun = {
   id: string; wiki_op: "ingest" | "bootstrap" | "lint"; status: string; started_at: number | null; ticket_key: string | null; ticket_number: number | null;
   result: { commit?: string; unchanged?: boolean; problems?: string[] } | null;
 };
-type Data = { enabled: boolean; index: string; pages: PageInfo[]; log: string; problems: string[]; runs: WikiRun[] };
+type Memory = { path: string; title: string; kind: string; status: "active" | "superseded"; superseded_by: string; source: string; date: string };
+type Data = { enabled: boolean; index: string; pages: PageInfo[]; memory: Memory[]; log: string; problems: string[]; runs: WikiRun[] };
 type Commit = { sha: string; subject: string; date: string };
 
 const resolvePath = (from: string, to: string) => {
@@ -88,6 +90,59 @@ function PageView({ base, path, open, reload }: { base: string; path: string; op
   );
 }
 
+// The project memory: active entries first, superseded ones folded away; "Remember this" adds one.
+function MemorySection({ base, memory, enabled, open, reload }: { base: string; memory: Memory[]; enabled: boolean; open: (path: string) => void; reload: () => Promise<void> }) {
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState("");
+  const active = memory.filter((m) => m.status === "active");
+  const old = memory.filter((m) => m.status === "superseded");
+  async function add(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.currentTarget)) as Record<string, string>;
+    setError("");
+    try {
+      await api(`${base}/memory`, "POST", { kind: f.kind, title: f.title, body: f.body, ...(f.supersedes ? { supersedes: f.supersedes } : {}) });
+      setAdding(false);
+      await reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  const item = (m: Memory) => (
+    <li key={m.path}>
+      <span className="muted">{m.kind}</span> <button className="link" onClick={() => open(m.path)}>{m.title}</button>
+      <span className="muted"> · {m.source} · {m.date}{m.superseded_by && ` · replaced by ${m.superseded_by}`}</span>
+    </li>
+  );
+  return (
+    <section aria-label="Memory">
+      <div className="row">
+        <h3 className="grow">Memory</h3>
+        {!adding && <button className="btn" onClick={() => setAdding(true)} disabled={!enabled}>Remember this</button>}
+      </div>
+      {adding && (
+        <form onSubmit={add} aria-label="Remember this">
+          <label>Kind <select name="kind" defaultValue="rule"><option value="rule">rule</option><option value="decision">decision</option><option value="gotcha">gotcha</option></select></label>
+          <label>Title <input name="title" required maxLength={160} placeholder="The decision or rule as one sentence" autoFocus /></label>
+          <label>Text <textarea name="body" rows={4} required maxLength={2000} placeholder="What, why, and what was turned down" /></label>
+          {active.length > 0 && (
+            <label>Replaces <select name="supersedes" defaultValue=""><option value="">nothing</option>{active.map((m) => <option key={m.path} value={m.path}>{m.title}</option>)}</select></label>
+          )}
+          <Alert error={error} />
+          <div className="row">
+            <button className="btn primary">Remember</button>
+            <button type="button" className="btn" onClick={() => (setAdding(false), setError(""))}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {active.length === 0 ? (
+        <p className="muted">Nothing remembered yet. Approving a ticket proposes what it decided; you confirm it in the review.</p>
+      ) : <ul className="plain">{active.map(item)}</ul>}
+      {old.length > 0 && <details><summary className="muted">{old.length} superseded</summary><ul className="plain">{old.map(item)}</ul></details>}
+    </section>
+  );
+}
+
 function History({ base, commits }: { base: string; commits: Commit[] }) {
   const [sha, setSha] = useState<string | null>(null);
   const [diff, setDiff] = useState("");
@@ -153,7 +208,7 @@ export function Wiki({ project }: { project: ProjectRef }) {
   const stale = d.pages.filter((p) => p.stale);
   return (
     <div className="wiki">
-      {!d.enabled && <p className="warn">The project wiki is off (Settings): runs get no wiki and approved work is not ingested. What is here stays readable.</p>}
+      {!d.enabled && <p className="warn">The project wiki is off (Settings): runs get no wiki or memory, and approvals remember nothing. What is here stays readable.</p>}
       <div className="row">
         <button className="btn primary" onClick={() => start("bootstrap")} disabled={!d.enabled || !!active}>Build wiki</button>
         <button className="btn" onClick={() => start("lint")} disabled={!d.enabled || !!active || !stale.length}>Refresh stale pages</button>
@@ -164,10 +219,12 @@ export function Wiki({ project }: { project: ProjectRef }) {
       <Alert error={error} />
       {linted && d.problems.length > 0 && <ul aria-label="Lint problems">{d.problems.map((p) => <li key={p} className="error">{p}</li>)}</ul>}
 
+      <MemorySection base={base} memory={d.memory} enabled={d.enabled} open={setPath} reload={load} />
+
       <section aria-label="Index">
         <h3>Index</h3>
         {d.pages.length === 0 ? (
-          <p className="muted">No pages yet. Build the wiki from the code, or approve a ticket: the maintainer writes the first pages from it.</p>
+          <p className="muted">No pages about the code. Build wiki writes them from the code; Refresh stale pages re-checks them after the code changes.</p>
         ) : (
           <ul className="plain">
             {d.pages.map((p) => (

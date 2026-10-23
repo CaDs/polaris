@@ -369,8 +369,8 @@ test("a compacting run through the pipeline: spill + history stay out of commit 
   assert.deepEqual([run.tokens_in, run.tokens_out, run.tokens_cached], [1400, 100, 4200]);
   const u = (await call("GET", "/api/usage", cookie)).body;
   assert.deepEqual([u.execution.runs, u.execution.tokens_in, u.execution.tokens_out, u.execution.tokens_cached, u.execution.cache_hit_rate], [1, 1400, 100, 4200, 0.75]);
-  assert.equal(u.background.tokens_total, 60);
-  assert.equal(u.totals.tokens_total, u.execution.tokens_total + 60);
+  assert.equal(u.background.tokens_total, 120); // the reflection and the memory proposal, 60 each
+  assert.equal(u.totals.tokens_total, u.execution.tokens_total + 120);
   assert.equal(u.tickets[0].key, "FRA-1");
   assert.equal(u.models[0].model, "demo");
 });

@@ -75,7 +75,7 @@ test("a fake run stores events, moves the ticket to review and matches totals", 
   assert.ok(frames.some((e) => e.type === "live" && e.parts.some((p: any) => p.kind === "text")));
   const types = seen.map((e) => e.type);
   assert.deepEqual(types.slice(0, 3), ["setup", "setup", "setup"]); // worktree, sandbox (no setup command), context
-  assert.deepEqual(types.slice(-5), ["test_result", "commit", "reflection", "run_metrics", "run_finished"]);
+  assert.deepEqual(types.slice(-6), ["test_result", "commit", "reflection", "memory_proposal", "run_metrics", "run_finished"]);
   assert.deepEqual(seen.filter((e) => e.type === "tool_call").map((e) => e.payload.name), ["edit_file", "shell", "read_file"]);
 
   const ticket = await waitFor(alice, t.body.id, "review");
