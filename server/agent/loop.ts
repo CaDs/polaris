@@ -34,6 +34,7 @@ export type RunResult = { status: RunStatus; reason?: string; turns: number; usa
 
 const user = (text: string): Msg => ({ role: "user", content: [{ type: "text", text }] });
 const MAX_CONTINUES = 2;
+const CUT_RETRIES = 2; // a reply the endpoint cut off mid-stream: asked for again this many times
 
 // Stuck monitor, checked after each turn's tool calls: the first detection nudges (a [harness] note with the results), the
 // next ends the run failed with `stuck: <signal> (<detail>)`. Counters restart at the nudge and per runAgent call (resume).
@@ -113,10 +114,21 @@ export async function runAgent(o: RunOptions): Promise<RunResult> {
       return { signal: "no_progress", detail: `${idle} turns of only reads and searches${wrote ? " since the last edit" : ", no edit yet"}` };
   }
 
-  // One model call: appends the reply to the current conversation and books its usage.
+  // One model call: appends the reply to the current conversation and books its usage. A reply the endpoint cut off
+  // mid-stream (Ollama closes the stream when it can't parse the model's tool call) is asked for again, up to CUT_RETRIES
+  // times: provider retries stop once output has streamed, but nothing of a cut reply is kept.
   async function turn(summary = false) {
     const t0 = now();
-    const res = await usagePurpose(summary ? "compaction" : "", () => o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream));
+    const ask = () => usagePurpose(summary ? "compaction" : "", () => o.provider.stream({ system, messages, tools: o.tools.map((t) => t.def), model: o.model, cacheKey: o.cacheKey, signal: o.signal }, stream));
+    let res: Awaited<ReturnType<typeof ask>>;
+    for (let cut = 0; ; cut++)
+      try {
+        res = await ask();
+        break;
+      } catch (e) {
+        if (!(e instanceof AgentError && e.kind === "ProviderError" && /^stream ended /.test(e.message)) || cut >= CUT_RETRIES || o.signal?.aborted) throw e;
+        o.onEvent({ type: "error", payload: { kind: "ProviderError", message: `${e.message} (asking again ${cut + 1}/${CUT_RETRIES})`, retrying: true } });
+      }
     ms.model += now() - t0;
     turns++;
     messages.push(res.message);
