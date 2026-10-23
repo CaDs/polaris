@@ -15,6 +15,7 @@ data
 # test output
 test-results
 playwright-report
+bench/results/
 
 # Polaris's scratch folders when it works on this repo (.polaris/skills stays tracked)
 .polaris/outputs/
